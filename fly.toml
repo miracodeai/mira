@@ -1,6 +1,7 @@
 app = "mira"
 
 [build]
+  image = "ghcr.io/mira-reviewer/mira:latest"
 
 [http_service]
   internal_port = 8000

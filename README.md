@@ -12,30 +12,37 @@ Mira reviews your pull requests using any LLM (via [LiteLLM](https://github.com/
 - **CLI**: Review PRs or diffs from the command line
 - **Configurable**: `.mira.yml` for per-repo settings
 
-## Installation
-
-```bash
-pip install mira-reviewer
-```
-
 ## Quick Start
 
-### CLI
+### GitHub App (self-hosted)
 
-Review a PR:
+Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
+
+**1. Create a GitHub App** at [github.com/settings/apps/new](https://github.com/settings/apps/new):
+- Webhook URL: `https://your-server.com/webhook`
+- Permissions: Pull Requests (read+write), Contents (read), Issues (read+write)
+- Events: Pull requests, Issue comments
+- Generate a private key (.pem)
+
+**2. Deploy with Docker:**
 
 ```bash
-export GITHUB_TOKEN="ghp_..."
-export OPENAI_API_KEY="sk-..."
-
-mira review --pr https://github.com/owner/repo/pull/123
+docker run -p 8000:8000 \
+  -e MIRA_GITHUB_APP_ID=123456 \
+  -e MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)" \
+  -e MIRA_WEBHOOK_SECRET=your-secret \
+  -e OPENAI_API_KEY=sk-... \
+  ghcr.io/mira-reviewer/mira:latest
 ```
 
-Review a diff from stdin:
+Or deploy to a platform:
 
-```bash
-git diff main | mira review --stdin --dry-run
-```
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/xxx)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+**3. Install the app** on your repos — every PR gets auto-reviewed.
+
+**Chat with Mira:** Comment `@mira-bot <question>` on any PR to ask about the code.
 
 ### GitHub Action
 
@@ -60,42 +67,26 @@ jobs:
           api_key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-### GitHub App (self-hosted)
-
-Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
-
-**1. Create a GitHub App** at [github.com/settings/apps/new](https://github.com/settings/apps/new):
-- Webhook URL: `https://your-server.com/webhook`
-- Permissions: Pull Requests (read+write), Contents (read), Issues (read+write)
-- Events: Pull requests, Issue comments
-- Generate a private key (.pem)
-
-**2. Deploy:**
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/xxx)
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
-
-Or run anywhere with Docker:
+### CLI
 
 ```bash
-docker run -p 8000:8000 \
-  -e MIRA_GITHUB_APP_ID=123456 \
-  -e MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)" \
-  -e MIRA_WEBHOOK_SECRET=your-secret \
-  -e OPENAI_API_KEY=sk-... \
-  ghcr.io/mira-reviewer/mira
+pip install mira-reviewer
 ```
 
-Or run directly:
+Review a PR:
 
 ```bash
-pip install mira-reviewer[serve]
-mira serve --app-id 123456 --private-key @private-key.pem --webhook-secret your-secret
+export GITHUB_TOKEN="ghp_..."
+export OPENAI_API_KEY="sk-..."
+
+mira review --pr https://github.com/owner/repo/pull/123
 ```
 
-**3. Install the app** on your repos — every PR gets auto-reviewed.
+Review a diff from stdin:
 
-**Chat with Mira:** Comment `@mira-bot <question>` on any PR to ask about the code.
+```bash
+git diff main | mira review --stdin --dry-run
+```
 
 ## Configuration
 
@@ -137,8 +128,7 @@ Options:
 ```bash
 git clone https://github.com/mira-reviewer/mira.git
 cd mira
-pip install -e .
-pip install pytest pytest-asyncio pytest-cov pytest-mock ruff mypy
+pip install -e ".[dev,serve]"
 
 # Run tests
 pytest tests/ -v
@@ -147,7 +137,7 @@ pytest tests/ -v
 ruff check src/ tests/
 
 # Type check
-mypy src/mira/
+mypy src/mira/ --ignore-missing-imports
 ```
 
 ## License

@@ -1,5 +1,9 @@
 [build]
-builder = "dockerfile"
+builder = "nixpacks"
+nixpacksConfigPath = ""
+
+[build.dockerImage]
+image = "ghcr.io/mira-reviewer/mira:latest"
 
 [deploy]
 healthcheckPath = "/health"

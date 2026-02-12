@@ -1,7 +1,9 @@
 services:
   - type: web
     name: mira
-    runtime: docker
+    runtime: image
+    image:
+      url: ghcr.io/mira-reviewer/mira:latest
     healthCheckPath: /health
     envVars:
       - key: MIRA_GITHUB_APP_ID
