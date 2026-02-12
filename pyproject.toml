@@ -42,6 +42,7 @@ dev = [
     "pytest-cov>=4.1",
     "pytest-mock>=3.12",
     "ruff>=0.4",
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]
@@ -81,7 +82,3 @@ warn_unused_configs = true
 module = ["litellm.*", "unidiff.*", "github.*"]
 ignore_missing_imports = true
 
-[dependency-groups]
-dev = [
-    "types-pyyaml>=6.0.12.20250915",
-]
