@@ -112,10 +112,10 @@ class GitHubProvider(BaseProvider):
             return
 
         # Build inline comments (no retry needed for local formatting)
-        review_comments = []
+        review_comments: list[dict[str, str | int]] = []
         for comment in result.comments:
             body = _format_comment_body(comment)
-            rc = {
+            rc: dict[str, str | int] = {
                 "path": comment.path,
                 "body": body,
             }
@@ -151,7 +151,7 @@ class GitHubProvider(BaseProvider):
                 commit=latest_commit,
                 body=review_body,
                 event="COMMENT",
-                comments=review_comments,
+                comments=review_comments,  # type: ignore[arg-type]
             )
 
         try:

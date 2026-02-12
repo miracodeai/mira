@@ -14,7 +14,7 @@ from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.exceptions import MiraError
 from mira.llm.provider import LLMProvider
-from mira.models import ReviewResult
+from mira.models import ReviewResult, Severity
 
 
 def _format_text(result: ReviewResult) -> str:
@@ -105,7 +105,6 @@ def review(
     if not pr_url and not use_stdin:
         raise click.UsageError("Provide --pr <url> or --stdin")
 
-    # Build config overrides
     overrides: dict[str, object] = {}
     if model:
         overrides["llm.model"] = model
@@ -115,46 +114,34 @@ def review(
         overrides["filter.confidence_threshold"] = confidence
 
     try:
-        config = load_config(config_path, overrides)  # type: ignore[arg-type]
+        config = load_config(config_path, overrides)
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
     llm = LLMProvider(config.llm)
 
-    provider = None
-    if pr_url and not dry_run:
+    github_provider = None
+    if pr_url:
         if not github_token:
             raise click.UsageError(
                 "--github-token or GITHUB_TOKEN env var is required for PR review"
             )
         from mira.providers.github import GitHubProvider
 
-        provider = GitHubProvider(github_token)
+        github_provider = GitHubProvider(github_token)
 
-    # For dry-run with PR, we still need a provider to fetch the diff
-    fetch_provider = None
-    if pr_url:
-        token = github_token or ""
-        if token:
-            from mira.providers.github import GitHubProvider
-
-            fetch_provider = GitHubProvider(token)
-        elif not use_stdin:
-            raise click.UsageError("--github-token or GITHUB_TOKEN is required to fetch PR diff")
-
-    engine = ReviewEngine(config=config, llm=llm, provider=provider)
+    engine = ReviewEngine(config=config, llm=llm, provider=None if dry_run else github_provider)
 
     try:
         if use_stdin:
             diff_text = sys.stdin.read()
             result = asyncio.run(engine.review_diff(diff_text))
         else:
-            # For dry-run: use fetch_provider to get info/diff, but don't post
-            if dry_run and fetch_provider:
+            if dry_run and github_provider:
 
                 async def _dry_run_review() -> ReviewResult:
-                    pr_info = await fetch_provider.get_pr_info(pr_url)  # type: ignore[arg-type]
-                    diff_text = await fetch_provider.get_pr_diff(pr_info)
+                    pr_info = await github_provider.get_pr_info(pr_url)  # type: ignore[arg-type]
+                    diff_text = await github_provider.get_pr_diff(pr_info)
                     return await engine._review_diff_internal(
                         diff_text,
                         pr_title=pr_info.title,
@@ -167,12 +154,11 @@ def review(
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
-    # Output
     if output_format == "json":
         click.echo(_format_json(result))
     else:
         click.echo(_format_text(result))
 
     # Exit with non-zero if blockers found
-    if any(c.severity.name == "BLOCKER" for c in result.comments):
+    if any(c.severity >= Severity.BLOCKER for c in result.comments):
         sys.exit(1)

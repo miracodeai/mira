@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 import unidiff
 
 from mira.exceptions import DiffParseError
@@ -58,10 +60,7 @@ _EXTENSION_LANGUAGE_MAP: dict[str, str] = {
 
 def _detect_language(path: str) -> str:
     """Detect programming language from file extension."""
-    for ext, lang in _EXTENSION_LANGUAGE_MAP.items():
-        if path.endswith(ext):
-            return lang
-    return ""
+    return _EXTENSION_LANGUAGE_MAP.get(PurePosixPath(path).suffix, "")
 
 
 def _determine_change_type(patched_file: unidiff.PatchedFile) -> FileChangeType:

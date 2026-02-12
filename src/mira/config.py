@@ -80,6 +80,18 @@ def find_config_file(start_dir: Path | None = None) -> Path | None:
     return None
 
 
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """Read and parse a YAML config file, returning the top-level dict."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+        parsed = yaml.safe_load(raw)
+        if parsed and isinstance(parsed, dict):
+            return dict(parsed)
+        return {}
+    except yaml.YAMLError as e:
+        raise ConfigError(f"Invalid YAML in {path}: {e}") from e
+
+
 def load_config(
     config_path: Path | str | None = None,
     overrides: dict[str, Any] | None = None,
@@ -91,23 +103,11 @@ def load_config(
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"Config file not found: {path}")
-        try:
-            raw = path.read_text(encoding="utf-8")
-            parsed = yaml.safe_load(raw)
-            if parsed and isinstance(parsed, dict):
-                data = parsed
-        except yaml.YAMLError as e:
-            raise ConfigError(f"Invalid YAML in {path}: {e}") from e
+        data = _load_yaml(path)
     else:
         found = find_config_file()
         if found:
-            try:
-                raw = found.read_text(encoding="utf-8")
-                parsed = yaml.safe_load(raw)
-                if parsed and isinstance(parsed, dict):
-                    data = parsed
-            except yaml.YAMLError as e:
-                raise ConfigError(f"Invalid YAML in {found}: {e}") from e
+            data = _load_yaml(found)
 
     if overrides:
         for key, value in overrides.items():

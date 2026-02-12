@@ -69,12 +69,7 @@ def _deduplicate(
 
     kept: list[ReviewComment] = []
     for comment in comments:
-        is_dup = False
-        for existing in kept:
-            if _is_duplicate(comment, existing, title_threshold):
-                is_dup = True
-                break
-        if not is_dup:
+        if not any(_is_duplicate(comment, existing, title_threshold) for existing in kept):
             kept.append(comment)
 
     return kept
@@ -91,17 +86,8 @@ def filter_noise(comments: list[ReviewComment], config: FilterConfig) -> list[Re
     """
     min_severity = Severity.from_str(config.min_severity)
 
-    # 1. Confidence threshold
     result = [c for c in comments if c.confidence >= config.confidence_threshold]
-
-    # 2. Minimum severity
     result = [c for c in result if c.severity >= min_severity]
-
-    # 3. Sort: severity desc, then confidence desc
     result.sort(key=lambda c: (c.severity, c.confidence), reverse=True)
-
-    # 4. Deduplicate (keeps first = highest quality after sort)
     result = _deduplicate(result)
-
-    # 5. Cap
     return result[: config.max_comments]

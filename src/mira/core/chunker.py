@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mira.models import FileDiff, ReviewChunk
@@ -103,13 +104,4 @@ def _truncate_file(file_diff: FileDiff, max_tokens: int) -> FileDiff:
     if not kept_hunks and file_diff.hunks:
         kept_hunks = [file_diff.hunks[0]]
 
-    return FileDiff(
-        path=file_diff.path,
-        change_type=file_diff.change_type,
-        hunks=kept_hunks,
-        language=file_diff.language,
-        old_path=file_diff.old_path,
-        is_binary=file_diff.is_binary,
-        added_lines=file_diff.added_lines,
-        deleted_lines=file_diff.deleted_lines,
-    )
+    return replace(file_diff, hunks=kept_hunks)

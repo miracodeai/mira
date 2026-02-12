@@ -29,7 +29,7 @@ class LLMProvider:
     )
     async def _call_llm(self, model: str, messages: list[dict[str, str]], json_mode: bool) -> str:
         """Make a single LLM call with retries."""
-        kwargs: dict = {
+        kwargs: dict[str, object] = {
             "model": model,
             "messages": messages,
             "temperature": self.config.temperature,
@@ -79,7 +79,7 @@ class LLMProvider:
     def count_tokens(self, text: str) -> int:
         """Count tokens in text using litellm's token counter."""
         try:
-            return litellm.token_counter(model=self.config.model, text=text)
+            return int(litellm.token_counter(model=self.config.model, text=text))
         except Exception:
             return len(text) // 4
 

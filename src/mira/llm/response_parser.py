@@ -7,6 +7,7 @@ import re
 
 from pydantic import BaseModel, Field
 
+from mira.core.context import extract_hunk_lines
 from mira.exceptions import ResponseParseError
 from mira.models import FileDiff, ReviewComment, Severity
 
@@ -66,8 +67,6 @@ def parse_llm_response(raw_text: str) -> LLMReviewResponse:
 
 def _build_hunk_text_index(files: list[FileDiff]) -> dict[str, str]:
     """Map each file path to its concatenated hunk content for lookup."""
-    from mira.core.context import extract_hunk_lines
-
     return {f.path: extract_hunk_lines(f) for f in files}
 
 

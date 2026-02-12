@@ -31,10 +31,9 @@ def _is_generated(file_diff: FileDiff) -> bool:
 def _matches_any_pattern(path: str, patterns: list[str]) -> bool:
     """Check if path matches any of the glob patterns."""
     filename = path.rsplit("/", 1)[-1] if "/" in path else path
-    for pattern in patterns:
-        if fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(filename, pattern):
-            return True
-    return False
+    return any(
+        fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(filename, pattern) for pattern in patterns
+    )
 
 
 def _sort_priority(file_diff: FileDiff) -> tuple[int, int]:

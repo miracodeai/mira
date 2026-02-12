@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from mira.models import FileDiff, HunkInfo
 
 
@@ -40,18 +42,7 @@ def expand_context(files: list[FileDiff], context_lines: int = 3) -> list[FileDi
             else:
                 merged.append(hunk)
 
-        result.append(
-            FileDiff(
-                path=f.path,
-                change_type=f.change_type,
-                hunks=merged,
-                language=f.language,
-                old_path=f.old_path,
-                is_binary=f.is_binary,
-                added_lines=f.added_lines,
-                deleted_lines=f.deleted_lines,
-            )
-        )
+        result.append(replace(f, hunks=merged))
 
     return result
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 from mira.models import ReviewComment, Severity
 
@@ -73,28 +74,23 @@ def classify_severity(comment: ReviewComment) -> ReviewComment:
     text = f"{comment.title} {comment.body}".lower()
     is_security = comment.category == "security"
 
-    # Exploitable vulnerabilities — upgrade to BLOCKER
     is_exploitable = any(kw in text for kw in _EXPLOITABLE_KEYWORDS) or any(
         p.search(text) for p in _EXPLOITABLE_WORD_PATTERNS
     )
     if is_exploitable:
         if comment.severity < Severity.BLOCKER:
-            return _with_severity(comment, Severity.BLOCKER)
+            return replace(comment, severity=Severity.BLOCKER)
         return comment
 
-    # Security smells — upgrade to WARNING but cap there (not BLOCKER)
     if is_security or any(kw in text for kw in _SECURITY_SMELL_KEYWORDS):
-        if comment.severity < Severity.WARNING:
-            return _with_severity(comment, Severity.WARNING)
-        if comment.severity > Severity.WARNING:
-            return _with_severity(comment, Severity.WARNING)
+        if comment.severity != Severity.WARNING:
+            return replace(comment, severity=Severity.WARNING)
         return comment
 
-    # Style downgrade
     if (
         comment.category == "style" or _is_style_only(text)
     ) and comment.severity > Severity.NITPICK:
-        return _with_severity(comment, Severity.NITPICK)
+        return replace(comment, severity=Severity.NITPICK)
 
     return comment
 
@@ -103,19 +99,4 @@ def _is_style_only(text: str) -> bool:
     """Check if comment text is purely about style/formatting."""
     return any(kw in text for kw in _STYLE_KEYWORDS) and not any(
         kw in text for kw in ["bug", "error", "crash", "security", "vulnerability"]
-    )
-
-
-def _with_severity(comment: ReviewComment, severity: Severity) -> ReviewComment:
-    """Return a copy of comment with a different severity."""
-    return ReviewComment(
-        path=comment.path,
-        line=comment.line,
-        end_line=comment.end_line,
-        severity=severity,
-        category=comment.category,
-        title=comment.title,
-        body=comment.body,
-        confidence=comment.confidence,
-        suggestion=comment.suggestion,
     )
