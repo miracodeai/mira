@@ -200,7 +200,7 @@ def review(
 
 @main.command()
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
-@click.option("--port", default=8000, type=int, help="Port to bind to")
+@click.option("--port", envvar="PORT", default=8000, type=int, help="Port to bind to")
 @click.option(
     "--app-id",
     envvar="MIRA_GITHUB_APP_ID",
