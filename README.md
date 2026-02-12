@@ -1,5 +1,8 @@
 # Mira
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/xxx)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
 AI-powered PR reviewer with low-noise filtering.
 
 Mira reviews your pull requests using any LLM (via [LiteLLM](https://github.com/BerriAI/litellm)) and posts concise, actionable feedback. Its noise filter ensures you only see comments that matter.
@@ -31,14 +34,20 @@ docker run -p 8000:8000 \
   -e MIRA_GITHUB_APP_ID=123456 \
   -e MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)" \
   -e MIRA_WEBHOOK_SECRET=your-secret \
+  -e MIRA_MODEL=openai/gpt-4o \
   -e OPENAI_API_KEY=sk-... \
   ghcr.io/mira-reviewer/mira:latest
 ```
 
-Or deploy to a platform:
+Mira uses [LiteLLM](https://docs.litellm.ai/docs/providers) under the hood, so you can use any supported provider. Just set the model and the matching API key:
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/xxx)
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+| Provider | `MIRA_MODEL` | API key env var |
+|----------|-------------|-----------------|
+| OpenAI | `openai/gpt-4o` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/claude-sonnet-4-5-20250929` | `ANTHROPIC_API_KEY` |
+| OpenRouter | `anthropic/claude-sonnet-4-5` | `OPENROUTER_API_KEY` |
+| Google Gemini | `gemini/gemini-2.5-pro` | `GEMINI_API_KEY` |
+| Azure OpenAI | `azure/my-gpt4o-deployment` | `AZURE_API_KEY` |
 
 **3. Install the app** on your repos — every PR gets auto-reviewed.
 
@@ -77,9 +86,9 @@ Review a PR:
 
 ```bash
 export GITHUB_TOKEN="ghp_..."
-export OPENAI_API_KEY="sk-..."
+export OPENAI_API_KEY="sk-..."  # or ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.
 
-mira review --pr https://github.com/owner/repo/pull/123
+mira review --pr https://github.com/owner/repo/pull/123 --model openai/gpt-4o
 ```
 
 Review a diff from stdin:
