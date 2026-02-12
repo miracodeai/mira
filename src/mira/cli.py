@@ -196,3 +196,85 @@ def review(
     # Exit with non-zero if blockers found
     if any(c.severity >= Severity.BLOCKER for c in result.comments):
         sys.exit(1)
+
+
+@main.command()
+@click.option("--host", default="0.0.0.0", help="Host to bind to")
+@click.option("--port", default=8000, type=int, help="Port to bind to")
+@click.option(
+    "--app-id",
+    envvar="MIRA_GITHUB_APP_ID",
+    required=True,
+    help="GitHub App ID",
+)
+@click.option(
+    "--private-key",
+    envvar="MIRA_GITHUB_PRIVATE_KEY",
+    required=True,
+    help="PEM contents or @path/to/key.pem",
+)
+@click.option(
+    "--webhook-secret",
+    envvar="MIRA_WEBHOOK_SECRET",
+    required=True,
+    help="Webhook secret from GitHub App settings",
+)
+@click.option("--bot-name", envvar="MIRA_BOT_NAME", default="mira-bot", help="Bot @mention name")
+@click.option(
+    "--posthog-api-key",
+    envvar="POSTHOG_API_KEY",
+    default=None,
+    help="PostHog API key for anonymous usage metrics (disabled if not set)",
+)
+@click.option(
+    "--posthog-host",
+    envvar="POSTHOG_HOST",
+    default=None,
+    help="PostHog host URL",
+)
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+def serve(
+    host: str,
+    port: int,
+    app_id: str,
+    private_key: str,
+    webhook_secret: str,
+    bot_name: str,
+    posthog_api_key: str | None,
+    posthog_host: str | None,
+    verbose: bool,
+) -> None:
+    """Run the Mira GitHub App webhook server."""
+    try:
+        import uvicorn
+
+        from mira.github_app.auth import GitHubAppAuth
+        from mira.github_app.metrics import Metrics
+        from mira.github_app.webhooks import create_app
+    except ImportError as exc:
+        raise click.ClickException(
+            f"Missing dependency: {exc}. Install with: pip install mira-reviewer[serve]"
+        ) from exc
+
+    if verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s: %(message)s")
+    else:
+        logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
+
+    # Support @path/to/key.pem syntax
+    if private_key.startswith("@"):
+        key_path = private_key[1:]
+        try:
+            with open(key_path) as f:
+                private_key = f.read()
+        except FileNotFoundError:
+            raise click.ClickException(f"Private key file not found: {key_path}") from None
+
+    app_auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+    metrics = Metrics(api_key=posthog_api_key, host=posthog_host)
+    app = create_app(
+        app_auth=app_auth, webhook_secret=webhook_secret, bot_name=bot_name, metrics=metrics
+    )
+
+    click.echo(f"Starting Mira webhook server on {host}:{port}")
+    uvicorn.run(app, host=host, port=port)

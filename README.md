@@ -60,6 +60,43 @@ jobs:
           api_key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
+### GitHub App (self-hosted)
+
+Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
+
+**1. Create a GitHub App** at [github.com/settings/apps/new](https://github.com/settings/apps/new):
+- Webhook URL: `https://your-server.com/webhook`
+- Permissions: Pull Requests (read+write), Contents (read), Issues (read+write)
+- Events: Pull requests, Issue comments
+- Generate a private key (.pem)
+
+**2. Deploy:**
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/xxx)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+Or run anywhere with Docker:
+
+```bash
+docker run -p 8000:8000 \
+  -e MIRA_GITHUB_APP_ID=123456 \
+  -e MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)" \
+  -e MIRA_WEBHOOK_SECRET=your-secret \
+  -e OPENAI_API_KEY=sk-... \
+  ghcr.io/mira-reviewer/mira
+```
+
+Or run directly:
+
+```bash
+pip install mira-reviewer[serve]
+mira serve --app-id 123456 --private-key @private-key.pem --webhook-secret your-secret
+```
+
+**3. Install the app** on your repos — every PR gets auto-reviewed.
+
+**Chat with Mira:** Comment `@mira-bot <question>` on any PR to ask about the code.
+
 ## Configuration
 
 Create a `.mira.yml` in your repo root (see [`.mira.yml.example`](.mira.yml.example)):

@@ -43,6 +43,13 @@ dev = [
     "pytest-mock>=3.12",
     "ruff>=0.4",
     "types-PyYAML>=6.0",
+    "cryptography>=42.0",
+]
+serve = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.28",
+    "PyJWT[crypto]>=2.8",
+    "posthog>=3.0",
 ]
 
 [project.scripts]
@@ -79,6 +86,6 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "unidiff.*", "github.*"]
+module = ["litellm.*", "unidiff.*", "github.*", "uvicorn.*", "fastapi.*", "jwt.*", "posthog.*"]
 ignore_missing_imports = true
 

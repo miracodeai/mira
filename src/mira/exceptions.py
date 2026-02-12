@@ -23,3 +23,7 @@ class ResponseParseError(MiraError):
 
 class ProviderError(MiraError):
     """Error communicating with a code hosting provider (GitHub, etc.)."""
+
+
+class WebhookError(MiraError):
+    """Error processing a webhook event."""

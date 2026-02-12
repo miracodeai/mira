@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: mira
+    runtime: docker
+    healthCheckPath: /health
+    envVars:
+      - key: MIRA_GITHUB_APP_ID
+        sync: false
+      - key: MIRA_GITHUB_PRIVATE_KEY
+        sync: false
+      - key: MIRA_WEBHOOK_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false

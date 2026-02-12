@@ -1,0 +1,12 @@
+app = "mira"
+
+[build]
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+
+[[services.http_checks]]
+  path = "/health"
+  interval = 10000
+  timeout = 2000

@@ -1,0 +1,75 @@
+## Mira PR Walkthrough
+
+This PR adds a new benchmark application called 'with-cookiekit' that demonstrates cookie management functionality in a Next.js application. The benchmark includes a complete Next.js setup with TypeScript configuration and appears to integrate with a react-cookie-manager library for testing cookie handling performance or functionality.
+
+**Estimated effort:** 🎯 2 (Simple) · ⏱️ ~15 min
+
+### Changes
+
+**Benchmark Application Setup**
+
+| File | Change | Description |
+|------|--------|-------------|
+| `benchmarks/with-cookiekit/package.json` | Added | Package configuration for the cookiekit benchmark with Next.js and React dependencies. |
+| `benchmarks/with-cookiekit/next.config.ts` | Added | Next.js configuration file with TypeScript setup. |
+| `benchmarks/with-cookiekit/tsconfig.json` | Added | TypeScript configuration for the benchmark application. |
+| `benchmarks/with-cookiekit/next-env.d.ts` | Added | Next.js TypeScript environment declarations file. |
+
+**Application Components**
+
+| File | Change | Description |
+|------|--------|-------------|
+| `benchmarks/with-cookiekit/app/layout.tsx` | Added | Root layout component for the Next.js app router structure. |
+| `benchmarks/with-cookiekit/app/page.tsx` | Added | Main page component for the benchmark application. |
+
+**Configuration**
+
+| File | Change | Description |
+|------|--------|-------------|
+| `benchmarks/with-cookiekit/config.json` | Added | Configuration file containing benchmark-specific settings and parameters. |
+
+**Dependencies**
+
+| File | Change | Description |
+|------|--------|-------------|
+| `react-cookie-manager` | Added | Reference or symlink to the react-cookie-manager library for cookie management functionality. |
+
+### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant User as User
+    participant App as Next.js App
+    participant Layout as Layout Component
+    participant Page as Page Component
+    participant CookieKit as Cookie Manager
+    
+    User->>App: Navigate to benchmark
+    App->>Layout: Render root layout
+    Layout->>Page: Render main page
+    Page->>CookieKit: Initialize cookie management
+    CookieKit-->>Page: Cookie operations ready
+    Page-->>User: Display benchmark interface
+```
+
+---
+
+The benchmark setup has some configuration mismatches (vite vs webpack bundler) and architectural concerns (client-side root layout). The core functionality appears correct but could benefit from configuration alignment and performance optimizations.
+
+1. [WARNING] benchmarks/with-cookiekit/config.json:22 — Incorrect bundler configuration for Next.js project
+   The bundler is set to 'vite' but this is a Next.js project which uses webpack as its bundler. This mismatch could cause issues with benchmark accuracy and expectations.
+   Suggestion: "bundler": "webpack",
+
+2. [WARNING] benchmarks/with-cookiekit/app/layout.tsx:1 — Root layout should not be a client component
+   Using 'use client' in the root layout forces the entire app to be client-side rendered, which can negatively impact performance and SEO. Consider moving client-side logic to specific components that need it.
+
+3. [SUGGESTION] benchmarks/with-cookiekit/config.json:23 — Bundle type configuration may not match Next.js output
+   Next.js typically outputs ESM modules for the client and may not generate separate CJS bundles. The bundleType configuration should reflect the actual output format of the Next.js build.
+   Suggestion: "bundleType": ["esm"],
+
+4. [SUGGESTION] benchmarks/with-cookiekit/package.json:16 — Consider pinning react-cookie-manager version
+   The react-cookie-manager dependency is pinned to a specific version (4.0.3) while React dependencies use caret ranges. For benchmark consistency, consider using the same versioning strategy across all dependencies.
+   Suggestion: "react-cookie-manager": "^4.0.3"
+
+Reviewed 8 files, 4 comments.
+Tokens used: 5124
