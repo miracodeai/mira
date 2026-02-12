@@ -1,0 +1,42 @@
+{
+  "comments": [
+    {
+      "path": "src/utils.py",
+      "line": 9,
+      "end_line": null,
+      "severity": "warning",
+      "category": "security",
+      "title": "Shell injection via subprocess with shell=True",
+      "body": "Using `subprocess.run` with `shell=True` and a user-provided string is vulnerable to shell injection. Use a list of arguments instead.",
+      "confidence": 0.95,
+      "suggestion": "    result = subprocess.run(cmd.split(), capture_output=True, text=True)"
+    },
+    {
+      "path": "src/utils.py",
+      "line": 16,
+      "end_line": null,
+      "severity": "blocker",
+      "category": "security",
+      "title": "Use of eval() for parsing config",
+      "body": "Using `eval()` to parse file contents is a critical security vulnerability. It allows arbitrary code execution. Use `json.load()` or `yaml.safe_load()` instead.",
+      "confidence": 0.99,
+      "suggestion": "        return json.loads(f.read())"
+    },
+    {
+      "path": "src/utils.py",
+      "line": 21,
+      "end_line": null,
+      "severity": "warning",
+      "category": "security",
+      "title": "Hardcoded default API key",
+      "body": "The default value contains what looks like an API key. Default should be an empty string or None, with proper error handling when the key is missing.",
+      "confidence": 0.85,
+      "suggestion": "    return os.environ.get(\"API_KEY\", \"\")"
+    }
+  ],
+  "summary": "Found critical security issues: eval() usage for config parsing, shell injection risk, and a hardcoded API key default.",
+  "metadata": {
+    "reviewed_files": 2,
+    "skipped_reason": null
+  }
+}

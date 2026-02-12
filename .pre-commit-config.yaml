@@ -1,0 +1,21 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.8
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+        files: ^src/
+        args: [--ignore-missing-imports]
+        additional_dependencies:
+          - pydantic>=2.5
+          - click>=8.1
+          - httpx>=0.27
+          - jinja2>=3.1
+          - pyyaml>=6.0
+          - types-PyYAML

@@ -1,0 +1,43 @@
+name: "Mira PR Review"
+description: "AI-powered PR reviewer with low-noise filtering"
+author: "Mira Contributors"
+
+inputs:
+  model:
+    description: "LLM model to use (e.g. openai/gpt-4o)"
+    required: false
+    default: "openai/gpt-4o"
+  api_key:
+    description: "API key for the LLM provider"
+    required: true
+  github_token:
+    description: "GitHub token for posting reviews"
+    required: false
+    default: ${{ github.token }}
+  config_path:
+    description: "Path to .mira.yml config file"
+    required: false
+    default: ""
+  max_comments:
+    description: "Maximum number of review comments"
+    required: false
+    default: "5"
+  confidence:
+    description: "Minimum confidence threshold (0.0-1.0)"
+    required: false
+    default: "0.7"
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    GITHUB_TOKEN: ${{ inputs.github_token }}
+    OPENAI_API_KEY: ${{ inputs.api_key }}
+    MIRA_MODEL: ${{ inputs.model }}
+    MIRA_MAX_COMMENTS: ${{ inputs.max_comments }}
+    MIRA_CONFIDENCE_THRESHOLD: ${{ inputs.confidence }}
+    MIRA_CONFIG_PATH: ${{ inputs.config_path }}
+
+branding:
+  icon: "eye"
+  color: "purple"

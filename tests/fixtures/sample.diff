@@ -1,0 +1,46 @@
+diff --git a/src/utils.py b/src/utils.py
+new file mode 100644
+index 0000000..a1b2c3d
+--- /dev/null
++++ b/src/utils.py
+@@ -0,0 +1,25 @@
++"""Utility functions."""
++
++import os
++import subprocess
++
++
++def run_command(cmd: str) -> str:
++    """Run a shell command and return output."""
++    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
++    return result.stdout
++
++
++def read_config(path: str) -> dict:
++    """Read a config file."""
++    with open(path) as f:
++        return eval(f.read())
++
++
++def get_api_key() -> str:
++    """Get API key from environment."""
++    return os.environ.get("API_KEY", "sk-default-key-12345")
++
++
++def format_name(name: str) -> str:
++    """Format a name."""
++    return name.strip().title()
+diff --git a/src/main.py b/src/main.py
+index 1234567..abcdefg 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -10,7 +10,7 @@ class App:
+     def __init__(self):
+         self.config = {}
+
+-    def start(self):
++    def start(self, debug=False):
+         """Start the application."""
+-        print("Starting...")
++        print("Starting..." if not debug else "DEBUG: Starting...")
+         self.config = read_config("config.yml")

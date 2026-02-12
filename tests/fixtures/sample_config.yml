@@ -1,0 +1,16 @@
+llm:
+  model: "openai/gpt-4o-mini"
+  temperature: 0.1
+  max_tokens: 2048
+
+filter:
+  confidence_threshold: 0.8
+  max_comments: 3
+  exclude_patterns:
+    - "*.lock"
+    - "*.min.js"
+    - "*.svg"
+
+review:
+  context_lines: 5
+  include_summary: true

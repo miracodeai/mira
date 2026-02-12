@@ -1,0 +1,178 @@
+"""Click CLI for Mira."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import sys
+
+import click
+
+from mira import __version__
+from mira.config import load_config
+from mira.core.engine import ReviewEngine
+from mira.exceptions import MiraError
+from mira.llm.provider import LLMProvider
+from mira.models import ReviewResult
+
+
+def _format_text(result: ReviewResult) -> str:
+    """Format review result as human-readable text."""
+    lines: list[str] = []
+
+    if result.summary:
+        lines.append(result.summary)
+        lines.append("")
+
+    if not result.comments:
+        lines.append("No issues found.")
+        return "\n".join(lines)
+
+    for i, c in enumerate(result.comments, 1):
+        lines.append(f"{i}. [{c.severity.name}] {c.path}:{c.line} — {c.title}")
+        lines.append(f"   {c.body}")
+        if c.suggestion:
+            lines.append(f"   Suggestion: {c.suggestion}")
+        lines.append("")
+
+    lines.append(f"Reviewed {result.reviewed_files} files, {len(result.comments)} comments.")
+    if result.token_usage:
+        lines.append(f"Tokens used: {result.token_usage.get('total_tokens', 0)}")
+
+    return "\n".join(lines)
+
+
+def _format_json(result: ReviewResult) -> str:
+    """Format review result as JSON."""
+    data = {
+        "summary": result.summary,
+        "comments": [
+            {
+                "path": c.path,
+                "line": c.line,
+                "end_line": c.end_line,
+                "severity": c.severity.name.lower(),
+                "category": c.category,
+                "title": c.title,
+                "body": c.body,
+                "confidence": c.confidence,
+                "suggestion": c.suggestion,
+            }
+            for c in result.comments
+        ],
+        "reviewed_files": result.reviewed_files,
+        "token_usage": result.token_usage,
+    }
+    return json.dumps(data, indent=2)
+
+
+@click.group()
+@click.version_option(version=__version__, prog_name="mira")
+def main() -> None:
+    """Mira — AI-powered PR reviewer."""
+
+
+@main.command()
+@click.option("--pr", "pr_url", default=None, help="PR URL (github.com/o/r/pull/N or o/r#N)")
+@click.option("--stdin", "use_stdin", is_flag=True, help="Read diff from stdin")
+@click.option("--model", envvar="MIRA_MODEL", default=None, help="LLM model to use")
+@click.option("--max-comments", envvar="MIRA_MAX_COMMENTS", type=int, default=None)
+@click.option("--confidence", envvar="MIRA_CONFIDENCE_THRESHOLD", type=float, default=None)
+@click.option("--github-token", envvar="GITHUB_TOKEN", default=None, help="GitHub API token")
+@click.option("--dry-run", is_flag=True, help="Don't post review, just print results")
+@click.option("--output", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+@click.option("--config", "config_path", default=None, help="Path to .mira.yml")
+def review(
+    pr_url: str | None,
+    use_stdin: bool,
+    model: str | None,
+    max_comments: int | None,
+    confidence: float | None,
+    github_token: str | None,
+    dry_run: bool,
+    output_format: str,
+    verbose: bool,
+    config_path: str | None,
+) -> None:
+    """Review a pull request or diff."""
+    if verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s: %(message)s")
+    else:
+        logging.basicConfig(level=logging.WARNING)
+
+    if not pr_url and not use_stdin:
+        raise click.UsageError("Provide --pr <url> or --stdin")
+
+    # Build config overrides
+    overrides: dict[str, object] = {}
+    if model:
+        overrides["llm.model"] = model
+    if max_comments is not None:
+        overrides["filter.max_comments"] = max_comments
+    if confidence is not None:
+        overrides["filter.confidence_threshold"] = confidence
+
+    try:
+        config = load_config(config_path, overrides)  # type: ignore[arg-type]
+    except MiraError as e:
+        raise click.ClickException(str(e)) from e
+
+    llm = LLMProvider(config.llm)
+
+    provider = None
+    if pr_url and not dry_run:
+        if not github_token:
+            raise click.UsageError(
+                "--github-token or GITHUB_TOKEN env var is required for PR review"
+            )
+        from mira.providers.github import GitHubProvider
+
+        provider = GitHubProvider(github_token)
+
+    # For dry-run with PR, we still need a provider to fetch the diff
+    fetch_provider = None
+    if pr_url:
+        token = github_token or ""
+        if token:
+            from mira.providers.github import GitHubProvider
+
+            fetch_provider = GitHubProvider(token)
+        elif not use_stdin:
+            raise click.UsageError("--github-token or GITHUB_TOKEN is required to fetch PR diff")
+
+    engine = ReviewEngine(config=config, llm=llm, provider=provider)
+
+    try:
+        if use_stdin:
+            diff_text = sys.stdin.read()
+            result = asyncio.run(engine.review_diff(diff_text))
+        else:
+            # For dry-run: use fetch_provider to get info/diff, but don't post
+            if dry_run and fetch_provider:
+
+                async def _dry_run_review() -> ReviewResult:
+                    pr_info = await fetch_provider.get_pr_info(pr_url)  # type: ignore[arg-type]
+                    diff_text = await fetch_provider.get_pr_diff(pr_info)
+                    return await engine._review_diff_internal(
+                        diff_text,
+                        pr_title=pr_info.title,
+                        pr_description=pr_info.description,
+                    )
+
+                result = asyncio.run(_dry_run_review())
+            else:
+                result = asyncio.run(engine.review_pr(pr_url))  # type: ignore[arg-type]
+    except MiraError as e:
+        raise click.ClickException(str(e)) from e
+
+    # Output
+    if output_format == "json":
+        click.echo(_format_json(result))
+    else:
+        click.echo(_format_text(result))
+
+    # Exit with non-zero if blockers found
+    if any(c.severity.name == "BLOCKER" for c in result.comments):
+        sys.exit(1)

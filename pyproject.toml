@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mira-reviewer"
+version = "0.1.0"
+description = "AI-powered PR reviewer with low-noise filtering"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "Mira Contributors" }]
+keywords = ["ai", "code-review", "pull-request", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "click>=8.1",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "litellm>=1.30",
+    "pydantic>=2.5",
+    "PyGithub>=2.1",
+    "pyyaml>=6.0",
+    "tenacity>=8.2",
+    "tiktoken>=0.6",
+    "unidiff>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8",
+    "pre-commit>=3.6",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "pytest-mock>=3.12",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+mira = "mira.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mira-reviewer/mira"
+Repository = "https://github.com/mira-reviewer/mira"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mira"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "PIE", "RET", "T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["litellm.*", "unidiff.*", "github.*"]
+ignore_missing_imports = true

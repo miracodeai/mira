@@ -1,0 +1,44 @@
+# Mira configuration file
+# Copy this to .mira.yml in your repository root
+
+llm:
+  # Model identifier (any LiteLLM-supported model)
+  model: "openai/gpt-4o"
+  # Fallback model if primary fails
+  fallback_model: "openai/gpt-4o-mini"
+  temperature: 0.2
+  max_tokens: 4096
+
+filter:
+  # Minimum confidence threshold (0.0 - 1.0)
+  confidence_threshold: 0.7
+  # Maximum number of comments to post
+  max_comments: 5
+  # Minimum severity level: blocker, warning, suggestion, nitpick
+  min_severity: "nitpick"
+  # Glob patterns for files to exclude
+  exclude_patterns:
+    - "*.lock"
+    - "*.lockb"
+    - "package-lock.json"
+    - "yarn.lock"
+    - "pnpm-lock.yaml"
+    - "*.min.js"
+    - "*.min.css"
+    - "*.map"
+    - "*.svg"
+    - "*.png"
+    - "*.jpg"
+    - "*.gif"
+  # Skip deleted files
+  exclude_deleted: true
+  # Maximum number of files to review
+  max_files: 50
+
+review:
+  # Lines of context around hunks
+  context_lines: 3
+  # Maximum diff size in characters
+  max_diff_size: 50000
+  # Include a summary comment
+  include_summary: true
