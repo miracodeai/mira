@@ -21,6 +21,12 @@ def _format_text(result: ReviewResult) -> str:
     """Format review result as human-readable text."""
     lines: list[str] = []
 
+    if result.walkthrough:
+        lines.append(result.walkthrough.to_markdown())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     if result.summary:
         lines.append(result.summary)
         lines.append("")
@@ -45,8 +51,36 @@ def _format_text(result: ReviewResult) -> str:
 
 def _format_json(result: ReviewResult) -> str:
     """Format review result as JSON."""
+    walkthrough_data = None
+    if result.walkthrough:
+        # Group file changes by their group label for JSON output
+        groups: dict[str, list[dict[str, str]]] = {}
+        for fc in result.walkthrough.file_changes:
+            label = fc.group or "Other"
+            groups.setdefault(label, []).append(
+                {
+                    "path": fc.path,
+                    "change_type": fc.change_type.value,
+                    "description": fc.description,
+                }
+            )
+        effort_data = None
+        if result.walkthrough.effort:
+            effort_data = {
+                "level": result.walkthrough.effort.level,
+                "label": result.walkthrough.effort.label,
+                "minutes": result.walkthrough.effort.minutes,
+            }
+        walkthrough_data = {
+            "summary": result.walkthrough.summary,
+            "change_groups": [{"label": label, "files": files} for label, files in groups.items()],
+            "effort": effort_data,
+            "sequence_diagram": result.walkthrough.sequence_diagram,
+        }
+
     data = {
         "summary": result.summary,
+        "walkthrough": walkthrough_data,
         "comments": [
             {
                 "path": c.path,

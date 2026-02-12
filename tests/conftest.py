@@ -15,6 +15,8 @@ from mira.models import (
     PatchSet,
     ReviewComment,
     Severity,
+    WalkthroughFileEntry,
+    WalkthroughResult,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -85,4 +87,35 @@ def sample_review_comment() -> ReviewComment:
         body="This could be a security vulnerability.",
         confidence=0.85,
         suggestion=None,
+    )
+
+
+@pytest.fixture
+def sample_walkthrough_response_text() -> str:
+    return (FIXTURES_DIR / "sample_walkthrough_response.json").read_text()
+
+
+@pytest.fixture
+def sample_walkthrough_response_data() -> dict:
+    return json.loads((FIXTURES_DIR / "sample_walkthrough_response.json").read_text())
+
+
+@pytest.fixture
+def sample_walkthrough_result() -> WalkthroughResult:
+    return WalkthroughResult(
+        summary="This PR adds utility functions for shell commands and config parsing.",
+        file_changes=[
+            WalkthroughFileEntry(
+                path="src/utils.py",
+                change_type=FileChangeType.ADDED,
+                description="New utility module with shell command runner and config reader",
+                group="Core",
+            ),
+            WalkthroughFileEntry(
+                path="src/main.py",
+                change_type=FileChangeType.MODIFIED,
+                description="Added debug parameter to App.start() method",
+                group="App Shell",
+            ),
+        ],
     )

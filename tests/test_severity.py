@@ -112,3 +112,15 @@ class TestClassifySeverity:
 
     def test_severity_ordering(self):
         assert Severity.BLOCKER > Severity.WARNING > Severity.SUGGESTION > Severity.NITPICK
+
+
+class TestSeverityEmoji:
+    def test_all_severities_have_emoji(self):
+        for sev in Severity:
+            emoji = sev.emoji
+            assert isinstance(emoji, str)
+            assert len(emoji) > 0
+
+    def test_specific_emojis(self):
+        assert Severity.BLOCKER.emoji == "\U0001f6d1"
+        assert Severity.NITPICK.emoji == "\U0001f4ac"

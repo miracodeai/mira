@@ -11,13 +11,31 @@ from github import Github, GithubException
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from mira.exceptions import ProviderError
-from mira.models import PRInfo, ReviewComment, ReviewResult
+from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
 from mira.providers.base import BaseProvider
 
 # Transient errors worth retrying — network issues and GitHub server errors.
 _RETRYABLE = (ConnectionError, TimeoutError, httpx.TransportError, GithubException)
 
 logger = logging.getLogger(__name__)
+
+_CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
+    "bug": ("\U0001f41b", "Bug"),
+    "security": ("\U0001f512", "Security issue"),
+    "performance": ("\u26a1", "Performance"),
+    "maintainability": ("\U0001f527", "Refactor suggestion"),
+    "style": ("\U0001f3a8", "Style"),
+    "clarity": ("\U0001f4dd", "Clarity"),
+    "configuration": ("\u2699\ufe0f", "Configuration"),
+    "other": ("\U0001f4cc", "Note"),
+}
+
+_SEVERITY_BADGE: dict[Severity, str] = {
+    Severity.BLOCKER: "\U0001f6d1 Blocker \u2014 must fix before merge",
+    Severity.WARNING: "\u26a0\ufe0f Warning",
+    Severity.SUGGESTION: "\U0001f4a1 Suggestion",
+    Severity.NITPICK: "\U0001f4ac Nitpick",
+}
 
 # Matches: https://github.com/owner/repo/pull/123 or owner/repo#123
 _PR_URL_PATTERN = re.compile(
@@ -161,15 +179,42 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to post review: {e}") from e
 
+    async def post_comment(self, pr_info: PRInfo, body: str) -> None:
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(_RETRYABLE),
+            reraise=True,
+        )
+        def _post_comment() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            issue.create_comment(body)
+
+        try:
+            await asyncio.to_thread(_post_comment)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to post comment: {e}") from e
+
 
 def _format_comment_body(comment: ReviewComment) -> str:
-    """Format a review comment body with severity emoji and suggestion block."""
-    parts = [f"{comment.severity.emoji} **{comment.severity.name}** — {comment.title}"]
+    """Format a review comment body with category badge, severity, and suggestion block."""
+    emoji, label = _CATEGORY_DISPLAY.get(comment.category, ("\U0001f4cc", "Note"))
+    badge = _SEVERITY_BADGE.get(comment.severity, "")
+
+    parts = [f"{emoji} **{label}**"]
+    if badge:
+        parts.append(badge)
+    parts.append("")
+    parts.append(f"**{comment.title}**")
     parts.append("")
     parts.append(comment.body)
 
     if comment.suggestion:
         parts.append("")
+        parts.append("**Suggested fix:**")
         parts.append("```suggestion")
         parts.append(comment.suggestion)
         parts.append("```")

@@ -115,13 +115,13 @@ class TestBuildReviewPrompt:
                 deleted_lines=0,
             )
         ]
-        config = MiraConfig()  # default: focus_only_on_problems=True
+        config = MiraConfig()  # default: focus_only_on_problems=False
         messages = build_review_prompt(files, config)
         system = messages[0]["content"]
-        assert "Only comment on critical problems" in system
-        assert "You may suggest improvements" not in system
+        assert "You may suggest improvements" in system
+        assert "Only comment on critical problems" not in system
 
-    def test_focus_off_shows_comprehensive(self):
+    def test_focus_on_shows_problems_only(self):
         files = [
             FileDiff(
                 path="test.py",
@@ -132,11 +132,11 @@ class TestBuildReviewPrompt:
                 deleted_lines=0,
             )
         ]
-        config = MiraConfig(review={"focus_only_on_problems": False})
+        config = MiraConfig(review={"focus_only_on_problems": True})
         messages = build_review_prompt(files, config)
         system = messages[0]["content"]
-        assert "You may suggest improvements" in system
-        assert "Only comment on critical problems" not in system
+        assert "Only comment on critical problems" in system
+        assert "You may suggest improvements" not in system
 
     def test_scope_boundary_instructions(self):
         files = [

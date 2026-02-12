@@ -9,7 +9,15 @@ from pydantic import BaseModel, Field
 
 from mira.core.context import extract_hunk_lines
 from mira.exceptions import ResponseParseError
-from mira.models import FileDiff, ReviewComment, Severity
+from mira.models import (
+    FileChangeType,
+    FileDiff,
+    ReviewComment,
+    Severity,
+    WalkthroughEffort,
+    WalkthroughFileEntry,
+    WalkthroughResult,
+)
 
 
 class LLMComment(BaseModel):
@@ -121,3 +129,87 @@ def convert_to_review_comments(
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Walkthrough response models & parsing
+# ---------------------------------------------------------------------------
+
+
+class LLMWalkthroughFileChange(BaseModel):
+    path: str
+    change_type: str = "modified"
+    description: str = ""
+
+
+class LLMWalkthroughChangeGroup(BaseModel):
+    label: str
+    files: list[LLMWalkthroughFileChange] = Field(default_factory=list)
+
+
+class LLMWalkthroughEffort(BaseModel):
+    level: int = 3
+    label: str = "Moderate"
+    minutes: int = 15
+
+
+class LLMWalkthroughResponse(BaseModel):
+    summary: str = ""
+    change_groups: list[LLMWalkthroughChangeGroup] = Field(default_factory=list)
+    effort: LLMWalkthroughEffort | None = None
+    sequence_diagram: str | None = None
+
+
+_CHANGE_TYPE_MAP: dict[str, FileChangeType] = {
+    "added": FileChangeType.ADDED,
+    "modified": FileChangeType.MODIFIED,
+    "deleted": FileChangeType.DELETED,
+    "renamed": FileChangeType.RENAMED,
+}
+
+
+def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
+    """Parse raw LLM text output into a validated LLMWalkthroughResponse."""
+    cleaned = _strip_code_fences(raw_text)
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ResponseParseError(f"Walkthrough response is not valid JSON: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ResponseParseError(f"Expected JSON object, got {type(data).__name__}")
+
+    try:
+        return LLMWalkthroughResponse.model_validate(data)
+    except Exception as e:
+        raise ResponseParseError(f"Walkthrough response validation failed: {e}") from e
+
+
+def convert_to_walkthrough_result(response: LLMWalkthroughResponse) -> WalkthroughResult:
+    """Convert an LLM walkthrough response to a WalkthroughResult model."""
+    entries: list[WalkthroughFileEntry] = []
+    for group in response.change_groups:
+        for fc in group.files:
+            change_type = _CHANGE_TYPE_MAP.get(fc.change_type.lower(), FileChangeType.MODIFIED)
+            entries.append(
+                WalkthroughFileEntry(
+                    path=fc.path,
+                    change_type=change_type,
+                    description=fc.description,
+                    group=group.label,
+                )
+            )
+    effort: WalkthroughEffort | None = None
+    if response.effort:
+        effort = WalkthroughEffort(
+            level=response.effort.level,
+            label=response.effort.label,
+            minutes=response.effort.minutes,
+        )
+    return WalkthroughResult(
+        summary=response.summary,
+        file_changes=entries,
+        effort=effort,
+        sequence_diagram=response.sequence_diagram,
+    )

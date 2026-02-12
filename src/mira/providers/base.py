@@ -25,3 +25,7 @@ class BaseProvider(abc.ABC):
         result: ReviewResult,
     ) -> None:
         """Post review comments to a pull request."""
+
+    @abc.abstractmethod
+    async def post_comment(self, pr_info: PRInfo, body: str) -> None:
+        """Post a top-level comment on a pull request."""

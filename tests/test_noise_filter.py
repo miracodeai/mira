@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mira.analysis.noise_filter import filter_noise
+from mira.analysis.noise_filter import _is_duplicate, _jaccard_similarity, filter_noise
 from mira.config import FilterConfig
 from mira.models import ReviewComment, Severity
 
@@ -159,3 +159,39 @@ class TestNoiseFilter:
         assert len(result_b) == 1
         assert result_a[0].severity == Severity.BLOCKER
         assert result_b[0].severity == Severity.BLOCKER
+
+
+class TestJaccardSimilarity:
+    def test_identical_strings(self):
+        assert _jaccard_similarity("hello world", "hello world") == 1.0
+
+    def test_empty_string(self):
+        assert _jaccard_similarity("", "hello") == 0.0
+        assert _jaccard_similarity("hello", "") == 0.0
+        assert _jaccard_similarity("", "") == 0.0
+
+    def test_partial_overlap(self):
+        sim = _jaccard_similarity("hello world", "hello there")
+        assert 0.0 < sim < 1.0
+
+
+class TestIsDuplicate:
+    def test_different_paths_never_duplicate(self):
+        a = _make_comment(path="a.py", line=1, title="Same title")
+        b = _make_comment(path="b.py", line=1, title="Same title")
+        assert _is_duplicate(a, b) is False
+
+    def test_same_line_always_duplicate(self):
+        a = _make_comment(path="a.py", line=5, title="Totally different")
+        b = _make_comment(path="a.py", line=5, title="Completely unrelated")
+        assert _is_duplicate(a, b) is True
+
+    def test_non_overlapping_similar_titles_duplicate(self):
+        a = _make_comment(path="a.py", line=5, title="Missing null check here")
+        b = _make_comment(path="a.py", line=100, title="Missing null check found")
+        assert _is_duplicate(a, b) is True
+
+    def test_non_overlapping_different_titles_not_duplicate(self):
+        a = _make_comment(path="a.py", line=5, title="Shell injection risk")
+        b = _make_comment(path="a.py", line=100, title="Hardcoded API key exposed")
+        assert _is_duplicate(a, b) is False

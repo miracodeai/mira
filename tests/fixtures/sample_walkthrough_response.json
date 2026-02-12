@@ -1,0 +1,26 @@
+{
+  "summary": "This PR adds utility functions for shell commands and config parsing, and adds a debug flag to the App start method.",
+  "change_groups": [
+    {
+      "label": "Core",
+      "files": [
+        {
+          "path": "src/utils.py",
+          "change_type": "added",
+          "description": "New utility module with shell command runner and config reader"
+        }
+      ]
+    },
+    {
+      "label": "App Shell",
+      "files": [
+        {
+          "path": "src/main.py",
+          "change_type": "modified",
+          "description": "Added debug parameter to App.start() method"
+        }
+      ]
+    }
+  ],
+  "sequence_diagram": null
+}

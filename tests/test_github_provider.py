@@ -9,7 +9,12 @@ import pytest
 
 from mira.exceptions import ProviderError
 from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
-from mira.providers.github import GitHubProvider, parse_pr_url
+from mira.providers.github import (
+    _CATEGORY_DISPLAY,
+    GitHubProvider,
+    _format_comment_body,
+    parse_pr_url,
+)
 
 
 class TestParsePRUrl:
@@ -254,3 +259,100 @@ class TestGitHubRetry:
 
         # Should have been called only once — no retries for ProviderError
         mock_repo.get_pull.assert_called_once()
+
+
+class TestFormatCommentBody:
+    """Tests for the richer comment formatting."""
+
+    def _make_comment(self, **overrides) -> ReviewComment:
+        defaults = {
+            "path": "src/foo.py",
+            "line": 10,
+            "end_line": None,
+            "severity": Severity.WARNING,
+            "category": "bug",
+            "title": "Something is wrong",
+            "body": "Detailed explanation.",
+            "confidence": 0.9,
+            "suggestion": None,
+        }
+        defaults.update(overrides)
+        return ReviewComment(**defaults)
+
+    def test_basic_comment(self):
+        body = _format_comment_body(self._make_comment())
+        assert "\U0001f41b **Bug**" in body
+        assert "\u26a0\ufe0f Warning" in body
+        assert "**Something is wrong**" in body
+        assert "Detailed explanation." in body
+        assert "Suggested fix:" not in body
+
+    def test_with_suggestion(self):
+        body = _format_comment_body(self._make_comment(suggestion="return json.loads(f.read())"))
+        assert "**Suggested fix:**" in body
+        assert "```suggestion" in body
+        assert "return json.loads(f.read())" in body
+        assert body.endswith("```")
+
+    def test_blocker_badge(self):
+        body = _format_comment_body(self._make_comment(severity=Severity.BLOCKER))
+        assert "\U0001f6d1 Blocker \u2014 must fix before merge" in body
+
+    def test_unknown_category_fallback(self):
+        body = _format_comment_body(self._make_comment(category="unknown_cat"))
+        assert "\U0001f4cc **Note**" in body
+
+    def test_all_known_categories(self):
+        for cat, (emoji, label) in _CATEGORY_DISPLAY.items():
+            body = _format_comment_body(self._make_comment(category=cat))
+            assert f"{emoji} **{label}**" in body
+
+
+class TestPostComment:
+    @pytest.mark.asyncio
+    async def test_post_comment_calls_create_comment(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.post_comment(pr_info, "Hello world")
+
+        mock_repo.get_issue.assert_called_once_with(1)
+        mock_issue.create_comment.assert_called_once_with("Hello world")
+
+    @pytest.mark.asyncio
+    async def test_post_comment_retries_on_transient_error(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        call_count = 0
+        mock_issue = MagicMock()
+        mock_repo = MagicMock()
+
+        def _get_issue(n):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("transient")
+            return mock_issue
+
+        mock_repo.get_issue = _get_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.post_comment(pr_info, "Hello")
+        assert call_count == 2
+        mock_issue.create_comment.assert_called_once_with("Hello")

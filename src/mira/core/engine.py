@@ -12,10 +12,15 @@ from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
 from mira.core.file_filter import filter_files
 from mira.exceptions import ResponseParseError
-from mira.llm.prompts.review import build_review_prompt
+from mira.llm.prompts.review import build_review_prompt, build_walkthrough_prompt
 from mira.llm.provider import LLMProvider
-from mira.llm.response_parser import convert_to_review_comments, parse_llm_response
-from mira.models import ReviewComment, ReviewResult
+from mira.llm.response_parser import (
+    convert_to_review_comments,
+    convert_to_walkthrough_result,
+    parse_llm_response,
+    parse_walkthrough_response,
+)
+from mira.models import ReviewComment, ReviewResult, WalkthroughResult
 from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,13 @@ class ReviewEngine:
             pr_title=pr_info.title,
             pr_description=pr_info.description,
         )
+
+        # Post walkthrough comment before inline review
+        if result.walkthrough:
+            try:
+                await self.provider.post_comment(pr_info, result.walkthrough.to_markdown())
+            except Exception as exc:
+                logger.warning("Failed to post walkthrough comment: %s", exc)
 
         # Only post if there are comments
         if result.comments:
@@ -89,6 +101,22 @@ class ReviewEngine:
                 summary="All files were filtered out.",
                 skipped_reason="All files matched exclusion rules",
             )
+
+        # Walkthrough
+        walkthrough: WalkthroughResult | None = None
+        if self.config.review.walkthrough:
+            try:
+                wt_messages = build_walkthrough_prompt(
+                    files=filtered,
+                    config=self.config,
+                    pr_title=pr_title,
+                    pr_description=pr_description,
+                )
+                wt_raw = await self.llm.complete(wt_messages)
+                wt_parsed = parse_walkthrough_response(wt_raw)
+                walkthrough = convert_to_walkthrough_result(wt_parsed)
+            except Exception as exc:
+                logger.warning("Walkthrough generation failed, skipping: %s", exc)
 
         # Expand context
         expanded = expand_context(filtered, self.config.review.context_lines)
@@ -142,4 +170,5 @@ class ReviewEngine:
             summary=summary,
             reviewed_files=len(filtered),
             token_usage=self.llm.usage,
+            walkthrough=walkthrough,
         )

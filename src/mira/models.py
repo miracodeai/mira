@@ -114,6 +114,90 @@ class ReviewComment:
 
 
 @dataclass
+class WalkthroughEffort:
+    """Review effort estimate for a PR."""
+
+    level: int
+    label: str
+    minutes: int
+
+
+@dataclass
+class WalkthroughFileEntry:
+    """A single file entry in the walkthrough summary."""
+
+    path: str
+    change_type: FileChangeType
+    description: str
+    group: str = ""
+
+
+@dataclass
+class WalkthroughResult:
+    """Result of the PR walkthrough generation."""
+
+    summary: str = ""
+    file_changes: list[WalkthroughFileEntry] = field(default_factory=list)
+    effort: WalkthroughEffort | None = None
+    sequence_diagram: str | None = None
+
+    def to_markdown(self) -> str:
+        """Render as a markdown PR comment."""
+        parts = ["## Mira PR Walkthrough", ""]
+        parts.append(self.summary)
+
+        if self.effort:
+            parts.append("")
+            e = self.effort
+            parts.append(
+                f"**Estimated effort:** \U0001f3af {e.level} ({e.label})"
+                f" \u00b7 \u23f1\ufe0f ~{e.minutes} min"
+            )
+
+        if self.file_changes:
+            parts.append("")
+            parts.append("### Changes")
+
+            # Check if any files have group labels
+            has_groups = any(fc.group for fc in self.file_changes)
+
+            def _file_row(fc: WalkthroughFileEntry) -> str:
+                change = fc.change_type.value.capitalize()
+                return f"| `{fc.path}` | {change} | {fc.description} |"
+
+            if has_groups:
+                # Collect groups preserving order of first appearance
+                groups: dict[str, list[WalkthroughFileEntry]] = {}
+                for fc in self.file_changes:
+                    label = fc.group or "Other"
+                    groups.setdefault(label, []).append(fc)
+                for label, entries in groups.items():
+                    parts.append("")
+                    parts.append(f"**{label}**")
+                    parts.append("")
+                    parts.append("| File | Change | Description |")
+                    parts.append("|------|--------|-------------|")
+                    for fc in entries:
+                        parts.append(_file_row(fc))
+            else:
+                parts.append("")
+                parts.append("| File | Change | Description |")
+                parts.append("|------|--------|-------------|")
+                for fc in self.file_changes:
+                    parts.append(_file_row(fc))
+
+        if self.sequence_diagram:
+            parts.append("")
+            parts.append("### Sequence Diagram")
+            parts.append("")
+            parts.append("```mermaid")
+            parts.append(self.sequence_diagram)
+            parts.append("```")
+
+        return "\n".join(parts)
+
+
+@dataclass
 class ReviewResult:
     """The complete result of a review."""
 
@@ -122,6 +206,7 @@ class ReviewResult:
     reviewed_files: int = 0
     skipped_reason: str | None = None
     token_usage: dict[str, int] = field(default_factory=dict)
+    walkthrough: WalkthroughResult | None = None
 
 
 @dataclass

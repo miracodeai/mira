@@ -40,5 +40,11 @@ review:
   context_lines: 3
   # Maximum diff size in characters
   max_diff_size: 50000
+  # Only flag critical problems/bugs (false = also suggest improvements)
+  focus_only_on_problems: false
   # Include a summary comment
   include_summary: true
+  # Generate a PR walkthrough comment (top-level summary)
+  walkthrough: true
+  # Include a Mermaid sequence diagram in the walkthrough
+  walkthrough_sequence_diagram: true

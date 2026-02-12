@@ -16,7 +16,9 @@ class TestLoadConfig:
         assert config.llm.model == "openai/gpt-4o"
         assert config.filter.confidence_threshold == 0.7
         assert config.filter.max_comments == 5
-        assert config.review.focus_only_on_problems is True
+        assert config.review.focus_only_on_problems is False
+        assert config.review.walkthrough is True
+        assert config.review.walkthrough_sequence_diagram is True
 
     def test_focus_only_on_problems_override(self, sample_config_path: Path):
         config = load_config(
@@ -73,3 +75,20 @@ class TestFindConfigFile:
     def test_returns_none_when_not_found(self, tmp_path: Path):
         result = find_config_file(tmp_path)
         assert result is None
+
+
+class TestWalkthroughConfig:
+    def test_walkthrough_defaults(self):
+        config = load_config()
+        assert config.review.walkthrough is True
+        assert config.review.walkthrough_sequence_diagram is True
+
+    def test_walkthrough_overrides(self):
+        config = load_config(
+            overrides={
+                "review.walkthrough": False,
+                "review.walkthrough_sequence_diagram": True,
+            }
+        )
+        assert config.review.walkthrough is False
+        assert config.review.walkthrough_sequence_diagram is True

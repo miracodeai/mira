@@ -61,7 +61,9 @@ class ReviewConfig(BaseModel):
     context_lines: int = Field(default=3, ge=0)
     max_diff_size: int = 50_000
     include_summary: bool = True
-    focus_only_on_problems: bool = True
+    focus_only_on_problems: bool = False
+    walkthrough: bool = True
+    walkthrough_sequence_diagram: bool = True
 
 
 class MiraConfig(BaseModel):
