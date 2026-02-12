@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,13 @@ def load_config(
     if overrides:
         for key, value in overrides.items():
             _set_nested(data, key.split("."), value)
+
+    # Respect MIRA_MODEL env var as a fallback when not set via file or overrides
+    env_model = os.environ.get("MIRA_MODEL")
+    if env_model and "llm" not in data:
+        data["llm"] = {"model": env_model}
+    elif env_model and "model" not in data.get("llm", {}):
+        data.setdefault("llm", {})["model"] = env_model
 
     try:
         return MiraConfig.model_validate(data)
