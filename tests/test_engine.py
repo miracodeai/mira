@@ -54,6 +54,9 @@ def mock_provider(sample_diff_text: str) -> AsyncMock:
     provider.get_pr_diff.return_value = sample_diff_text
     provider.post_review = AsyncMock()
     provider.post_comment = AsyncMock()
+    provider.find_bot_comment = AsyncMock(return_value=None)
+    provider.update_comment = AsyncMock()
+    provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
     return provider
 
 
@@ -354,3 +357,108 @@ class TestReviewEngine:
         review_order = mock_provider.post_review.call_args_list[0]
         assert comment_order is not None
         assert review_order is not None
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_upserts_existing_comment(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """Existing walkthrough comment is updated instead of creating a new one."""
+        mock_provider.find_bot_comment = AsyncMock(return_value=42)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.find_bot_comment.assert_called_once()
+        mock_provider.update_comment.assert_called_once()
+        assert mock_provider.update_comment.call_args[0][1] == 42
+        mock_provider.post_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_creates_when_no_existing(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """When no existing walkthrough comment is found, a new one is created."""
+        mock_provider.find_bot_comment = AsyncMock(return_value=None)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.find_bot_comment.assert_called_once()
+        mock_provider.post_comment.assert_called_once()
+        mock_provider.update_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_upsert_failure_does_not_block_review(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """If find_bot_comment raises, the review still completes."""
+        mock_provider.find_bot_comment = AsyncMock(side_effect=RuntimeError("API error"))
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # Review still completed
+        mock_provider.post_review.assert_called_once()
+        assert result.reviewed_files > 0
+
+    @pytest.mark.asyncio
+    async def test_resolve_called_before_post_review(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """resolve_outdated_review_threads is called before post_review."""
+        mock_provider.resolve_outdated_review_threads = AsyncMock(return_value=2)
+
+        call_order: list[str] = []
+
+        async def _track_resolve(*a, **kw):
+            call_order.append("resolve")
+            return 2
+
+        async def _track_post_review(*a, **kw):
+            call_order.append("post_review")
+
+        mock_provider.resolve_outdated_review_threads = AsyncMock(side_effect=_track_resolve)
+        mock_provider.post_review = AsyncMock(side_effect=_track_post_review)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.resolve_outdated_review_threads.assert_called_once()
+        assert call_order.index("resolve") < call_order.index("post_review")
+
+    @pytest.mark.asyncio
+    async def test_resolve_failure_does_not_block_review(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """If resolve_outdated_review_threads raises, the review still completes."""
+        mock_provider.resolve_outdated_review_threads = AsyncMock(
+            side_effect=RuntimeError("GraphQL boom")
+        )
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.post_review.assert_called_once()
+        assert result.reviewed_files > 0
+
+    @pytest.mark.asyncio
+    async def test_resolve_called_even_with_no_new_comments(self, mock_provider: AsyncMock):
+        """resolve_outdated_review_threads is called even when LLM returns no comments."""
+        llm = MagicMock(spec=LLMProvider)
+        llm.complete = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "comments": [],
+                    "summary": "All good!",
+                    "metadata": {"reviewed_files": 1},
+                }
+            )
+        )
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.resolve_outdated_review_threads.assert_called_once()
+        mock_provider.post_review.assert_not_called()

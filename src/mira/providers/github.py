@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from typing import Any
 
 import httpx
 from github import Github, GithubException
@@ -41,6 +42,36 @@ _SEVERITY_BADGE: dict[Severity, str] = {
 _PR_URL_PATTERN = re.compile(
     r"(?:https?://github\.com/)?(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+)(?:/pull/|#)(?P<number>\d+)"
 )
+
+_GRAPHQL_URL = "https://api.github.com/graphql"
+
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  viewer { login }
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes { author { login } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_RESOLVE_THREAD_MUTATION = """
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+"""
 
 
 def parse_pr_url(pr_url: str) -> tuple[str, str, int]:
@@ -198,6 +229,119 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to post comment: {e}") from e
 
+    async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(_RETRYABLE),
+            reraise=True,
+        )
+        def _find() -> int | None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            for comment in issue.get_comments():
+                if marker in comment.body:
+                    return comment.id
+            return None
+
+        try:
+            return await asyncio.to_thread(_find)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to find bot comment: {e}") from e
+
+    async def update_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(_RETRYABLE),
+            reraise=True,
+        )
+        def _update() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            comment = issue.get_comment(comment_id)
+            comment.edit(body)
+
+        try:
+            await asyncio.to_thread(_update)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to update comment: {e}") from e
+
+    async def _graphql_request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """Execute a GraphQL request against the GitHub API."""
+        headers = {"Authorization": f"bearer {self._token}"}
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                _GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+        if "errors" in data:
+            raise ProviderError(f"GraphQL error: {data['errors']}")
+        return data
+
+    async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(_RETRYABLE),
+            reraise=True,
+        )
+        async def _resolve() -> int:
+            # Phase 1: Paginate through review threads and collect bot-authored unresolved ones
+            bot_login: str | None = None
+            thread_ids: list[str] = []
+            cursor: str | None = None
+
+            while True:
+                variables: dict[str, Any] = {
+                    "owner": pr_info.owner,
+                    "repo": pr_info.repo,
+                    "number": pr_info.number,
+                    "cursor": cursor,
+                }
+                data = await self._graphql_request(_REVIEW_THREADS_QUERY, variables)
+
+                if bot_login is None:
+                    bot_login = data["data"]["viewer"]["login"]
+
+                threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+                for node in threads["nodes"]:
+                    if node["isResolved"]:
+                        continue
+                    comments = node["comments"]["nodes"]
+                    if not comments:
+                        continue
+                    author = comments[0].get("author")
+                    if author is None:
+                        continue
+                    if author["login"] == bot_login:
+                        thread_ids.append(node["id"])
+
+                page_info = threads["pageInfo"]
+                if not page_info["hasNextPage"]:
+                    break
+                cursor = page_info["endCursor"]
+
+            # Phase 2: Resolve each collected thread
+            for thread_id in thread_ids:
+                await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
+
+            return len(thread_ids)
+
+        try:
+            return await _resolve()
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to resolve outdated review threads: {e}") from e
+
 
 def _format_comment_body(comment: ReviewComment) -> str:
     """Format a review comment body with category badge, severity, and suggestion block."""
@@ -218,5 +362,16 @@ def _format_comment_body(comment: ReviewComment) -> str:
         parts.append("```suggestion")
         parts.append(comment.suggestion)
         parts.append("```")
+
+    if comment.agent_prompt:
+        parts.append("")
+        parts.append("<details>")
+        parts.append("<summary>🤖 Prompt for AI Agents</summary>")
+        parts.append("")
+        parts.append("```text")
+        parts.append(comment.agent_prompt)
+        parts.append("```")
+        parts.append("")
+        parts.append("</details>")
 
     return "\n".join(parts)

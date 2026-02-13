@@ -13,6 +13,7 @@ from mira.llm.response_parser import (
     parse_walkthrough_response,
 )
 from mira.models import (
+    WALKTHROUGH_MARKER,
     FileChangeType,
     FileDiff,
     HunkInfo,
@@ -102,6 +103,13 @@ class TestBuildWalkthroughPrompt:
         )
         system = messages[0]["content"]
         assert "sequence diagram" in system.lower() or "sequence_diagram" in system
+        # Prompt must instruct the LLM to use actual code components, not generic actors
+        assert "code-level component interactions" in system
+        # Verify the prohibition is explicit — template renders bold markdown
+        assert "**Do NOT**" in system
+        assert "**Do NOT** use abstract actors" in system
+        assert "Developer" in system
+        assert "null" in system  # instruction to omit when no interactions
 
     def test_hunk_headers_extracted(self):
         messages = build_walkthrough_prompt(
@@ -254,6 +262,11 @@ class TestWalkthroughToMarkdown:
         assert "| `src/utils.py` | Added | New utils |" in md
         assert "**Tests**" in md
         assert "| `tests/test_utils.py` | Added | Tests for utils |" in md
+        lines = md.split("\n")
+        assert "---" in lines, "Expected separator '---' in markdown output"
+        separator_idx = len(lines) - 1 - lines[::-1].index("---")
+        footer_text = "\n".join(lines[separator_idx:])
+        assert "@miracodeai help" in footer_text
 
     def test_flat_fallback_when_no_groups(self):
         result = WalkthroughResult(
@@ -309,3 +322,25 @@ class TestWalkthroughToMarkdown:
         result = WalkthroughResult(summary="No effort.")
         md = result.to_markdown()
         assert "**Estimated effort:**" not in md
+
+    def test_help_footer(self):
+        result = WalkthroughResult(summary="Footer test.")
+        md = result.to_markdown()
+        lines = md.split("\n")
+        assert "---" in lines, "Expected separator '---' in markdown output"
+        separator_idx = len(lines) - 1 - lines[::-1].index("---")
+        footer_text = "\n".join(lines[separator_idx:])
+        assert "`@miracodeai help`" in footer_text
+        assert "available commands and usage tips" in footer_text
+
+    def test_help_footer_custom_bot_name(self):
+        result = WalkthroughResult(summary="Footer test.")
+        md = result.to_markdown(bot_name="mybot")
+        assert "`@mybot help`" in md
+        assert "@miracodeai" not in md
+
+    def test_contains_walkthrough_marker(self):
+        result = WalkthroughResult(summary="Test.")
+        md = result.to_markdown()
+        assert md.startswith(WALKTHROUGH_MARKER)
+        assert md.count(WALKTHROUGH_MARKER) == 1

@@ -255,6 +255,54 @@ class TestNoOpSuggestionCheck:
         assert comments[0].suggestion == "count = 1"
 
 
+class TestAgentPrompt:
+    def test_agent_prompt_parsed(self):
+        data = json.dumps(
+            {
+                "comments": [
+                    {
+                        "path": "a.py",
+                        "line": 2,
+                        "title": "Problem",
+                        "body": "Explaining the issue",
+                        "severity": "warning",
+                        "confidence": 0.9,
+                        "agent_prompt": "In a.py at line 2, replace the call to foo() with bar().",
+                    }
+                ],
+                "summary": "",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+        response = parse_llm_response(data)
+        comments = convert_to_review_comments(response, valid_paths={"a.py"})
+        assert len(comments) == 1
+        expected = "In a.py at line 2, replace the call to foo() with bar()."
+        assert comments[0].agent_prompt == expected
+
+    def test_agent_prompt_missing_defaults_to_none(self):
+        data = json.dumps(
+            {
+                "comments": [
+                    {
+                        "path": "a.py",
+                        "line": 2,
+                        "title": "Problem",
+                        "body": "Explaining the issue",
+                        "severity": "warning",
+                        "confidence": 0.9,
+                    }
+                ],
+                "summary": "",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+        response = parse_llm_response(data)
+        comments = convert_to_review_comments(response, valid_paths={"a.py"})
+        assert len(comments) == 1
+        assert comments[0].agent_prompt is None
+
+
 class TestSuggestionWithoutBody:
     def test_skips_suggestion_without_body(self):
         data = json.dumps(

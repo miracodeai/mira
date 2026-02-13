@@ -20,7 +20,7 @@ from mira.llm.response_parser import (
     parse_llm_response,
     parse_walkthrough_response,
 )
-from mira.models import ReviewComment, ReviewResult, WalkthroughResult
+from mira.models import WALKTHROUGH_MARKER, ReviewComment, ReviewResult, WalkthroughResult
 from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -34,10 +34,12 @@ class ReviewEngine:
         config: MiraConfig,
         llm: LLMProvider,
         provider: BaseProvider | None = None,
+        bot_name: str = "miracodeai",
     ) -> None:
         self.config = config
         self.llm = llm
         self.provider = provider
+        self.bot_name = bot_name
 
     async def review_pr(self, pr_url: str) -> ReviewResult:
         """Full pipeline: fetch PR -> review -> post results."""
@@ -53,12 +55,25 @@ class ReviewEngine:
             pr_description=pr_info.description,
         )
 
-        # Post walkthrough comment before inline review
+        # Post walkthrough comment before inline review (upsert: edit if exists)
         if result.walkthrough:
             try:
-                await self.provider.post_comment(pr_info, result.walkthrough.to_markdown())
+                markdown = result.walkthrough.to_markdown(bot_name=self.bot_name)
+                existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
+                if existing_id is not None:
+                    await self.provider.update_comment(pr_info, existing_id, markdown)
+                else:
+                    await self.provider.post_comment(pr_info, markdown)
             except Exception as exc:
                 logger.warning("Failed to post walkthrough comment: %s", exc)
+
+        # Resolve outdated review threads before posting new ones
+        try:
+            resolved = await self.provider.resolve_outdated_review_threads(pr_info)
+            if resolved:
+                logger.info("Resolved %d outdated review thread(s) on PR %s", resolved, pr_info.url)
+        except Exception as exc:
+            logger.warning("Failed to resolve outdated review threads: %s", exc)
 
         # Only post if there are comments
         if result.comments:

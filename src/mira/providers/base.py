@@ -29,3 +29,15 @@ class BaseProvider(abc.ABC):
     @abc.abstractmethod
     async def post_comment(self, pr_info: PRInfo, body: str) -> None:
         """Post a top-level comment on a pull request."""
+
+    @abc.abstractmethod
+    async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:
+        """Find an existing comment containing the marker. Returns comment ID or None."""
+
+    @abc.abstractmethod
+    async def update_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
+        """Edit an existing comment by its ID."""
+
+    @abc.abstractmethod
+    async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
+        """Resolve all unresolved review threads authored by this bot. Returns count resolved."""

@@ -308,6 +308,51 @@ class TestFormatCommentBody:
             assert f"{emoji} **{label}**" in body
 
 
+class TestFormatCommentBodyAgentPrompt:
+    """Tests for agent_prompt rendering in comment body."""
+
+    def _make_comment(self, **overrides) -> ReviewComment:
+        defaults = {
+            "path": "src/foo.py",
+            "line": 10,
+            "end_line": None,
+            "severity": Severity.WARNING,
+            "category": "bug",
+            "title": "Something is wrong",
+            "body": "Detailed explanation.",
+            "confidence": 0.9,
+            "suggestion": None,
+            "agent_prompt": None,
+        }
+        defaults.update(overrides)
+        return ReviewComment(**defaults)
+
+    def test_with_agent_prompt(self):
+        body = _format_comment_body(
+            self._make_comment(agent_prompt="In src/foo.py at line 10, replace foo() with bar().")
+        )
+        assert "<details>" in body
+        assert "Prompt for AI Agents" in body
+        assert "</details>" in body
+        assert "In src/foo.py at line 10, replace foo() with bar()." in body
+
+    def test_without_agent_prompt(self):
+        body = _format_comment_body(self._make_comment(agent_prompt=None))
+        assert "<details>" not in body
+        assert "Prompt for AI Agents" not in body
+
+    def test_agent_prompt_after_suggestion(self):
+        body = _format_comment_body(
+            self._make_comment(
+                suggestion="return bar()",
+                agent_prompt="In src/foo.py at line 10, replace foo() with bar().",
+            )
+        )
+        suggestion_pos = body.index("```suggestion")
+        details_pos = body.index("<details>")
+        assert details_pos > suggestion_pos
+
+
 class TestPostComment:
     @pytest.mark.asyncio
     async def test_post_comment_calls_create_comment(self):
@@ -356,3 +401,316 @@ class TestPostComment:
         await provider.post_comment(pr_info, "Hello")
         assert call_count == 2
         mock_issue.create_comment.assert_called_once_with("Hello")
+
+
+class TestFindBotComment:
+    @pytest.mark.asyncio
+    async def test_find_bot_comment_found(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        comment1 = MagicMock()
+        comment1.body = "unrelated comment"
+        comment1.id = 10
+
+        comment2 = MagicMock()
+        comment2.body = "<!-- mira-walkthrough -->\n## Mira PR Walkthrough"
+        comment2.id = 42
+
+        mock_issue = MagicMock()
+        mock_issue.get_comments.return_value = [comment1, comment2]
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        assert result == 42
+
+    @pytest.mark.asyncio
+    async def test_find_bot_comment_not_found(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        comment1 = MagicMock()
+        comment1.body = "unrelated comment"
+        comment1.id = 10
+
+        mock_issue = MagicMock()
+        mock_issue.get_comments.return_value = [comment1]
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_find_bot_comment_empty_comments(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        mock_issue.get_comments.return_value = []
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        assert result is None
+
+
+class TestUpdateComment:
+    @pytest.mark.asyncio
+    async def test_update_comment_calls_edit(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_comment = MagicMock()
+        mock_issue = MagicMock()
+        mock_issue.get_comment.return_value = mock_comment
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.update_comment(pr_info, 42, "new body")
+
+        mock_issue.get_comment.assert_called_once_with(42)
+        mock_comment.edit.assert_called_once_with("new body")
+
+
+def _make_thread_node(thread_id: str, is_resolved: bool, author_login: str | None) -> dict:
+    """Helper to build a reviewThread node for GraphQL response mocking."""
+    author = {"login": author_login} if author_login is not None else None
+    return {
+        "id": thread_id,
+        "isResolved": is_resolved,
+        "comments": {"nodes": [{"author": author}]},
+    }
+
+
+def _make_graphql_response(
+    viewer_login: str,
+    thread_nodes: list[dict],
+    has_next_page: bool = False,
+    end_cursor: str | None = None,
+) -> dict:
+    """Helper to build a full GraphQL response for review threads query."""
+    return {
+        "data": {
+            "viewer": {"login": viewer_login},
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {
+                            "hasNextPage": has_next_page,
+                            "endCursor": end_cursor,
+                        },
+                        "nodes": thread_nodes,
+                    }
+                }
+            },
+        }
+    }
+
+
+class TestResolveOutdatedReviewThreads:
+    """Tests for resolve_outdated_review_threads using GraphQL."""
+
+    def _make_provider(self) -> GitHubProvider:
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        provider._github = MagicMock()
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_found_and_resolved(self):
+        """Bot-authored unresolved threads are resolved; human threads are skipped."""
+        provider = self._make_provider()
+        pr_info = _make_pr_info()
+
+        threads = [
+            _make_thread_node("T1", False, "mira-app[bot]"),
+            _make_thread_node("T2", False, "human-user"),
+        ]
+        query_resp = _make_graphql_response("mira-app[bot]", threads)
+        mutation_resp = {
+            "data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}
+        }
+
+        call_count = 0
+
+        async def _mock_post(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            body = kwargs.get("json", {})
+            data = mutation_resp if "mutation" in body.get("query", "") else query_resp
+            return httpx.Response(200, json=data, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.resolve_outdated_review_threads(pr_info)
+
+        assert result == 1
+        # 1 query + 1 mutation
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_unresolved_bot_threads(self):
+        """All threads resolved or human-authored → returns 0."""
+        provider = self._make_provider()
+        pr_info = _make_pr_info()
+
+        threads = [
+            _make_thread_node("T1", True, "mira-app[bot]"),
+            _make_thread_node("T2", False, "human-user"),
+        ]
+        query_resp = _make_graphql_response("mira-app[bot]", threads)
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(200, json=query_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.resolve_outdated_review_threads(pr_info)
+
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_no_threads_at_all(self):
+        """Empty nodes list → returns 0."""
+        provider = self._make_provider()
+        pr_info = _make_pr_info()
+
+        query_resp = _make_graphql_response("mira-app[bot]", [])
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(200, json=query_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.resolve_outdated_review_threads(pr_info)
+
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_pagination(self):
+        """Bot threads across two pages are all collected and resolved."""
+        provider = self._make_provider()
+        pr_info = _make_pr_info()
+
+        page1 = _make_graphql_response(
+            "mira-app[bot]",
+            [_make_thread_node("T1", False, "mira-app[bot]")],
+            has_next_page=True,
+            end_cursor="cursor1",
+        )
+        page2 = _make_graphql_response(
+            "mira-app[bot]",
+            [_make_thread_node("T2", False, "mira-app[bot]")],
+        )
+        mutation_resp = {
+            "data": {"resolveReviewThread": {"thread": {"id": "X", "isResolved": True}}}
+        }
+
+        call_count = 0
+
+        async def _mock_post(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            body = kwargs.get("json", {})
+            query = body.get("query", "")
+            if "mutation" in query:
+                return httpx.Response(200, json=mutation_resp, request=httpx.Request("POST", url))
+            variables = body.get("variables", {})
+            data = page2 if variables.get("cursor") == "cursor1" else page1
+            return httpx.Response(200, json=data, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.resolve_outdated_review_threads(pr_info)
+
+        assert result == 2
+        # 2 query pages + 2 mutations
+        assert call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_null_author_skipped(self):
+        """Thread with deleted user (author: null) is safely skipped."""
+        provider = self._make_provider()
+        pr_info = _make_pr_info()
+
+        threads = [
+            _make_thread_node("T1", False, None),
+            _make_thread_node("T2", False, "mira-app[bot]"),
+        ]
+        query_resp = _make_graphql_response("mira-app[bot]", threads)
+        mutation_resp = {
+            "data": {"resolveReviewThread": {"thread": {"id": "T2", "isResolved": True}}}
+        }
+
+        async def _mock_post(self, url, **kwargs):
+            body = kwargs.get("json", {})
+            if "mutation" in body.get("query", ""):
+                return httpx.Response(200, json=mutation_resp, request=httpx.Request("POST", url))
+            return httpx.Response(200, json=query_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.resolve_outdated_review_threads(pr_info)
+
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_graphql_error_raises_provider_error(self):
+        """Response containing 'errors' key raises ProviderError."""
+        provider = self._make_provider()
+        pr_info = _make_pr_info()
+
+        error_resp = {"errors": [{"message": "Something went wrong"}]}
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(200, json=error_resp, request=httpx.Request("POST", url))
+
+        with (
+            patch.object(httpx.AsyncClient, "post", _mock_post),
+            pytest.raises(ProviderError, match="GraphQL error"),
+        ):
+            await provider.resolve_outdated_review_threads(pr_info)
+
+    @pytest.mark.asyncio
+    async def test_retries_on_transient_error(self):
+        """First call raises ConnectError, second succeeds."""
+        provider = self._make_provider()
+        pr_info = _make_pr_info()
+
+        query_resp = _make_graphql_response("mira-app[bot]", [])
+
+        call_count = 0
+
+        async def _mock_post(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("transient")
+            return httpx.Response(200, json=query_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.resolve_outdated_review_threads(pr_info)
+
+        assert result == 0
+        assert call_count == 2

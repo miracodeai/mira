@@ -20,7 +20,10 @@ _REVIEW_KEYWORDS = {"review", "review this", "review this pr"}
 
 
 async def handle_pull_request(
-    payload: dict[str, Any], app_auth: GitHubAppAuth, metrics: Metrics | None = None
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+    metrics: Metrics | None = None,
 ) -> None:
     """Handle a pull_request event by running a full review."""
     installation_id: int = payload.get("installation", {}).get("id", 0)
@@ -37,7 +40,7 @@ async def handle_pull_request(
         config = load_config()
         llm = LLMProvider(config.llm)
         provider = GitHubProvider(token)
-        engine = ReviewEngine(config=config, llm=llm, provider=provider)
+        engine = ReviewEngine(config=config, llm=llm, provider=provider, bot_name=bot_name)
 
         logger.info("Reviewing PR %s", pr_url)
         result = await engine.review_pr(pr_url)
@@ -89,7 +92,7 @@ async def handle_comment(
 
         is_review = question.lower() in _REVIEW_KEYWORDS
         if is_review:
-            engine = ReviewEngine(config=config, llm=llm, provider=provider)
+            engine = ReviewEngine(config=config, llm=llm, provider=provider, bot_name=bot_name)
             logger.info("Re-review triggered for PR %s by @%s", pr_url, comment_user)
             await engine.review_pr(pr_url)
             logger.info("Re-review complete for PR %s", pr_url)
