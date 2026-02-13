@@ -54,6 +54,8 @@ def mock_provider(sample_diff_text: str) -> AsyncMock:
     provider.get_pr_diff.return_value = sample_diff_text
     provider.post_review = AsyncMock()
     provider.post_comment = AsyncMock()
+    provider.find_bot_comment = AsyncMock(return_value=None)
+    provider.update_comment = AsyncMock()
     return provider
 
 
@@ -354,3 +356,46 @@ class TestReviewEngine:
         review_order = mock_provider.post_review.call_args_list[0]
         assert comment_order is not None
         assert review_order is not None
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_upserts_existing_comment(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """Existing walkthrough comment is updated instead of creating a new one."""
+        mock_provider.find_bot_comment = AsyncMock(return_value=42)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.find_bot_comment.assert_called_once()
+        mock_provider.update_comment.assert_called_once()
+        assert mock_provider.update_comment.call_args[0][1] == 42
+        mock_provider.post_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_creates_when_no_existing(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """When no existing walkthrough comment is found, a new one is created."""
+        mock_provider.find_bot_comment = AsyncMock(return_value=None)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.find_bot_comment.assert_called_once()
+        mock_provider.post_comment.assert_called_once()
+        mock_provider.update_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_upsert_failure_does_not_block_review(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """If find_bot_comment raises, the review still completes."""
+        mock_provider.find_bot_comment = AsyncMock(side_effect=RuntimeError("API error"))
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # Review still completed
+        mock_provider.post_review.assert_called_once()
+        assert result.reviewed_files > 0

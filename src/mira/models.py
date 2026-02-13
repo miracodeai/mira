@@ -5,6 +5,8 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
+WALKTHROUGH_MARKER = "<!-- mira-walkthrough -->"
+
 
 class FileChangeType(enum.Enum):
     ADDED = "added"
@@ -143,7 +145,7 @@ class WalkthroughResult:
 
     def to_markdown(self, bot_name: str = "miracodeai") -> str:
         """Render as a markdown PR comment."""
-        parts = ["## Mira PR Walkthrough", ""]
+        parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
 
         if self.effort:

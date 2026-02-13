@@ -356,3 +356,98 @@ class TestPostComment:
         await provider.post_comment(pr_info, "Hello")
         assert call_count == 2
         mock_issue.create_comment.assert_called_once_with("Hello")
+
+
+class TestFindBotComment:
+    @pytest.mark.asyncio
+    async def test_find_bot_comment_found(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        comment1 = MagicMock()
+        comment1.body = "unrelated comment"
+        comment1.id = 10
+
+        comment2 = MagicMock()
+        comment2.body = "<!-- mira-walkthrough -->\n## Mira PR Walkthrough"
+        comment2.id = 42
+
+        mock_issue = MagicMock()
+        mock_issue.get_comments.return_value = [comment1, comment2]
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        assert result == 42
+
+    @pytest.mark.asyncio
+    async def test_find_bot_comment_not_found(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        comment1 = MagicMock()
+        comment1.body = "unrelated comment"
+        comment1.id = 10
+
+        mock_issue = MagicMock()
+        mock_issue.get_comments.return_value = [comment1]
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_find_bot_comment_empty_comments(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        mock_issue.get_comments.return_value = []
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        assert result is None
+
+
+class TestUpdateComment:
+    @pytest.mark.asyncio
+    async def test_update_comment_calls_edit(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_comment = MagicMock()
+        mock_issue = MagicMock()
+        mock_issue.get_comment.return_value = mock_comment
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.update_comment(pr_info, 42, "new body")
+
+        mock_issue.get_comment.assert_called_once_with(42)
+        mock_comment.edit.assert_called_once_with("new body")

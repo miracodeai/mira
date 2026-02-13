@@ -198,6 +198,48 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to post comment: {e}") from e
 
+    async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(_RETRYABLE),
+            reraise=True,
+        )
+        def _find() -> int | None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            for comment in issue.get_comments():
+                if marker in comment.body:
+                    return comment.id
+            return None
+
+        try:
+            return await asyncio.to_thread(_find)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to find bot comment: {e}") from e
+
+    async def update_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(_RETRYABLE),
+            reraise=True,
+        )
+        def _update() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            comment = issue.get_comment(comment_id)
+            comment.edit(body)
+
+        try:
+            await asyncio.to_thread(_update)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to update comment: {e}") from e
+
 
 def _format_comment_body(comment: ReviewComment) -> str:
     """Format a review comment body with category badge, severity, and suggestion block."""

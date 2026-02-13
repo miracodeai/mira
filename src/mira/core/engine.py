@@ -20,7 +20,7 @@ from mira.llm.response_parser import (
     parse_llm_response,
     parse_walkthrough_response,
 )
-from mira.models import ReviewComment, ReviewResult, WalkthroughResult
+from mira.models import WALKTHROUGH_MARKER, ReviewComment, ReviewResult, WalkthroughResult
 from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -53,10 +53,15 @@ class ReviewEngine:
             pr_description=pr_info.description,
         )
 
-        # Post walkthrough comment before inline review
+        # Post walkthrough comment before inline review (upsert: edit if exists)
         if result.walkthrough:
             try:
-                await self.provider.post_comment(pr_info, result.walkthrough.to_markdown())
+                markdown = result.walkthrough.to_markdown()
+                existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
+                if existing_id is not None:
+                    await self.provider.update_comment(pr_info, existing_id, markdown)
+                else:
+                    await self.provider.post_comment(pr_info, markdown)
             except Exception as exc:
                 logger.warning("Failed to post walkthrough comment: %s", exc)
 

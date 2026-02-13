@@ -13,6 +13,7 @@ from mira.llm.response_parser import (
     parse_walkthrough_response,
 )
 from mira.models import (
+    WALKTHROUGH_MARKER,
     FileChangeType,
     FileDiff,
     HunkInfo,
@@ -335,3 +336,9 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown(bot_name="mybot")
         assert "`@mybot help`" in md
         assert "@miracodeai" not in md
+
+    def test_contains_walkthrough_marker(self):
+        result = WalkthroughResult(summary="Test.")
+        md = result.to_markdown()
+        assert md.startswith(WALKTHROUGH_MARKER)
+        assert md.count(WALKTHROUGH_MARKER) == 1
