@@ -9,5 +9,4 @@ ARG POSTHOG_HOST="https://us.i.posthog.com"
 ENV POSTHOG_API_KEY=${POSTHOG_API_KEY}
 ENV POSTHOG_HOST=${POSTHOG_HOST}
 
-EXPOSE 8000
 CMD ["mira", "serve"]
