@@ -102,6 +102,10 @@ class TestBuildWalkthroughPrompt:
         )
         system = messages[0]["content"]
         assert "sequence diagram" in system.lower() or "sequence_diagram" in system
+        # Prompt must instruct the LLM to use actual code components, not generic actors
+        assert "code-level component interactions" in system
+        assert "Developer" in system  # mentioned in the "Do NOT" instruction
+        assert "null" in system  # instruction to omit when no interactions
 
     def test_hunk_headers_extracted(self):
         messages = build_walkthrough_prompt(
@@ -254,6 +258,7 @@ class TestWalkthroughToMarkdown:
         assert "| `src/utils.py` | Added | New utils |" in md
         assert "**Tests**" in md
         assert "| `tests/test_utils.py` | Added | Tests for utils |" in md
+        assert "@miracodeai help" in md
 
     def test_flat_fallback_when_no_groups(self):
         result = WalkthroughResult(
@@ -309,3 +314,16 @@ class TestWalkthroughToMarkdown:
         result = WalkthroughResult(summary="No effort.")
         md = result.to_markdown()
         assert "**Estimated effort:**" not in md
+
+    def test_help_footer(self):
+        result = WalkthroughResult(summary="Footer test.")
+        md = result.to_markdown()
+        assert "---" in md
+        assert "`@miracodeai help`" in md
+        assert "available commands and usage tips" in md
+
+    def test_help_footer_custom_bot_name(self):
+        result = WalkthroughResult(summary="Footer test.")
+        md = result.to_markdown(bot_name="mybot")
+        assert "`@mybot help`" in md
+        assert "@miracodeai" not in md

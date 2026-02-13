@@ -219,7 +219,7 @@ def review(
     required=True,
     help="Webhook secret from GitHub App settings",
 )
-@click.option("--bot-name", envvar="MIRA_BOT_NAME", default="mira-bot", help="Bot @mention name")
+@click.option("--bot-name", envvar="MIRA_BOT_NAME", default="miracodeai", help="Bot @mention name")
 @click.option(
     "--posthog-api-key",
     envvar="POSTHOG_API_KEY",
