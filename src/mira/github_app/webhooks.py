@@ -68,6 +68,14 @@ def create_app(
         installation_id: int = payload.get("installation", {}).get("id", 0)
 
         if event == "pull_request" and action in _PR_ACTIONS:
+            sender: str = payload.get("sender", {}).get("login", "")
+            if sender == f"{bot_name}[bot]":
+                logger.debug("Ignoring pull_request event from self (%s)", sender)
+                return Response(
+                    content='{"status": "ignored"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
             if metrics:
                 metrics.track(
                     "webhook_received",
@@ -83,7 +91,17 @@ def create_app(
 
         if event == "issue_comment" and action == "created":
             comment_body: str = payload.get("comment", {}).get("body", "")
+            comment_user: str = payload.get("comment", {}).get("user", {}).get("login", "")
             is_pr = "pull_request" in payload.get("issue", {})
+
+            # Ignore comments authored by this bot to prevent self-triggering loops
+            if comment_user == f"{bot_name}[bot]":
+                logger.debug("Ignoring comment from self (%s)", comment_user)
+                return Response(
+                    content='{"status": "ignored"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
 
             if is_pr and f"@{bot_name}" in comment_body:
                 if metrics:
