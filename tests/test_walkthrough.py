@@ -263,7 +263,7 @@ class TestWalkthroughToMarkdown:
         assert "**Tests**" in md
         assert "| `tests/test_utils.py` | Added | Tests for utils |" in md
         lines = md.split("\n")
-        separator_idx = lines.index("---")
+        separator_idx = len(lines) - 1 - lines[::-1].index("---")
         footer_text = "\n".join(lines[separator_idx:])
         assert "@miracodeai help" in footer_text
 
@@ -326,7 +326,7 @@ class TestWalkthroughToMarkdown:
         result = WalkthroughResult(summary="Footer test.")
         md = result.to_markdown()
         lines = md.split("\n")
-        separator_idx = lines.index("---")
+        separator_idx = len(lines) - 1 - lines[::-1].index("---")
         footer_text = "\n".join(lines[separator_idx:])
         assert "`@miracodeai help`" in footer_text
         assert "available commands and usage tips" in footer_text

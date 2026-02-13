@@ -35,7 +35,7 @@ Respond with a JSON object (no markdown fences) matching this schema:
     }
   ],
   "effort": {"level": 3, "label": "Moderate", "minutes": 20}{% if include_sequence_diagram %},
-  "sequence_diagram": "sequenceDiagram\n    participant C as ComponentA\n    participant S as ServiceB\n    C->>+S: methodName(args)\n    S-->>-C: result" or null{% endif %}
+  "sequence_diagram": "sequenceDiagram\n    participant C as ComponentA\n    participant S as ServiceB\n    C->>+S: methodName(args)\n    S-->>-C: result" // or null if no meaningful interactions{% endif %}
 
 }
 ```

@@ -199,8 +199,7 @@ class WalkthroughResult:
         parts.append("")
         parts.append("---")
         parts.append(
-            f"> Comment `@{bot_name} help` to get the list of"
-            " available commands and usage tips."
+            f"> Comment `@{bot_name} help` to get the list of available commands and usage tips."
         )
 
         return "\n".join(parts)
