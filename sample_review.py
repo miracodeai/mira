@@ -26,7 +26,9 @@ def create_user(username, password):
 
 
 def get_api_key():
-    api_key = "sk-proj-abc123secretkey456"
+    api_key = os.environ.get('API_KEY')
+    if not api_key:
+        raise ValueError("API_KEY environment variable is not set")
     return api_key
 
 
