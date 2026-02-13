@@ -104,7 +104,10 @@ class TestBuildWalkthroughPrompt:
         assert "sequence diagram" in system.lower() or "sequence_diagram" in system
         # Prompt must instruct the LLM to use actual code components, not generic actors
         assert "code-level component interactions" in system
-        assert "Developer" in system  # mentioned in the "Do NOT" instruction
+        # Verify the prohibition is explicit — template renders bold markdown
+        assert "**Do NOT**" in system
+        assert "**Do NOT** use abstract actors" in system
+        assert "Developer" in system
         assert "null" in system  # instruction to omit when no interactions
 
     def test_hunk_headers_extracted(self):
@@ -258,7 +261,10 @@ class TestWalkthroughToMarkdown:
         assert "| `src/utils.py` | Added | New utils |" in md
         assert "**Tests**" in md
         assert "| `tests/test_utils.py` | Added | Tests for utils |" in md
-        assert "@miracodeai help" in md
+        lines = md.split("\n")
+        separator_idx = lines.index("---")
+        footer_text = "\n".join(lines[separator_idx:])
+        assert "@miracodeai help" in footer_text
 
     def test_flat_fallback_when_no_groups(self):
         result = WalkthroughResult(
@@ -318,9 +324,11 @@ class TestWalkthroughToMarkdown:
     def test_help_footer(self):
         result = WalkthroughResult(summary="Footer test.")
         md = result.to_markdown()
-        assert "---" in md
-        assert "`@miracodeai help`" in md
-        assert "available commands and usage tips" in md
+        lines = md.split("\n")
+        separator_idx = lines.index("---")
+        footer_text = "\n".join(lines[separator_idx:])
+        assert "`@miracodeai help`" in footer_text
+        assert "available commands and usage tips" in footer_text
 
     def test_help_footer_custom_bot_name(self):
         result = WalkthroughResult(summary="Footer test.")
