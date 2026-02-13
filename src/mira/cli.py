@@ -131,10 +131,11 @@ def review(
     config_path: str | None,
 ) -> None:
     """Review a pull request or diff."""
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s: %(message)s")
-    else:
-        logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(name)s %(levelname)s: %(message)s",
+        stream=sys.stdout,
+    )
 
     if not pr_url and not use_stdin:
         raise click.UsageError("Provide --pr <url> or --stdin")
@@ -256,10 +257,11 @@ def serve(
             f"Missing dependency: {exc}. Install with: pip install mira-reviewer[serve]"
         ) from exc
 
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s: %(message)s")
-    else:
-        logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(name)s %(levelname)s: %(message)s",
+        stream=sys.stdout,
+    )
 
     # Support @path/to/key.pem syntax
     if private_key.startswith("@"):
