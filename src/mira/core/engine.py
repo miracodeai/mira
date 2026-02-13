@@ -65,6 +65,14 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to post walkthrough comment: %s", exc)
 
+        # Resolve outdated review threads before posting new ones
+        try:
+            resolved = await self.provider.resolve_outdated_review_threads(pr_info)
+            if resolved:
+                logger.info("Resolved %d outdated review thread(s) on PR %s", resolved, pr_info.url)
+        except Exception as exc:
+            logger.warning("Failed to resolve outdated review threads: %s", exc)
+
         # Only post if there are comments
         if result.comments:
             await self.provider.post_review(pr_info, result)

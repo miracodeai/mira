@@ -37,3 +37,7 @@ class BaseProvider(abc.ABC):
     @abc.abstractmethod
     async def update_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
         """Edit an existing comment by its ID."""
+
+    @abc.abstractmethod
+    async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
+        """Resolve all unresolved review threads authored by this bot. Returns count resolved."""
