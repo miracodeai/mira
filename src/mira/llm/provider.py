@@ -10,6 +10,10 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from mira.config import LLMConfig
 from mira.exceptions import LLMError
 
+# Suppress LiteLLM's verbose internal logging which Railway displays as errors
+litellm.suppress_debug_info = True
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
