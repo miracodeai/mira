@@ -113,6 +113,7 @@ class ReviewComment:
     body: str
     confidence: float
     suggestion: str | None = None
+    agent_prompt: str | None = None
 
 
 @dataclass

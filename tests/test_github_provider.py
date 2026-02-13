@@ -308,6 +308,51 @@ class TestFormatCommentBody:
             assert f"{emoji} **{label}**" in body
 
 
+class TestFormatCommentBodyAgentPrompt:
+    """Tests for agent_prompt rendering in comment body."""
+
+    def _make_comment(self, **overrides) -> ReviewComment:
+        defaults = {
+            "path": "src/foo.py",
+            "line": 10,
+            "end_line": None,
+            "severity": Severity.WARNING,
+            "category": "bug",
+            "title": "Something is wrong",
+            "body": "Detailed explanation.",
+            "confidence": 0.9,
+            "suggestion": None,
+            "agent_prompt": None,
+        }
+        defaults.update(overrides)
+        return ReviewComment(**defaults)
+
+    def test_with_agent_prompt(self):
+        body = _format_comment_body(
+            self._make_comment(agent_prompt="In src/foo.py at line 10, replace foo() with bar().")
+        )
+        assert "<details>" in body
+        assert "Prompt for AI Agents" in body
+        assert "</details>" in body
+        assert "In src/foo.py at line 10, replace foo() with bar()." in body
+
+    def test_without_agent_prompt(self):
+        body = _format_comment_body(self._make_comment(agent_prompt=None))
+        assert "<details>" not in body
+        assert "Prompt for AI Agents" not in body
+
+    def test_agent_prompt_after_suggestion(self):
+        body = _format_comment_body(
+            self._make_comment(
+                suggestion="return bar()",
+                agent_prompt="In src/foo.py at line 10, replace foo() with bar().",
+            )
+        )
+        suggestion_pos = body.index("```suggestion")
+        details_pos = body.index("<details>")
+        assert details_pos > suggestion_pos
+
+
 class TestPostComment:
     @pytest.mark.asyncio
     async def test_post_comment_calls_create_comment(self):

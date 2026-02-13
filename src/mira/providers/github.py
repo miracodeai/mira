@@ -281,7 +281,7 @@ class GitHubProvider(BaseProvider):
                 headers=headers,
             )
             resp.raise_for_status()
-            data = resp.json()
+            data: dict[str, Any] = resp.json()
         if "errors" in data:
             raise ProviderError(f"GraphQL error: {data['errors']}")
         return data
@@ -362,5 +362,16 @@ def _format_comment_body(comment: ReviewComment) -> str:
         parts.append("```suggestion")
         parts.append(comment.suggestion)
         parts.append("```")
+
+    if comment.agent_prompt:
+        parts.append("")
+        parts.append("<details>")
+        parts.append("<summary>🤖 Prompt for AI Agents</summary>")
+        parts.append("")
+        parts.append("```text")
+        parts.append(comment.agent_prompt)
+        parts.append("```")
+        parts.append("")
+        parts.append("</details>")
 
     return "\n".join(parts)

@@ -30,6 +30,7 @@ class LLMComment(BaseModel):
     body: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     suggestion: str | None = None
+    agent_prompt: str | None = None
     existing_code: str = ""
 
 
@@ -125,6 +126,7 @@ def convert_to_review_comments(
                 body=c.body,
                 confidence=c.confidence,
                 suggestion=suggestion,
+                agent_prompt=c.agent_prompt,
             )
         )
 

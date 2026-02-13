@@ -34,10 +34,12 @@ class ReviewEngine:
         config: MiraConfig,
         llm: LLMProvider,
         provider: BaseProvider | None = None,
+        bot_name: str = "miracodeai",
     ) -> None:
         self.config = config
         self.llm = llm
         self.provider = provider
+        self.bot_name = bot_name
 
     async def review_pr(self, pr_url: str) -> ReviewResult:
         """Full pipeline: fetch PR -> review -> post results."""
@@ -56,7 +58,7 @@ class ReviewEngine:
         # Post walkthrough comment before inline review (upsert: edit if exists)
         if result.walkthrough:
             try:
-                markdown = result.walkthrough.to_markdown()
+                markdown = result.walkthrough.to_markdown(bot_name=self.bot_name)
                 existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
                 if existing_id is not None:
                     await self.provider.update_comment(pr_info, existing_id, markdown)
