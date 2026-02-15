@@ -10,7 +10,7 @@ import pytest
 from mira.config import MiraConfig
 from mira.core.engine import ReviewEngine
 from mira.llm.provider import LLMProvider
-from mira.models import PRInfo, WalkthroughResult
+from mira.models import OutdatedThread, PRInfo, WalkthroughResult
 
 _WALKTHROUGH_LLM_RESPONSE = json.dumps(
     {
@@ -57,6 +57,7 @@ def mock_provider(sample_diff_text: str) -> AsyncMock:
     provider.find_bot_comment = AsyncMock(return_value=None)
     provider.update_comment = AsyncMock()
     provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
+    provider.get_outdated_bot_threads = AsyncMock(return_value=[])
     return provider
 
 
@@ -462,3 +463,114 @@ class TestReviewEngine:
 
         mock_provider.resolve_outdated_review_threads.assert_called_once()
         mock_provider.post_review.assert_not_called()
+
+
+class TestThreadResolution:
+    """Tests for the _resolve_verified_threads flow."""
+
+    @pytest.fixture
+    def threads(self) -> list[OutdatedThread]:
+        return [
+            OutdatedThread(thread_id="T1", path="src/app.py", line=10, body="Hardcoded secret"),
+            OutdatedThread(thread_id="T2", path="src/app.py", line=25, body="Missing null check"),
+        ]
+
+    @pytest.fixture
+    def provider_with_threads(
+        self, sample_diff_text: str, threads: list[OutdatedThread]
+    ) -> AsyncMock:
+        provider = AsyncMock()
+        provider.get_pr_info.return_value = PRInfo(
+            title="Test PR",
+            description="Test description",
+            base_branch="main",
+            head_branch="feature",
+            url="https://github.com/test/repo/pull/1",
+            number=1,
+            owner="test",
+            repo="repo",
+        )
+        provider.get_pr_diff.return_value = sample_diff_text
+        provider.post_review = AsyncMock()
+        provider.post_comment = AsyncMock()
+        provider.find_bot_comment = AsyncMock(return_value=None)
+        provider.update_comment = AsyncMock()
+        provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
+        provider.get_outdated_bot_threads = AsyncMock(return_value=threads)
+        provider.get_file_content = AsyncMock(return_value="line1\n" * 30)
+        provider.resolve_threads = AsyncMock(return_value=1)
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_full_flow(
+        self,
+        sample_llm_response_text: str,
+        provider_with_threads: AsyncMock,
+        threads: list[OutdatedThread],
+    ):
+        """Fetches threads -> gets file content -> calls LLM -> resolves verified threads."""
+        verify_response = json.dumps(
+            {"results": [{"id": "T1", "fixed": True}, {"id": "T2", "fixed": False}]}
+        )
+
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        call_count = 0
+
+        async def _side_effect(messages, json_mode=True):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return verify_response  # thread verification
+            if call_count == 2:
+                return json.dumps({"summary": "walkthrough", "file_changes": []})
+            return sample_llm_response_text
+
+        llm.complete = AsyncMock(side_effect=_side_effect)
+
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
+        )
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        provider_with_threads.get_outdated_bot_threads.assert_awaited_once()
+        provider_with_threads.get_file_content.assert_awaited()
+        # Only T1 was fixed
+        provider_with_threads.resolve_threads.assert_awaited_once()
+        resolved_ids = provider_with_threads.resolve_threads.call_args[0][1]
+        assert resolved_ids == ["T1"]
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_outdated_threads(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """No LLM call or resolve when no outdated threads exist."""
+        mock_provider.get_outdated_bot_threads = AsyncMock(return_value=[])
+
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=mock_llm, provider=mock_provider, bot_name="mira"
+        )
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.get_outdated_bot_threads.assert_awaited_once()
+        mock_provider.resolve_threads.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_continues_review_when_resolution_raises(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """Review continues even if thread resolution fails."""
+        mock_provider.get_outdated_bot_threads = AsyncMock(
+            side_effect=RuntimeError("GraphQL exploded")
+        )
+
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=mock_llm, provider=mock_provider, bot_name="mira"
+        )
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # Review should still complete
+        assert result is not None
+        mock_provider.get_pr_diff.assert_awaited_once()
