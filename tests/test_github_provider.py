@@ -746,7 +746,7 @@ class TestGetOutdatedBotThreads:
         nodes = [
             _make_thread_node("T1", author_login="mira[bot]"),  # matches
             _make_thread_node("T2", is_resolved=True, author_login="mira[bot]"),  # resolved — skip
-            _make_thread_node("T3", is_outdated=False, author_login="mira[bot]"),  # not outdated — skip
+            _make_thread_node("T3", is_outdated=False, author_login="mira[bot]"),  # not outdated  # noqa: E501
             _make_thread_node("T4", author_login="human"),  # wrong author — skip
             _make_thread_node("T5", author_login="mira[bot]", body="Another issue", path="b.py", line=5),  # matches  # noqa: E501
         ]

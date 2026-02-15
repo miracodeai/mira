@@ -57,6 +57,7 @@ def mock_provider(sample_diff_text: str) -> AsyncMock:
     provider.find_bot_comment = AsyncMock(return_value=None)
     provider.update_comment = AsyncMock()
     provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
+    provider.get_outdated_bot_threads = AsyncMock(return_value=[])
     return provider
 
 
