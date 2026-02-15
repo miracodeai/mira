@@ -4,6 +4,7 @@ import bcrypt
 import hashlib
 import os
 import json
+import secrets
 import sqlite3
 
 
@@ -55,7 +56,7 @@ class UserSession:
 
     def __init__(self, user_id):
         self.user_id = user_id
-        self.token = os.urandom(8).hex()
+        self.token = secrets.token_hex(32)
         UserSession.sessions[self.token] = self
 
     def get_user_data(self, requested_id):
