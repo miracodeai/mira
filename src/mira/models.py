@@ -224,6 +224,16 @@ class PRInfo:
 
 
 @dataclass
+class OutdatedThread:
+    """An unresolved, outdated review thread authored by the bot."""
+
+    thread_id: str
+    path: str
+    line: int
+    body: str
+
+
+@dataclass
 class ReviewChunk:
     """A chunk of files that fits within a single LLM context window."""
 

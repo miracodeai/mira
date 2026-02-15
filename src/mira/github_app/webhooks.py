@@ -74,7 +74,7 @@ def create_app(
                     installation_id=installation_id,
                     properties={"event_type": event, "action": action, "status": "processing"},
                 )
-            background_tasks.add_task(handle_pull_request, payload, app_auth, metrics)
+            background_tasks.add_task(handle_pull_request, payload, app_auth, bot_name, metrics)
             return Response(
                 content='{"status": "processing"}',
                 status_code=200,

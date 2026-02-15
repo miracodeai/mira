@@ -78,7 +78,7 @@ async def test_handle_pr_event(
     mock_engine.review_pr = AsyncMock(return_value=ReviewResult(summary="ok"))
     mock_engine_cls.return_value = mock_engine
 
-    await handle_pull_request(_make_pr_payload(), mock_app_auth)
+    await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
 
     mock_app_auth.get_installation_token.assert_awaited_once_with(1)
     mock_provider_cls.assert_called_once_with("ghs_test_token")
@@ -178,6 +178,6 @@ async def test_handler_exception_logged_not_raised(
 
     with caplog.at_level(logging.ERROR):
         # Should not raise
-        await handle_pull_request(_make_pr_payload(), mock_app_auth)
+        await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
 
     assert "boom" in caplog.text

@@ -3,21 +3,61 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
+from typing import Any
 
 import httpx
 from github import Github, GithubException
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from mira.exceptions import ProviderError
-from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
+from mira.models import OutdatedThread, PRInfo, ReviewComment, ReviewResult, Severity
 from mira.providers.base import BaseProvider
 
 # Transient errors worth retrying — network issues and GitHub server errors.
 _RETRYABLE = (ConnectionError, TimeoutError, httpx.TransportError, GithubException)
 
 logger = logging.getLogger(__name__)
+
+_GRAPHQL_URL = "https://api.github.com/graphql"
+
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          comments(first: 1) {
+            nodes {
+              author { login }
+              body
+              path
+              line
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_RESOLVE_THREAD_MUTATION = """
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+"""
 
 _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
     "bug": ("\U0001f41b", "Bug"),
@@ -197,6 +237,123 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to post comment: {e}") from e
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((httpx.TransportError, ConnectionError, TimeoutError)),
+        reraise=True,
+    )
+    async def _graphql_request(
+        self, query: str, variables: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Execute a GraphQL request against the GitHub API."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                _GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                headers={
+                    "Authorization": f"bearer {self._token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "errors" in data:
+                raise ProviderError(f"GraphQL errors: {data['errors']}")
+            return data["data"]
+
+    async def get_outdated_bot_threads(
+        self, pr_info: PRInfo, bot_login: str
+    ) -> list[OutdatedThread]:
+        """Fetch unresolved, outdated review threads authored by the bot."""
+        threads: list[OutdatedThread] = []
+        cursor: str | None = None
+
+        while True:
+            variables: dict[str, Any] = {
+                "owner": pr_info.owner,
+                "repo": pr_info.repo,
+                "number": pr_info.number,
+                "cursor": cursor,
+            }
+            try:
+                data = await self._graphql_request(_REVIEW_THREADS_QUERY, variables)
+            except ProviderError:
+                raise
+            except Exception as e:
+                raise ProviderError(f"Failed to fetch review threads: {e}") from e
+
+            rt = data["repository"]["pullRequest"]["reviewThreads"]
+            for node in rt["nodes"]:
+                if node["isResolved"] or not node["isOutdated"]:
+                    continue
+                comments = node["comments"]["nodes"]
+                if not comments:
+                    continue
+                first = comments[0]
+                author = (first.get("author") or {}).get("login", "")
+                if author != bot_login:
+                    continue
+                threads.append(
+                    OutdatedThread(
+                        thread_id=node["id"],
+                        path=first.get("path", ""),
+                        line=first.get("line") or 0,
+                        body=first.get("body", ""),
+                    )
+                )
+
+            if rt["pageInfo"]["hasNextPage"]:
+                cursor = rt["pageInfo"]["endCursor"]
+            else:
+                break
+
+        return threads
+
+    async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
+        """Fetch file content at a specific ref via the REST API."""
+        url = f"https://api.github.com/repos/{pr_info.owner}/{pr_info.repo}/contents/{path}"
+        headers = {
+            "Authorization": f"token {self._token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(_RETRYABLE),
+            reraise=True,
+        )
+        async def _fetch() -> str:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    url, headers=headers, params={"ref": ref}, follow_redirects=True
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data.get("content", "")
+                return base64.b64decode(content).decode("utf-8")
+
+        try:
+            return await _fetch()
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch file content: {e}") from e
+
+    async def resolve_threads(self, pr_info: PRInfo, thread_ids: list[str]) -> int:
+        """Resolve review threads by ID. Returns count of successfully resolved."""
+        resolved = 0
+        for tid in thread_ids:
+            try:
+                await self._graphql_request(
+                    _RESOLVE_THREAD_MUTATION, {"threadId": tid}
+                )
+                resolved += 1
+            except Exception:
+                logger.warning("Failed to resolve thread %s, skipping", tid)
+        return resolved
 
 
 def _format_comment_body(comment: ReviewComment) -> str:
