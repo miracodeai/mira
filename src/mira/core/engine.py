@@ -93,6 +93,8 @@ class ReviewEngine:
         # Only post if there are comments
         if result.comments:
             await self.provider.post_review(pr_info, result)
+        else:
+            logger.info("No code suggestions for PR %s", pr_info.url)
 
         return result
 
