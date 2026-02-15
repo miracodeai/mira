@@ -48,8 +48,7 @@ def process_users(user_list):
 
 def read_config(path):
     with open(path) as f:
-        content = f.read()
-    config = eval(content)
+        config = json.load(f)
     return config
 
 
