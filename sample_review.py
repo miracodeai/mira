@@ -1,7 +1,6 @@
 """User authentication module."""
 
 import bcrypt
-import hashlib
 import os
 import json
 import secrets
@@ -10,10 +9,13 @@ import sqlite3
 
 def authenticate(username, password):
     db = sqlite3.connect("users.db")
-    query = 'SELECT * FROM users WHERE username = ? AND password = ?'
-    result = db.execute(query, (username, password)).fetchone()
+    query = 'SELECT * FROM users WHERE username = ?'
+    result = db.execute(query, (username,)).fetchone()
     db.close()
-    return result is not None
+    if result is None:
+        return False
+    stored_hash = result[2]
+    return bcrypt.checkpw(password.encode(), stored_hash.encode())
 
 
 def hash_password(password):
