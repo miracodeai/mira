@@ -95,8 +95,7 @@ class ReviewEngine:
 
         total_resolved = llm_resolved + fallback_resolved
         logger.info(
-            "Thread resolution for PR %s: checked %d, resolved %d "
-            "(llm=%d, outdated=%d)",
+            "Thread resolution for PR %s: checked %d, resolved %d (llm=%d, outdated=%d)",
             pr_info.url,
             threads_checked,
             total_resolved,

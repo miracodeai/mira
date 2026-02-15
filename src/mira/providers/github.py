@@ -475,7 +475,8 @@ class GitHubProvider(BaseProvider):
             except Exception:
                 logger.warning(
                     "Failed to resolve thread %s on PR %s",
-                    tid, pr_info.url,
+                    tid,
+                    pr_info.url,
                 )
         if resolved < len(thread_ids):
             logger.warning(
