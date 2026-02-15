@@ -4,8 +4,42 @@ from __future__ import annotations
 
 import json
 
-from mira.llm.prompts.verify_fixes import build_verify_fixes_prompt, parse_verify_fixes_response
+from mira.llm.prompts.verify_fixes import (
+    _extract_issue_description,
+    build_verify_fixes_prompt,
+    parse_verify_fixes_response,
+)
 from mira.models import UnresolvedThread
+
+# Realistic formatted body matching _format_comment_body output
+_FORMATTED_BODY = (
+    "\U0001f512 **Security issue**\n"
+    "\u26a0\ufe0f Warning\n"
+    "\n"
+    "**Weak cryptographic hash function MD5 used for password hashing**\n"
+    "\n"
+    "MD5 is cryptographically broken and unsuitable for password hashing. "
+    "It's fast to compute, making brute-force attacks feasible, and lacks salt, "
+    "allowing rainbow table attacks. Use a modern password hashing algorithm "
+    "like bcrypt, scrypt, or argon2 with proper salting.\n"
+    "\n"
+    "**Suggested fix:**\n"
+    "```suggestion\n"
+    "import bcrypt\n"
+    "def hash_password(password):\n"
+    "    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()\n"
+    "```\n"
+    "\n"
+    "<details>\n"
+    "<summary>\U0001f916 Prompt for AI Agents</summary>\n"
+    "\n"
+    "```text\n"
+    "In src/auth.py around line 29, replace the MD5-based hash_password function "
+    "with bcrypt.\n"
+    "```\n"
+    "\n"
+    "</details>"
+)
 
 
 def _make_thread(
@@ -15,6 +49,46 @@ def _make_thread(
     body: str = "Hardcoded API key.",
 ) -> UnresolvedThread:
     return UnresolvedThread(thread_id=thread_id, path=path, line=line, body=body)
+
+
+class TestExtractIssueDescription:
+    def test_plain_text_body_unchanged(self):
+        result = _extract_issue_description("Hardcoded API key.")
+        assert result == "Hardcoded API key."
+
+    def test_strips_badges_and_suggestion_from_formatted_body(self):
+        result = _extract_issue_description(_FORMATTED_BODY)
+        # Should contain the title and explanation
+        assert "MD5" in result
+        assert "cryptographically broken" in result
+        # Should NOT contain badges, suggestion code, or agent prompt
+        assert "Security issue" not in result
+        assert "Warning" not in result
+        assert "```suggestion" not in result
+        assert "bcrypt.hashpw" not in result
+        assert "Prompt for AI Agents" not in result
+
+    def test_strips_suggestion_block(self):
+        body = "**Title**\n\nDescription.\n\n**Suggested fix:**\n```suggestion\ncode\n```"
+        result = _extract_issue_description(body)
+        assert "Description" in result
+        assert "suggestion" not in result.lower()
+        assert "code" not in result
+
+    def test_strips_agent_prompt_details(self):
+        body = "**Title**\n\nDescription.\n\n<details>\n<summary>Agent</summary>\nstuff\n</details>"
+        result = _extract_issue_description(body)
+        assert "Description" in result
+        assert "Agent" not in result
+
+    def test_truncates_long_descriptions(self):
+        body = "A" * 500
+        result = _extract_issue_description(body)
+        assert len(result) <= 301  # 300 + ellipsis char
+
+    def test_empty_body(self):
+        result = _extract_issue_description("")
+        assert result == ""
 
 
 class TestBuildVerifyFixesPrompt:
@@ -73,6 +147,17 @@ class TestBuildVerifyFixesPrompt:
         system = messages[0]["content"]
         assert "if you are unsure" not in system.lower()
         assert "no longer present" in system.lower()
+
+    def test_formatted_body_cleaned_in_prompt(self):
+        """Formatted review comment body is cleaned before inclusion in prompt."""
+        thread = _make_thread(body=_FORMATTED_BODY)
+        messages = build_verify_fixes_prompt([("src/app.py", "code", [thread])])
+        user = messages[1]["content"]
+        # Core issue description should be present
+        assert "MD5" in user
+        # Suggestion code and agent prompt should NOT leak into the prompt
+        assert "bcrypt.hashpw" not in user
+        assert "Prompt for AI Agents" not in user
 
 
 class TestParseVerifyFixesResponse:

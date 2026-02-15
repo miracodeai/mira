@@ -95,7 +95,6 @@ class ReviewEngine:
 
         # Resolve previously-posted threads that are now fixed
         llm_resolved = 0
-        fallback_resolved = 0
         threads_checked = 0
         unresolved_threads: list[UnresolvedThread] = []
 
@@ -130,20 +129,11 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to post walkthrough comment: %s", exc)
 
-        # Brute-force resolve remaining outdated threads before posting new ones
-        try:
-            fallback_resolved = await self.provider.resolve_outdated_review_threads(pr_info)
-        except Exception as exc:
-            logger.warning("Failed to resolve outdated review threads: %s", exc)
-
-        total_resolved = llm_resolved + fallback_resolved
         logger.info(
-            "Thread resolution for PR %s: checked %d, resolved %d (llm=%d, outdated=%d)",
+            "Thread resolution for PR %s: checked %d, resolved %d",
             pr_info.url,
             threads_checked,
-            total_resolved,
             llm_resolved,
-            fallback_resolved,
         )
 
         # Only post if there are comments

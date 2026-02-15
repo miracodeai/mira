@@ -4,6 +4,62 @@ from __future__ import annotations
 
 from mira.models import UnresolvedThread
 
+# Markers that signal the start of noise sections in formatted review comments.
+# Everything from these markers onward is stripped before inclusion in prompts.
+_BODY_NOISE_MARKERS = ("**Suggested fix:**", "```suggestion", "<details>")
+
+_MAX_DESCRIPTION_LENGTH = 300
+
+
+def _extract_issue_description(body: str) -> str:
+    """Extract the core issue description from a formatted review comment body.
+
+    Mira's posted comments follow this structure::
+
+        {emoji} **{category_label}**
+        {severity_badge}
+
+        **{title}**
+
+        {description}
+
+        **Suggested fix:**
+        ```suggestion ...```
+
+        <details>🤖 Prompt for AI Agents ...</details>
+
+    This function strips the badge header, suggestion blocks, and agent prompts,
+    returning just the title and explanation text.
+    """
+    text = body
+
+    # Cut off suggestion blocks and agent prompt sections
+    for marker in _BODY_NOISE_MARKERS:
+        pos = text.find(marker)
+        if pos != -1:
+            text = text[:pos]
+
+    # Strip markdown bold markers
+    text = text.replace("**", "")
+
+    # Split into paragraphs (double-newline separated)
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+
+    # The formatted comment starts with a compact badge paragraph
+    # (emoji + category label + optional severity line).  Skip it when
+    # there is more content after it.
+    if len(paragraphs) > 1 and len(paragraphs[0]) < 80:
+        paragraphs = paragraphs[1:]
+
+    result = " ".join(paragraphs).strip()
+    if not result:
+        # Fallback: use the cleaned full text
+        result = " ".join(text.split()).strip()
+
+    if len(result) > _MAX_DESCRIPTION_LENGTH:
+        result = result[:_MAX_DESCRIPTION_LENGTH].rsplit(" ", 1)[0] + "…"
+    return result
+
 
 def build_verify_fixes_prompt(
     file_groups: list[tuple[str, str, list[UnresolvedThread]]],
@@ -17,7 +73,7 @@ def build_verify_fixes_prompt(
     sections: list[str] = []
     for path, content, threads in file_groups:
         issues = "\n".join(
-            f'{idx}. (id: "{t.thread_id}") Line {t.line}: "{t.body}"'
+            f'{idx}. (id: "{t.thread_id}") Line {t.line}: {_extract_issue_description(t.body)}'
             for idx, t in enumerate(threads, 1)
         )
         sections.append(

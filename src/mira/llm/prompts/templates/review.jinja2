@@ -78,7 +78,7 @@ Only use these file paths in your comments:
 These issues have already been flagged in previous reviews on this PR. Do NOT create new comments for these — they are being tracked separately:
 
 {% for c in existing_comments %}
-- `{{ c.path }}:{{ c.line }}` — {{ c.body[:200] }}
+- `{{ c.path }}:{{ c.line }}` — {{ c.description }}
 {% endfor %}
 {% endif %}
 

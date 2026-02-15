@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig
 from mira.core.context import build_file_context_string
+from mira.llm.prompts.verify_fixes import _extract_issue_description
 from mira.models import FileDiff, UnresolvedThread
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -39,6 +40,14 @@ def build_review_prompt(
     file_contexts = [build_file_context_string(f) for f in files]
     file_paths = [f.path for f in files]
 
+    # Pre-clean existing comment bodies so the template gets concise descriptions
+    cleaned_comments = None
+    if existing_comments:
+        cleaned_comments = [
+            {"path": c.path, "line": c.line, "description": _extract_issue_description(c.body)}
+            for c in existing_comments
+        ]
+
     system_content = template.render(
         pr_title=pr_title,
         pr_description=pr_description,
@@ -47,7 +56,7 @@ def build_review_prompt(
         confidence_threshold=config.filter.confidence_threshold,
         max_comments=config.filter.max_comments,
         focus_only_on_problems=config.review.focus_only_on_problems,
-        existing_comments=existing_comments,
+        existing_comments=cleaned_comments,
     )
 
     return [
