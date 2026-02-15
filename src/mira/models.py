@@ -233,13 +233,18 @@ class PRInfo:
 
 
 @dataclass
-class OutdatedThread:
-    """An unresolved, outdated review thread authored by the bot."""
+class UnresolvedThread:
+    """An unresolved review thread authored by the bot."""
 
     thread_id: str
     path: str
     line: int
     body: str
+    is_outdated: bool = False
+
+
+# Backward-compat alias
+OutdatedThread = UnresolvedThread
 
 
 @dataclass

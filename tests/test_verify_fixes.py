@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from mira.llm.prompts.verify_fixes import build_verify_fixes_prompt, parse_verify_fixes_response
-from mira.models import OutdatedThread
+from mira.models import UnresolvedThread
 
 
 def _make_thread(
@@ -13,8 +13,8 @@ def _make_thread(
     path: str = "src/app.py",
     line: int = 29,
     body: str = "Hardcoded API key.",
-) -> OutdatedThread:
-    return OutdatedThread(thread_id=thread_id, path=path, line=line, body=body)
+) -> UnresolvedThread:
+    return UnresolvedThread(thread_id=thread_id, path=path, line=line, body=body)
 
 
 class TestBuildVerifyFixesPrompt:

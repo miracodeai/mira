@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 
-from mira.models import OutdatedThread, PRInfo, ReviewResult
+from mira.models import PRInfo, ReviewResult, UnresolvedThread
 
 
 class BaseProvider(abc.ABC):
@@ -42,11 +42,17 @@ class BaseProvider(abc.ABC):
     async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
         """Resolve all unresolved review threads authored by this bot. Returns count resolved."""
 
+    async def get_unresolved_bot_threads(
+        self, pr_info: PRInfo, bot_login: str
+    ) -> list[UnresolvedThread]:
+        """Fetch all unresolved review threads authored by the bot."""
+        return []
+
+    # Backward-compat alias
     async def get_outdated_bot_threads(
         self, pr_info: PRInfo, bot_login: str
-    ) -> list[OutdatedThread]:
-        """Fetch unresolved, outdated review threads authored by the bot."""
-        return []
+    ) -> list[UnresolvedThread]:
+        return await self.get_unresolved_bot_threads(pr_info, bot_login)
 
     async def resolve_threads(self, pr_info: PRInfo, thread_ids: list[str]) -> int:
         """Resolve review threads by ID. Returns count of successfully resolved."""

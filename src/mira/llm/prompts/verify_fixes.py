@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from mira.models import OutdatedThread
+from mira.models import UnresolvedThread
 
 
 def build_verify_fixes_prompt(
-    thread_contexts: list[tuple[OutdatedThread, str]],
+    thread_contexts: list[tuple[UnresolvedThread, str]],
 ) -> list[dict[str, str]]:
     """Build a prompt asking the LLM which review issues have been fixed.
 

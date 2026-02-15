@@ -23,10 +23,10 @@ from mira.llm.response_parser import (
 )
 from mira.models import (
     WALKTHROUGH_MARKER,
-    OutdatedThread,
     PRInfo,
     ReviewComment,
     ReviewResult,
+    UnresolvedThread,
     WalkthroughResult,
 )
 from mira.providers.base import BaseProvider
@@ -56,9 +56,14 @@ class ReviewEngine:
 
         pr_info = await self.provider.get_pr_info(pr_url)
 
+        # Resolve previously-posted threads that are now fixed
+        llm_resolved = 0
+        fallback_resolved = 0
+        threads_checked = 0
+
         if self.bot_name:
             try:
-                await self._resolve_verified_threads(pr_info)
+                threads_checked, llm_resolved = await self._resolve_verified_threads(pr_info)
             except Exception as exc:
                 logger.warning("Thread resolution failed, continuing: %s", exc)
 
@@ -82,13 +87,22 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to post walkthrough comment: %s", exc)
 
-        # Resolve outdated review threads before posting new ones
+        # Brute-force resolve remaining outdated threads before posting new ones
         try:
-            resolved = await self.provider.resolve_outdated_review_threads(pr_info)
-            if resolved:
-                logger.info("Resolved %d outdated review thread(s) on PR %s", resolved, pr_info.url)
+            fallback_resolved = await self.provider.resolve_outdated_review_threads(pr_info)
         except Exception as exc:
             logger.warning("Failed to resolve outdated review threads: %s", exc)
+
+        total_resolved = llm_resolved + fallback_resolved
+        logger.info(
+            "Thread resolution for PR %s: checked %d, resolved %d "
+            "(llm=%d, outdated=%d)",
+            pr_info.url,
+            threads_checked,
+            total_resolved,
+            llm_resolved,
+            fallback_resolved,
+        )
 
         # Only post if there are comments
         if result.comments:
@@ -205,14 +219,25 @@ class ReviewEngine:
             walkthrough=walkthrough,
         )
 
-    async def _resolve_verified_threads(self, pr_info: PRInfo) -> None:
-        """Check outdated bot threads and resolve those the LLM confirms as fixed."""
+    async def _resolve_verified_threads(self, pr_info: PRInfo) -> tuple[int, int]:
+        """Check all unresolved bot threads and resolve those the LLM confirms as fixed.
+
+        Returns:
+            Tuple of (threads_checked, threads_resolved).
+        """
         assert self.provider is not None
         bot_login = f"{self.bot_name}[bot]"
 
-        threads = await self.provider.get_outdated_bot_threads(pr_info, bot_login)
+        threads = await self.provider.get_unresolved_bot_threads(pr_info, bot_login)
         if not threads:
-            return
+            logger.debug("No unresolved bot threads found for PR %s", pr_info.url)
+            return 0, 0
+
+        logger.info(
+            "Found %d unresolved bot thread(s) to verify on PR %s",
+            len(threads),
+            pr_info.url,
+        )
 
         # Fetch current code for each thread's file (dedupe by path)
         file_contents: dict[str, str] = {}
@@ -223,7 +248,7 @@ class ReviewEngine:
                 )
 
         # Build context: ~20 lines around the comment line
-        thread_contexts: list[tuple[OutdatedThread, str]] = []
+        thread_contexts: list[tuple[UnresolvedThread, str]] = []
         for t in threads:
             content = file_contents.get(t.path, "")
             lines = content.splitlines()
@@ -235,11 +260,26 @@ class ReviewEngine:
         # Single LLM call to verify which issues are fixed
         verified_ids = await self._verify_fixes(thread_contexts)
 
+        resolved = 0
         if verified_ids:
             resolved = await self.provider.resolve_threads(pr_info, verified_ids)
-            logger.info("Resolved %d verified-fixed review thread(s)", resolved)
+            if resolved < len(verified_ids):
+                logger.error(
+                    "Failed to resolve %d/%d verified-fixed thread(s) on PR %s",
+                    len(verified_ids) - resolved,
+                    len(verified_ids),
+                    pr_info.url,
+                )
 
-    async def _verify_fixes(self, thread_contexts: list[tuple[OutdatedThread, str]]) -> list[str]:
+        logger.info(
+            "LLM verification: checked %d thread(s), %d confirmed fixed, %d resolved",
+            len(threads),
+            len(verified_ids),
+            resolved,
+        )
+        return len(threads), resolved
+
+    async def _verify_fixes(self, thread_contexts: list[tuple[UnresolvedThread, str]]) -> list[str]:
         """Ask the LLM which review issues have been fixed."""
         prompt = build_verify_fixes_prompt(thread_contexts)
         response = await self.llm.complete(prompt, json_mode=True)
