@@ -473,7 +473,10 @@ class GitHubProvider(BaseProvider):
                 await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": tid})
                 resolved += 1
             except Exception:
-                logger.error("Failed to resolve thread %s on PR %s", tid, pr_info.url, exc_info=True)
+                logger.warning(
+                    "Failed to resolve thread %s on PR %s",
+                    tid, pr_info.url,
+                )
         if resolved < len(thread_ids):
             logger.warning(
                 "Resolved %d/%d threads on PR %s (%d failed)",
