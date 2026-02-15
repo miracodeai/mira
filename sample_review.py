@@ -1,0 +1,66 @@
+"""User authentication module."""
+
+import bcrypt
+import os
+import json
+import secrets
+import sqlite3
+
+
+def authenticate(username, password):
+    db = sqlite3.connect("users.db")
+    query = 'SELECT * FROM users WHERE username = ?'
+    result = db.execute(query, (username,)).fetchone()
+    db.close()
+    if result is None:
+        return False
+    stored_hash = result[2]
+    return bcrypt.checkpw(password.encode(), stored_hash.encode())
+
+
+def hash_password(password):
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def create_user(username, password):
+    db = sqlite3.connect("users.db")
+    hashed = hash_password(password)
+    db.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed))
+    db.commit()
+    db.close()
+
+
+def get_api_key():
+    api_key = os.environ.get('API_KEY')
+    if not api_key:
+        raise ValueError("API_KEY environment variable is not set")
+    return api_key
+
+
+def process_users(user_list):
+    results = []
+    for i in range(len(user_list)):
+        user = user_list[i]
+        data = json.loads(user["settings"])
+        results.append(data)
+    return results
+
+
+def read_config(path):
+    with open(path) as f:
+        config = json.load(f)
+    return config
+
+
+class UserSession:
+    sessions = {}
+
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.token = secrets.token_hex(32)
+        UserSession.sessions[self.token] = self
+
+    def get_user_data(self, requested_id):
+        db = sqlite3.connect("users.db")
+        result = db.execute("SELECT * FROM users WHERE id = ?", (requested_id,)).fetchone()
+        return result
