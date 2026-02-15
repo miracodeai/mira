@@ -57,24 +57,36 @@ class TestBuildVerifyFixesPrompt:
 
 class TestParseVerifyFixesResponse:
     def test_valid_response_all_fixed(self):
-        raw = json.dumps({"results": [
-            {"id": "T1", "fixed": True},
-            {"id": "T2", "fixed": True},
-        ]})
+        raw = json.dumps(
+            {
+                "results": [
+                    {"id": "T1", "fixed": True},
+                    {"id": "T2", "fixed": True},
+                ]
+            }
+        )
         assert parse_verify_fixes_response(raw) == ["T1", "T2"]
 
     def test_valid_response_mixed(self):
-        raw = json.dumps({"results": [
-            {"id": "T1", "fixed": True},
-            {"id": "T2", "fixed": False},
-            {"id": "T3", "fixed": True},
-        ]})
+        raw = json.dumps(
+            {
+                "results": [
+                    {"id": "T1", "fixed": True},
+                    {"id": "T2", "fixed": False},
+                    {"id": "T3", "fixed": True},
+                ]
+            }
+        )
         assert parse_verify_fixes_response(raw) == ["T1", "T3"]
 
     def test_valid_response_none_fixed(self):
-        raw = json.dumps({"results": [
-            {"id": "T1", "fixed": False},
-        ]})
+        raw = json.dumps(
+            {
+                "results": [
+                    {"id": "T1", "fixed": False},
+                ]
+            }
+        )
         assert parse_verify_fixes_response(raw) == []
 
     def test_empty_results(self):

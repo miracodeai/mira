@@ -236,9 +236,7 @@ class ReviewEngine:
             resolved = await self.provider.resolve_threads(pr_info, verified_ids)
             logger.info("Resolved %d verified-fixed review thread(s)", resolved)
 
-    async def _verify_fixes(
-        self, thread_contexts: list[tuple[OutdatedThread, str]]
-    ) -> list[str]:
+    async def _verify_fixes(self, thread_contexts: list[tuple[OutdatedThread, str]]) -> list[str]:
         """Ask the LLM which review issues have been fixed."""
         prompt = build_verify_fixes_prompt(thread_contexts)
         response = await self.llm.complete(prompt, json_mode=True)

@@ -17,9 +17,9 @@ def build_verify_fixes_prompt(
     issues: list[str] = []
     for idx, (thread, snippet) in enumerate(thread_contexts, 1):
         issues.append(
-            f"Issue {idx} (id: \"{thread.thread_id}\"):\n"
+            f'Issue {idx} (id: "{thread.thread_id}"):\n'
             f"- File: {thread.path}, Line {thread.line}\n"
-            f"- Original comment: \"{thread.body}\"\n"
+            f'- Original comment: "{thread.body}"\n'
             f"- Current code:\n```\n{snippet}\n```"
         )
 

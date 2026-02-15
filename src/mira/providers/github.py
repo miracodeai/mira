@@ -287,9 +287,7 @@ class GitHubProvider(BaseProvider):
         retry=retry_if_exception_type((httpx.TransportError, ConnectionError, TimeoutError)),
         reraise=True,
     )
-    async def _graphql_request(
-        self, query: str, variables: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _graphql_request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         """Execute a GraphQL request against the GitHub API."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -351,9 +349,7 @@ class GitHubProvider(BaseProvider):
 
             # Phase 2: Resolve each collected thread
             for thread_id in thread_ids:
-                await self._graphql_request(
-                    _RESOLVE_THREAD_MUTATION, {"threadId": thread_id}
-                )
+                await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
 
             return len(thread_ids)
 
@@ -448,9 +444,7 @@ class GitHubProvider(BaseProvider):
         resolved = 0
         for tid in thread_ids:
             try:
-                await self._graphql_request(
-                    _RESOLVE_THREAD_MUTATION, {"threadId": tid}
-                )
+                await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": tid})
                 resolved += 1
             except Exception:
                 logger.warning("Failed to resolve thread %s, skipping", tid)
