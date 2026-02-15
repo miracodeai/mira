@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -498,23 +499,44 @@ class TestUpdateComment:
         mock_comment.edit.assert_called_once_with("new body")
 
 
-def _make_thread_node(thread_id: str, is_resolved: bool, author_login: str | None) -> dict:
-    """Helper to build a reviewThread node for GraphQL response mocking."""
+# ── Shared helpers for GraphQL-based tests ──────────────────────────────────
+
+
+def _make_thread_node(
+    thread_id: str,
+    is_resolved: bool = False,
+    is_outdated: bool = True,
+    author_login: str | None = "mira-app[bot]",
+    body: str = "Hardcoded secret",
+    path: str = "src/app.py",
+    line: int = 10,
+) -> dict:
+    """Build a reviewThread node for GraphQL response mocking."""
     author = {"login": author_login} if author_login is not None else None
     return {
         "id": thread_id,
         "isResolved": is_resolved,
-        "comments": {"nodes": [{"author": author}]},
+        "isOutdated": is_outdated,
+        "comments": {
+            "nodes": [
+                {
+                    "author": author,
+                    "body": body,
+                    "path": path,
+                    "line": line,
+                }
+            ]
+        },
     }
 
 
 def _make_graphql_response(
-    viewer_login: str,
     thread_nodes: list[dict],
+    viewer_login: str = "mira-app[bot]",
     has_next_page: bool = False,
     end_cursor: str | None = None,
 ) -> dict:
-    """Helper to build a full GraphQL response for review threads query."""
+    """Build a full GraphQL response for review threads query."""
     return {
         "data": {
             "viewer": {"login": viewer_login},
@@ -549,10 +571,10 @@ class TestResolveOutdatedReviewThreads:
         pr_info = _make_pr_info()
 
         threads = [
-            _make_thread_node("T1", False, "mira-app[bot]"),
-            _make_thread_node("T2", False, "human-user"),
+            _make_thread_node("T1", author_login="mira-app[bot]"),
+            _make_thread_node("T2", author_login="human-user"),
         ]
-        query_resp = _make_graphql_response("mira-app[bot]", threads)
+        query_resp = _make_graphql_response(threads)
         mutation_resp = {
             "data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}
         }
@@ -580,10 +602,10 @@ class TestResolveOutdatedReviewThreads:
         pr_info = _make_pr_info()
 
         threads = [
-            _make_thread_node("T1", True, "mira-app[bot]"),
-            _make_thread_node("T2", False, "human-user"),
+            _make_thread_node("T1", is_resolved=True, author_login="mira-app[bot]"),
+            _make_thread_node("T2", author_login="human-user"),
         ]
-        query_resp = _make_graphql_response("mira-app[bot]", threads)
+        query_resp = _make_graphql_response(threads)
 
         async def _mock_post(self, url, **kwargs):
             return httpx.Response(200, json=query_resp, request=httpx.Request("POST", url))
@@ -599,7 +621,7 @@ class TestResolveOutdatedReviewThreads:
         provider = self._make_provider()
         pr_info = _make_pr_info()
 
-        query_resp = _make_graphql_response("mira-app[bot]", [])
+        query_resp = _make_graphql_response([])
 
         async def _mock_post(self, url, **kwargs):
             return httpx.Response(200, json=query_resp, request=httpx.Request("POST", url))
@@ -616,14 +638,12 @@ class TestResolveOutdatedReviewThreads:
         pr_info = _make_pr_info()
 
         page1 = _make_graphql_response(
-            "mira-app[bot]",
-            [_make_thread_node("T1", False, "mira-app[bot]")],
+            [_make_thread_node("T1", author_login="mira-app[bot]")],
             has_next_page=True,
             end_cursor="cursor1",
         )
         page2 = _make_graphql_response(
-            "mira-app[bot]",
-            [_make_thread_node("T2", False, "mira-app[bot]")],
+            [_make_thread_node("T2", author_login="mira-app[bot]")],
         )
         mutation_resp = {
             "data": {"resolveReviewThread": {"thread": {"id": "X", "isResolved": True}}}
@@ -656,10 +676,10 @@ class TestResolveOutdatedReviewThreads:
         pr_info = _make_pr_info()
 
         threads = [
-            _make_thread_node("T1", False, None),
-            _make_thread_node("T2", False, "mira-app[bot]"),
+            _make_thread_node("T1", author_login=None),
+            _make_thread_node("T2", author_login="mira-app[bot]"),
         ]
-        query_resp = _make_graphql_response("mira-app[bot]", threads)
+        query_resp = _make_graphql_response(threads)
         mutation_resp = {
             "data": {"resolveReviewThread": {"thread": {"id": "T2", "isResolved": True}}}
         }
@@ -698,7 +718,7 @@ class TestResolveOutdatedReviewThreads:
         provider = self._make_provider()
         pr_info = _make_pr_info()
 
-        query_resp = _make_graphql_response("mira-app[bot]", [])
+        query_resp = _make_graphql_response([])
 
         call_count = 0
 
@@ -714,3 +734,165 @@ class TestResolveOutdatedReviewThreads:
 
         assert result == 0
         assert call_count == 2
+
+
+class TestGetOutdatedBotThreads:
+    @pytest.mark.asyncio
+    async def test_returns_only_matching_threads(self):
+        """Only returns threads that are outdated, unresolved, and authored by the bot."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        nodes = [
+            _make_thread_node("T1", author_login="mira[bot]"),  # matches
+            _make_thread_node("T2", is_resolved=True, author_login="mira[bot]"),  # resolved — skip
+            _make_thread_node("T3", is_outdated=False, author_login="mira[bot]"),  # not outdated — skip
+            _make_thread_node("T4", author_login="human"),  # wrong author — skip
+            _make_thread_node("T5", author_login="mira[bot]", body="Another issue", path="b.py", line=5),  # matches  # noqa: E501
+        ]
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json=_make_graphql_response(nodes),
+                request=httpx.Request("POST", url),
+            )
+
+        pr_info = _make_pr_info()
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_outdated_bot_threads(pr_info, "mira[bot]")
+
+        assert len(result) == 2
+        assert result[0].thread_id == "T1"
+        assert result[1].thread_id == "T5"
+        assert result[1].path == "b.py"
+        assert result[1].line == 5
+
+    @pytest.mark.asyncio
+    async def test_handles_pagination(self):
+        """Paginates through multiple pages of review threads."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        call_count = 0
+
+        async def _mock_post(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(
+                    200,
+                    json=_make_graphql_response(
+                        [_make_thread_node("T1", author_login="mira[bot]")],
+                        has_next_page=True,
+                        end_cursor="cursor1",
+                    ),
+                    request=httpx.Request("POST", url),
+                )
+            return httpx.Response(
+                200,
+                json=_make_graphql_response(
+                    [_make_thread_node("T2", author_login="mira[bot]")],
+                ),
+                request=httpx.Request("POST", url),
+            )
+
+        pr_info = _make_pr_info()
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_outdated_bot_threads(pr_info, "mira[bot]")
+
+        assert len(result) == 2
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_matches(self):
+        """Returns empty list when no threads match criteria."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        nodes = [
+            _make_thread_node("T1", is_resolved=True),
+            _make_thread_node("T2", is_outdated=False),
+        ]
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json=_make_graphql_response(nodes),
+                request=httpx.Request("POST", url),
+            )
+
+        pr_info = _make_pr_info()
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_outdated_bot_threads(pr_info, "mira[bot]")
+
+        assert result == []
+
+
+class TestResolveThreads:
+    @pytest.mark.asyncio
+    async def test_resolves_given_ids(self):
+        """Resolves each thread and returns count."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json={"data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}},  # noqa: E501
+                request=httpx.Request("POST", url),
+            )
+
+        pr_info = _make_pr_info()
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            count = await provider.resolve_threads(pr_info, ["T1", "T2"])
+
+        assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_handles_per_thread_failures(self):
+        """Per-thread failures are logged but don't block others."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        async def _mock_post(self, url, **kwargs):
+            body = kwargs.get("json", {})
+            variables = body.get("variables", {})
+            if variables.get("threadId") == "T1":
+                raise httpx.ConnectError("network error")
+            return httpx.Response(
+                200,
+                json={"data": {"resolveReviewThread": {"thread": {"id": "T2", "isResolved": True}}}},  # noqa: E501
+                request=httpx.Request("POST", url),
+            )
+
+        pr_info = _make_pr_info()
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            count = await provider.resolve_threads(pr_info, ["T1", "T2"])
+
+        # T1 failed (all retries), T2 succeeded
+        assert count == 1
+
+
+class TestGetFileContent:
+    @pytest.mark.asyncio
+    async def test_returns_decoded_content(self):
+        """Returns base64-decoded file content."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        file_text = "def hello():\n    return 'world'\n"
+        encoded = base64.b64encode(file_text.encode()).decode()
+
+        async def _mock_get(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json={"content": encoded},
+                request=httpx.Request("GET", url),
+            )
+
+        pr_info = _make_pr_info()
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            result = await provider.get_file_content(pr_info, "src/hello.py", "feature")
+
+        assert result == file_text

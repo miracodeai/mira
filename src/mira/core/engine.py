@@ -13,6 +13,7 @@ from mira.core.diff_parser import parse_diff
 from mira.core.file_filter import filter_files
 from mira.exceptions import ResponseParseError
 from mira.llm.prompts.review import build_review_prompt, build_walkthrough_prompt
+from mira.llm.prompts.verify_fixes import build_verify_fixes_prompt, parse_verify_fixes_response
 from mira.llm.provider import LLMProvider
 from mira.llm.response_parser import (
     convert_to_review_comments,
@@ -20,7 +21,14 @@ from mira.llm.response_parser import (
     parse_llm_response,
     parse_walkthrough_response,
 )
-from mira.models import WALKTHROUGH_MARKER, ReviewComment, ReviewResult, WalkthroughResult
+from mira.models import (
+    WALKTHROUGH_MARKER,
+    OutdatedThread,
+    PRInfo,
+    ReviewComment,
+    ReviewResult,
+    WalkthroughResult,
+)
 from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -47,6 +55,13 @@ class ReviewEngine:
             raise RuntimeError("A provider is required for PR review")
 
         pr_info = await self.provider.get_pr_info(pr_url)
+
+        if self.bot_name:
+            try:
+                await self._resolve_verified_threads(pr_info)
+            except Exception as exc:
+                logger.warning("Thread resolution failed, continuing: %s", exc)
+
         diff_text = await self.provider.get_pr_diff(pr_info)
 
         result = await self._review_diff_internal(
@@ -187,3 +202,44 @@ class ReviewEngine:
             token_usage=self.llm.usage,
             walkthrough=walkthrough,
         )
+
+    async def _resolve_verified_threads(self, pr_info: PRInfo) -> None:
+        """Check outdated bot threads and resolve those the LLM confirms as fixed."""
+        bot_login = f"{self.bot_name}[bot]"
+
+        threads = await self.provider.get_outdated_bot_threads(pr_info, bot_login)
+        if not threads:
+            return
+
+        # Fetch current code for each thread's file (dedupe by path)
+        file_contents: dict[str, str] = {}
+        for t in threads:
+            if t.path not in file_contents:
+                file_contents[t.path] = await self.provider.get_file_content(
+                    pr_info, t.path, pr_info.head_branch
+                )
+
+        # Build context: ~20 lines around the comment line
+        thread_contexts: list[tuple[OutdatedThread, str]] = []
+        for t in threads:
+            content = file_contents.get(t.path, "")
+            lines = content.splitlines()
+            start = max(0, t.line - 10)
+            end = min(len(lines), t.line + 10)
+            snippet = "\n".join(lines[start:end])
+            thread_contexts.append((t, snippet))
+
+        # Single LLM call to verify which issues are fixed
+        verified_ids = await self._verify_fixes(thread_contexts)
+
+        if verified_ids:
+            resolved = await self.provider.resolve_threads(pr_info, verified_ids)
+            logger.info("Resolved %d verified-fixed review thread(s)", resolved)
+
+    async def _verify_fixes(
+        self, thread_contexts: list[tuple[OutdatedThread, str]]
+    ) -> list[str]:
+        """Ask the LLM which review issues have been fixed."""
+        prompt = build_verify_fixes_prompt(thread_contexts)
+        response = await self.llm.complete(prompt, json_mode=True)
+        return parse_verify_fixes_response(response)
