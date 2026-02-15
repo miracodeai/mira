@@ -205,6 +205,7 @@ class ReviewEngine:
 
     async def _resolve_verified_threads(self, pr_info: PRInfo) -> None:
         """Check outdated bot threads and resolve those the LLM confirms as fixed."""
+        assert self.provider is not None
         bot_login = f"{self.bot_name}[bot]"
 
         threads = await self.provider.get_outdated_bot_threads(pr_info, bot_login)

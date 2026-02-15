@@ -302,7 +302,8 @@ class GitHubProvider(BaseProvider):
             data = resp.json()
             if "errors" in data:
                 raise ProviderError(f"GraphQL errors: {data['errors']}")
-            return data["data"]
+            result: dict[str, Any] = data["data"]
+            return result
 
     async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
         @retry(
