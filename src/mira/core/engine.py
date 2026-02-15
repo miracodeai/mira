@@ -225,9 +225,8 @@ class ReviewEngine:
             Tuple of (threads_checked, threads_resolved).
         """
         assert self.provider is not None
-        bot_login = f"{self.bot_name}[bot]"
 
-        threads = await self.provider.get_unresolved_bot_threads(pr_info, bot_login)
+        threads = await self.provider.get_unresolved_bot_threads(pr_info)
         if not threads:
             logger.debug("No unresolved bot threads found for PR %s", pr_info.url)
             return 0, 0

@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 
 _GRAPHQL_URL = "https://api.github.com/graphql"
 
+
+def _normalize_login(login: str) -> str:
+    """Normalize a GitHub login for comparison.
+
+    GitHub Apps have a quirk: ``viewer.login`` returns ``app[bot]`` while
+    review-comment authors are stored as just ``app``.  Strip the ``[bot]``
+    suffix and lower-case so both forms match reliably.
+    """
+    return login.removesuffix("[bot]").lower()
+
+
 _REVIEW_THREADS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   viewer { login }
@@ -342,7 +353,7 @@ class GitHubProvider(BaseProvider):
                     author = comments[0].get("author")
                     if author is None:
                         continue
-                    if author["login"] == bot_login:
+                    if _normalize_login(author["login"]) == _normalize_login(bot_login):
                         total_unresolved += 1
                         if node["isOutdated"]:
                             thread_ids.append(node["id"])
@@ -374,10 +385,15 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to resolve outdated review threads: {e}") from e
 
     async def get_unresolved_bot_threads(
-        self, pr_info: PRInfo, bot_login: str
+        self, pr_info: PRInfo, bot_login: str | None = None
     ) -> list[UnresolvedThread]:
-        """Fetch all unresolved review threads authored by the bot."""
+        """Fetch all unresolved review threads authored by the bot.
+
+        If *bot_login* is ``None`` the authenticated user (viewer) is used,
+        which is the reliable way to match the GitHub App's own comments.
+        """
         threads: list[UnresolvedThread] = []
+        viewer_login: str | None = None
         cursor: str | None = None
 
         while True:
@@ -394,16 +410,35 @@ class GitHubProvider(BaseProvider):
             except Exception as e:
                 raise ProviderError(f"Failed to fetch review threads: {e}") from e
 
+            if viewer_login is None:
+                viewer_login = data["viewer"]["login"]
+
+            effective_login = bot_login or viewer_login
+
             rt = data["repository"]["pullRequest"]["reviewThreads"]
+            total_nodes = len(rt["nodes"])
+            skipped_resolved = 0
+            skipped_no_comments = 0
+            skipped_author = 0
+
             for node in rt["nodes"]:
                 if node["isResolved"]:
+                    skipped_resolved += 1
                     continue
                 comments = node["comments"]["nodes"]
                 if not comments:
+                    skipped_no_comments += 1
                     continue
                 first = comments[0]
                 author = (first.get("author") or {}).get("login", "")
-                if author != bot_login:
+                if _normalize_login(author) != _normalize_login(effective_login):
+                    skipped_author += 1
+                    logger.info(
+                        "Skipping thread %s: author %r != %r",
+                        node["id"],
+                        author,
+                        effective_login,
+                    )
                     continue
                 threads.append(
                     UnresolvedThread(
@@ -415,13 +450,25 @@ class GitHubProvider(BaseProvider):
                     )
                 )
 
+            logger.info(
+                "Page: %d nodes, %d resolved, %d no comments, %d wrong author, %d matched",
+                total_nodes,
+                skipped_resolved,
+                skipped_no_comments,
+                skipped_author,
+                total_nodes - skipped_resolved - skipped_no_comments - skipped_author,
+            )
+
             if rt["pageInfo"]["hasNextPage"]:
                 cursor = rt["pageInfo"]["endCursor"]
             else:
                 break
 
-        logger.debug(
-            "Found %d unresolved bot thread(s) for PR %s (%d outdated)",
+        logger.info(
+            "get_unresolved_bot_threads (viewer=%s, match=%s): "
+            "found %d thread(s) for PR %s (%d outdated)",
+            viewer_login,
+            effective_login,
             len(threads),
             pr_info.url,
             sum(1 for t in threads if t.is_outdated),
@@ -430,7 +477,7 @@ class GitHubProvider(BaseProvider):
 
     # Backward-compat alias
     async def get_outdated_bot_threads(
-        self, pr_info: PRInfo, bot_login: str
+        self, pr_info: PRInfo, bot_login: str | None = None
     ) -> list[UnresolvedThread]:
         return await self.get_unresolved_bot_threads(pr_info, bot_login)
 

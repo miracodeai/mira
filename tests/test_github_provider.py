@@ -837,6 +837,30 @@ class TestGetUnresolvedBotThreads:
 
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_matches_author_without_bot_suffix(self):
+        """Matches when viewer is 'app[bot]' but comment author is 'app' (GitHub App quirk)."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        nodes = [
+            _make_thread_node("T1", author_login="miracodeai"),
+            _make_thread_node("T2", author_login="miracodeai"),
+        ]
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json=_make_graphql_response(nodes, viewer_login="miracodeai[bot]"),
+                request=httpx.Request("POST", url),
+            )
+
+        pr_info = _make_pr_info()
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_unresolved_bot_threads(pr_info)
+
+        assert len(result) == 2
+
 
 class TestResolveThreads:
     @pytest.mark.asyncio
