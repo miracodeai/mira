@@ -13,7 +13,7 @@ from github import Github, GithubException
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from mira.exceptions import ProviderError
-from mira.models import OutdatedThread, PRInfo, ReviewComment, ReviewResult, Severity
+from mira.models import PRInfo, ReviewComment, ReviewResult, Severity, UnresolvedThread
 from mira.providers.base import BaseProvider
 
 # Transient errors worth retrying — network issues and GitHub server errors.
@@ -313,9 +313,11 @@ class GitHubProvider(BaseProvider):
             reraise=True,
         )
         async def _resolve() -> int:
-            # Phase 1: Paginate through review threads and collect bot-authored unresolved ones
+            # Phase 1: Paginate through review threads and collect bot-authored
+            # unresolved threads that GitHub has marked as outdated.
             bot_login: str | None = None
             thread_ids: list[str] = []
+            total_unresolved = 0
             cursor: str | None = None
 
             while True:
@@ -341,14 +343,24 @@ class GitHubProvider(BaseProvider):
                     if author is None:
                         continue
                     if author["login"] == bot_login:
-                        thread_ids.append(node["id"])
+                        total_unresolved += 1
+                        if node["isOutdated"]:
+                            thread_ids.append(node["id"])
 
                 page_info = threads["pageInfo"]
                 if not page_info["hasNextPage"]:
                     break
                 cursor = page_info["endCursor"]
 
-            # Phase 2: Resolve each collected thread
+            logger.debug(
+                "Brute-force resolver (viewer=%s): %d unresolved bot thread(s), "
+                "%d outdated to resolve",
+                bot_login,
+                total_unresolved,
+                len(thread_ids),
+            )
+
+            # Phase 2: Resolve each collected outdated thread
             for thread_id in thread_ids:
                 await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
 
@@ -361,11 +373,11 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to resolve outdated review threads: {e}") from e
 
-    async def get_outdated_bot_threads(
+    async def get_unresolved_bot_threads(
         self, pr_info: PRInfo, bot_login: str
-    ) -> list[OutdatedThread]:
-        """Fetch unresolved, outdated review threads authored by the bot."""
-        threads: list[OutdatedThread] = []
+    ) -> list[UnresolvedThread]:
+        """Fetch all unresolved review threads authored by the bot."""
+        threads: list[UnresolvedThread] = []
         cursor: str | None = None
 
         while True:
@@ -384,7 +396,7 @@ class GitHubProvider(BaseProvider):
 
             rt = data["repository"]["pullRequest"]["reviewThreads"]
             for node in rt["nodes"]:
-                if node["isResolved"] or not node["isOutdated"]:
+                if node["isResolved"]:
                     continue
                 comments = node["comments"]["nodes"]
                 if not comments:
@@ -394,11 +406,12 @@ class GitHubProvider(BaseProvider):
                 if author != bot_login:
                     continue
                 threads.append(
-                    OutdatedThread(
+                    UnresolvedThread(
                         thread_id=node["id"],
                         path=first.get("path", ""),
                         line=first.get("line") or 0,
                         body=first.get("body", ""),
+                        is_outdated=bool(node["isOutdated"]),
                     )
                 )
 
@@ -407,7 +420,19 @@ class GitHubProvider(BaseProvider):
             else:
                 break
 
+        logger.debug(
+            "Found %d unresolved bot thread(s) for PR %s (%d outdated)",
+            len(threads),
+            pr_info.url,
+            sum(1 for t in threads if t.is_outdated),
+        )
         return threads
+
+    # Backward-compat alias
+    async def get_outdated_bot_threads(
+        self, pr_info: PRInfo, bot_login: str
+    ) -> list[UnresolvedThread]:
+        return await self.get_unresolved_bot_threads(pr_info, bot_login)
 
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref via the REST API."""
@@ -448,7 +473,19 @@ class GitHubProvider(BaseProvider):
                 await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": tid})
                 resolved += 1
             except Exception:
-                logger.warning("Failed to resolve thread %s, skipping", tid)
+                logger.warning(
+                    "Failed to resolve thread %s on PR %s",
+                    tid,
+                    pr_info.url,
+                )
+        if resolved < len(thread_ids):
+            logger.warning(
+                "Resolved %d/%d threads on PR %s (%d failed)",
+                resolved,
+                len(thread_ids),
+                pr_info.url,
+                len(thread_ids) - resolved,
+            )
         return resolved
 
 

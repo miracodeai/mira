@@ -566,13 +566,14 @@ class TestResolveOutdatedReviewThreads:
 
     @pytest.mark.asyncio
     async def test_found_and_resolved(self):
-        """Bot-authored unresolved threads are resolved; human threads are skipped."""
+        """Only bot-authored, outdated, unresolved threads are resolved."""
         provider = self._make_provider()
         pr_info = _make_pr_info()
 
         threads = [
-            _make_thread_node("T1", author_login="mira-app[bot]"),
+            _make_thread_node("T1", author_login="mira-app[bot]", is_outdated=True),
             _make_thread_node("T2", author_login="human-user"),
+            _make_thread_node("T3", author_login="mira-app[bot]", is_outdated=False),
         ]
         query_resp = _make_graphql_response(threads)
         mutation_resp = {
@@ -591,6 +592,7 @@ class TestResolveOutdatedReviewThreads:
         with patch.object(httpx.AsyncClient, "post", _mock_post):
             result = await provider.resolve_outdated_review_threads(pr_info)
 
+        # Only T1 (outdated) resolved; T3 (not outdated) skipped
         assert result == 1
         # 1 query + 1 mutation
         assert call_count == 2
@@ -736,23 +738,23 @@ class TestResolveOutdatedReviewThreads:
         assert call_count == 2
 
 
-class TestGetOutdatedBotThreads:
+class TestGetUnresolvedBotThreads:
     @pytest.mark.asyncio
-    async def test_returns_only_matching_threads(self):
-        """Only returns threads that are outdated, unresolved, and authored by the bot."""
+    async def test_returns_all_unresolved_bot_threads(self):
+        """Returns all unresolved threads authored by the bot, regardless of isOutdated."""
         provider = GitHubProvider.__new__(GitHubProvider)
         provider._token = "test-token"
 
         nodes = [
-            _make_thread_node("T1", author_login="mira[bot]"),  # matches
+            _make_thread_node("T1", author_login="mira[bot]"),  # outdated — matches
             _make_thread_node("T2", is_resolved=True, author_login="mira[bot]"),  # resolved — skip
             _make_thread_node(
                 "T3", is_outdated=False, author_login="mira[bot]"
-            ),  # not outdated  # noqa: E501
+            ),  # not outdated — still matches
             _make_thread_node("T4", author_login="human"),  # wrong author — skip
             _make_thread_node(
                 "T5", author_login="mira[bot]", body="Another issue", path="b.py", line=5
-            ),  # matches  # noqa: E501
+            ),  # outdated — matches
         ]
 
         async def _mock_post(self, url, **kwargs):
@@ -764,13 +766,16 @@ class TestGetOutdatedBotThreads:
 
         pr_info = _make_pr_info()
         with patch.object(httpx.AsyncClient, "post", _mock_post):
-            result = await provider.get_outdated_bot_threads(pr_info, "mira[bot]")
+            result = await provider.get_unresolved_bot_threads(pr_info, "mira[bot]")
 
-        assert len(result) == 2
+        assert len(result) == 3
         assert result[0].thread_id == "T1"
-        assert result[1].thread_id == "T5"
-        assert result[1].path == "b.py"
-        assert result[1].line == 5
+        assert result[0].is_outdated is True
+        assert result[1].thread_id == "T3"
+        assert result[1].is_outdated is False
+        assert result[2].thread_id == "T5"
+        assert result[2].path == "b.py"
+        assert result[2].line == 5
 
     @pytest.mark.asyncio
     async def test_handles_pagination(self):
@@ -803,20 +808,20 @@ class TestGetOutdatedBotThreads:
 
         pr_info = _make_pr_info()
         with patch.object(httpx.AsyncClient, "post", _mock_post):
-            result = await provider.get_outdated_bot_threads(pr_info, "mira[bot]")
+            result = await provider.get_unresolved_bot_threads(pr_info, "mira[bot]")
 
         assert len(result) == 2
         assert call_count == 2
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_matches(self):
-        """Returns empty list when no threads match criteria."""
+        """Returns empty list when all threads are resolved or by other authors."""
         provider = GitHubProvider.__new__(GitHubProvider)
         provider._token = "test-token"
 
         nodes = [
             _make_thread_node("T1", is_resolved=True),
-            _make_thread_node("T2", is_outdated=False),
+            _make_thread_node("T2", author_login="human"),
         ]
 
         async def _mock_post(self, url, **kwargs):
@@ -828,7 +833,7 @@ class TestGetOutdatedBotThreads:
 
         pr_info = _make_pr_info()
         with patch.object(httpx.AsyncClient, "post", _mock_post):
-            result = await provider.get_outdated_bot_threads(pr_info, "mira[bot]")
+            result = await provider.get_unresolved_bot_threads(pr_info, "mira[bot]")
 
         assert result == []
 
