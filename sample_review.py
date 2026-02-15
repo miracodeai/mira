@@ -20,7 +20,7 @@ def hash_password(password):
 def create_user(username, password):
     db = sqlite3.connect("users.db")
     hashed = hash_password(password)
-    db.execute(f"INSERT INTO users (username, password) VALUES ('{username}', '{hashed}')")
+    db.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed))
     db.commit()
     db.close()
 
