@@ -412,6 +412,89 @@ class TestReviewEngine:
         mock_provider.resolve_outdated_review_threads.assert_not_called()
 
 
+class TestDryRun:
+    """Tests for dry-run mode — full pipeline without write operations."""
+
+    @pytest.mark.asyncio
+    async def test_dry_run_skips_writes_but_runs_reads_and_llm(
+        self,
+        sample_llm_response_text: str,
+    ):
+        """Dry-run exercises the full pipeline (reads + LLM) but never posts to GitHub."""
+        threads = [
+            UnresolvedThread(thread_id="T1", path="src/app.py", line=10, body="Hardcoded secret"),
+        ]
+
+        verify_response = json.dumps({"results": [{"id": "T1", "fixed": True}]})
+
+        provider = AsyncMock()
+        provider.get_pr_info.return_value = PRInfo(
+            title="Test PR",
+            description="Test description",
+            base_branch="main",
+            head_branch="feature",
+            url="https://github.com/test/repo/pull/1",
+            number=1,
+            owner="test",
+            repo="repo",
+        )
+        provider.get_pr_diff.return_value = (
+            "diff --git a/src/utils.py b/src/utils.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/src/utils.py\n"
+            "@@ -0,0 +1,3 @@\n"
+            "+import os\n+x = 1\n+y = 2\n"
+        )
+        provider.get_unresolved_bot_threads = AsyncMock(return_value=threads)
+        provider.get_file_content = AsyncMock(return_value="import os\nx = 1\ny = 2\n")
+        provider.resolve_threads = AsyncMock(return_value=1)
+        provider.post_review = AsyncMock()
+        provider.post_comment = AsyncMock()
+        provider.update_comment = AsyncMock()
+        provider.find_bot_comment = AsyncMock(return_value=None)
+
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        call_count = 0
+
+        async def _side_effect(messages, json_mode=True):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return verify_response
+            if call_count == 2:
+                return json.dumps({"summary": "walkthrough", "file_changes": []})
+            return sample_llm_response_text
+
+        llm.complete = AsyncMock(side_effect=_side_effect)
+
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=llm, provider=provider, bot_name="mira", dry_run=True
+        )
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # Read operations should be called
+        provider.get_pr_info.assert_awaited_once()
+        provider.get_pr_diff.assert_awaited_once()
+        provider.get_unresolved_bot_threads.assert_awaited_once()
+        provider.get_file_content.assert_awaited()
+
+        # LLM should be called (verify-fixes + walkthrough + review)
+        assert llm.complete.call_count >= 2
+
+        # Write operations should NOT be called
+        provider.resolve_threads.assert_not_called()
+        provider.post_review.assert_not_called()
+        provider.post_comment.assert_not_called()
+        provider.update_comment.assert_not_called()
+
+        # Result should still be populated
+        assert result is not None
+
+
 class TestExtractSections:
     """Tests for the _extract_sections helper."""
 

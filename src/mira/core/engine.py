@@ -26,6 +26,7 @@ from mira.models import (
     PRInfo,
     ReviewComment,
     ReviewResult,
+    ThreadDecision,
     UnresolvedThread,
     WalkthroughResult,
 )
@@ -80,11 +81,13 @@ class ReviewEngine:
         llm: LLMProvider,
         provider: BaseProvider | None = None,
         bot_name: str = "miracodeai",
+        dry_run: bool = False,
     ) -> None:
         self.config = config
         self.llm = llm
         self.provider = provider
         self.bot_name = bot_name
+        self.dry_run = dry_run
 
     async def review_pr(self, pr_url: str) -> ReviewResult:
         """Full pipeline: fetch PR -> review -> post results."""
@@ -97,6 +100,7 @@ class ReviewEngine:
         llm_resolved = 0
         threads_checked = 0
         unresolved_threads: list[UnresolvedThread] = []
+        thread_decisions: list[ThreadDecision] = []
 
         if self.bot_name:
             try:
@@ -104,6 +108,7 @@ class ReviewEngine:
                     threads_checked,
                     llm_resolved,
                     unresolved_threads,
+                    thread_decisions,
                 ) = await self._resolve_verified_threads(pr_info)
             except Exception as exc:
                 logger.warning("Thread resolution failed, continuing: %s", exc)
@@ -119,15 +124,18 @@ class ReviewEngine:
 
         # Post walkthrough comment before inline review (upsert: edit if exists)
         if result.walkthrough:
-            try:
-                markdown = result.walkthrough.to_markdown(bot_name=self.bot_name)
-                existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
-                if existing_id is not None:
-                    await self.provider.update_comment(pr_info, existing_id, markdown)
-                else:
-                    await self.provider.post_comment(pr_info, markdown)
-            except Exception as exc:
-                logger.warning("Failed to post walkthrough comment: %s", exc)
+            if self.dry_run:
+                logger.info("Dry run: skipping walkthrough comment posting")
+            else:
+                try:
+                    markdown = result.walkthrough.to_markdown(bot_name=self.bot_name)
+                    existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
+                    if existing_id is not None:
+                        await self.provider.update_comment(pr_info, existing_id, markdown)
+                    else:
+                        await self.provider.post_comment(pr_info, markdown)
+                except Exception as exc:
+                    logger.warning("Failed to post walkthrough comment: %s", exc)
 
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",
@@ -138,10 +146,18 @@ class ReviewEngine:
 
         # Only post if there are comments
         if result.comments:
-            await self.provider.post_review(pr_info, result)
+            if self.dry_run:
+                logger.info(
+                    "Dry run: would post %d comment(s) on PR %s",
+                    len(result.comments),
+                    pr_info.url,
+                )
+            else:
+                await self.provider.post_review(pr_info, result)
         else:
             logger.info("No code suggestions for PR %s", pr_info.url)
 
+        result.thread_decisions = thread_decisions
         return result
 
     async def review_diff(self, diff_text: str) -> ReviewResult:
@@ -255,18 +271,18 @@ class ReviewEngine:
 
     async def _resolve_verified_threads(
         self, pr_info: PRInfo
-    ) -> tuple[int, int, list[UnresolvedThread]]:
+    ) -> tuple[int, int, list[UnresolvedThread], list[ThreadDecision]]:
         """Check all unresolved bot threads and resolve those the LLM confirms as fixed.
 
         Returns:
-            Tuple of (threads_checked, threads_resolved, remaining_unresolved).
+            Tuple of (threads_checked, threads_resolved, remaining_unresolved, decisions).
         """
         assert self.provider is not None
 
-        threads = await self.provider.get_unresolved_bot_threads(pr_info)
+        threads = await self.provider.get_unresolved_bot_threads(pr_info, self.bot_name)
         if not threads:
             logger.debug("No unresolved bot threads found for PR %s", pr_info.url)
-            return 0, 0, []
+            return 0, 0, [], []
 
         logger.info(
             "Found %d unresolved bot thread(s) to verify on PR %s",
@@ -299,17 +315,34 @@ class ReviewEngine:
 
         # Single LLM call to verify which issues are fixed
         verified_ids = await self._verify_fixes(file_groups)
+        verified_set = set(verified_ids)
+
+        # Build per-thread decisions
+        decisions = [
+            ThreadDecision(
+                thread_id=t.thread_id,
+                path=t.path,
+                line=t.line,
+                body=t.body,
+                fixed=t.thread_id in verified_set,
+            )
+            for t in threads
+        ]
 
         resolved = 0
         if verified_ids:
-            resolved = await self.provider.resolve_threads(pr_info, verified_ids)
-            if resolved < len(verified_ids):
-                logger.error(
-                    "Failed to resolve %d/%d verified-fixed thread(s) on PR %s",
-                    len(verified_ids) - resolved,
-                    len(verified_ids),
-                    pr_info.url,
-                )
+            if self.dry_run:
+                resolved = len(verified_ids)
+                logger.info("Dry run: would resolve %d thread(s): %s", resolved, verified_ids)
+            else:
+                resolved = await self.provider.resolve_threads(pr_info, verified_ids)
+                if resolved < len(verified_ids):
+                    logger.error(
+                        "Failed to resolve %d/%d verified-fixed thread(s) on PR %s",
+                        len(verified_ids) - resolved,
+                        len(verified_ids),
+                        pr_info.url,
+                    )
 
         logger.info(
             "LLM verification: checked %d thread(s), %d confirmed fixed, %d resolved",
@@ -318,9 +351,8 @@ class ReviewEngine:
             resolved,
         )
 
-        verified_set = set(verified_ids)
         remaining = [t for t in threads if t.thread_id not in verified_set]
-        return len(threads), resolved, remaining
+        return len(threads), resolved, remaining, decisions
 
     async def _verify_fixes(
         self, file_groups: list[tuple[str, str, list[UnresolvedThread]]]

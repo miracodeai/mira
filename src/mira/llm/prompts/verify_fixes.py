@@ -100,12 +100,23 @@ def build_verify_fixes_prompt(
     ]
 
 
+def _strip_code_fences(text: str | None) -> str:
+    """Remove markdown code fences wrapping JSON."""
+    import re
+
+    if not text:
+        return ""
+    text = text.strip()
+    match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", text, re.DOTALL)
+    return match.group(1).strip() if match else text
+
+
 def parse_verify_fixes_response(raw: str) -> list[str]:
     """Parse the LLM response and return thread IDs confirmed as fixed."""
     import json
 
     try:
-        data = json.loads(raw)
+        data = json.loads(_strip_code_fences(raw))
     except (json.JSONDecodeError, TypeError):
         return []
 

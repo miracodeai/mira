@@ -21,6 +21,20 @@ def _format_text(result: ReviewResult) -> str:
     """Format review result as human-readable text."""
     lines: list[str] = []
 
+    if result.thread_decisions:
+        from mira.llm.prompts.verify_fixes import _extract_issue_description
+
+        lines.append("Thread resolution:")
+        for d in result.thread_decisions:
+            status = "RESOLVE" if d.fixed else "KEEP"
+            desc = _extract_issue_description(d.body)
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            lines.append(f"  [{status}] {d.path}:{d.line} — {desc}")
+        fixed = sum(1 for d in result.thread_decisions if d.fixed)
+        lines.append(f"  {fixed}/{len(result.thread_decisions)} thread(s) would be resolved.")
+        lines.append("")
+
     if result.walkthrough:
         lines.append(result.walkthrough.to_markdown())
         lines.append("")
@@ -165,27 +179,14 @@ def review(
 
         github_provider = GitHubProvider(github_token)
 
-    engine = ReviewEngine(config=config, llm=llm, provider=None if dry_run else github_provider)
+    engine = ReviewEngine(config=config, llm=llm, provider=github_provider, dry_run=dry_run)
 
     try:
         if use_stdin:
             diff_text = sys.stdin.read()
             result = asyncio.run(engine.review_diff(diff_text))
         else:
-            if dry_run and github_provider:
-
-                async def _dry_run_review() -> ReviewResult:
-                    pr_info = await github_provider.get_pr_info(pr_url)  # type: ignore[arg-type]
-                    diff_text = await github_provider.get_pr_diff(pr_info)
-                    return await engine._review_diff_internal(
-                        diff_text,
-                        pr_title=pr_info.title,
-                        pr_description=pr_info.description,
-                    )
-
-                result = asyncio.run(_dry_run_review())
-            else:
-                result = asyncio.run(engine.review_pr(pr_url))  # type: ignore[arg-type]
+            result = asyncio.run(engine.review_pr(pr_url))  # type: ignore[arg-type]
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 

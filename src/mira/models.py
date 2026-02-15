@@ -207,6 +207,17 @@ class WalkthroughResult:
 
 
 @dataclass
+class ThreadDecision:
+    """Per-thread resolution decision from dry-run."""
+
+    thread_id: str
+    path: str
+    line: int
+    body: str
+    fixed: bool
+
+
+@dataclass
 class ReviewResult:
     """The complete result of a review."""
 
@@ -216,6 +227,7 @@ class ReviewResult:
     skipped_reason: str | None = None
     token_usage: dict[str, int] = field(default_factory=dict)
     walkthrough: WalkthroughResult | None = None
+    thread_decisions: list[ThreadDecision] = field(default_factory=list)
 
 
 @dataclass
