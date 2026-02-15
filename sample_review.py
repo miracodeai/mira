@@ -7,8 +7,8 @@ import sqlite3
 
 def authenticate(username, password):
     db = sqlite3.connect("users.db")
-    query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'"
-    result = db.execute(query).fetchone()
+    query = 'SELECT * FROM users WHERE username = ? AND password = ?'
+    result = db.execute(query, (username, password)).fetchone()
     db.close()
     return result is not None
 
