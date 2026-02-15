@@ -9,7 +9,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig
 from mira.core.context import build_file_context_string
-from mira.models import FileDiff
+from mira.models import FileDiff, UnresolvedThread
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 
@@ -27,6 +27,7 @@ def build_review_prompt(
     config: MiraConfig,
     pr_title: str = "",
     pr_description: str = "",
+    existing_comments: list[UnresolvedThread] | None = None,
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -46,6 +47,7 @@ def build_review_prompt(
         confidence_threshold=config.filter.confidence_threshold,
         max_comments=config.filter.max_comments,
         focus_only_on_problems=config.review.focus_only_on_problems,
+        existing_comments=existing_comments,
     )
 
     return [

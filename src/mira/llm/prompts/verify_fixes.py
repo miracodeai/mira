@@ -6,37 +6,38 @@ from mira.models import UnresolvedThread
 
 
 def build_verify_fixes_prompt(
-    thread_contexts: list[tuple[UnresolvedThread, str]],
+    file_groups: list[tuple[str, str, list[UnresolvedThread]]],
 ) -> list[dict[str, str]]:
     """Build a prompt asking the LLM which review issues have been fixed.
 
-    Each entry in *thread_contexts* is a ``(thread, code_snippet)`` pair where
-    *code_snippet* contains ~20 lines of current code around the original
-    comment location.
+    Each entry in *file_groups* is a ``(path, file_content, threads)`` tuple
+    where *file_content* is the current code (full file or relevant sections)
+    and *threads* lists the unresolved review comments in that file.
     """
-    issues: list[str] = []
-    for idx, (thread, snippet) in enumerate(thread_contexts, 1):
-        issues.append(
-            f'Issue {idx} (id: "{thread.thread_id}"):\n'
-            f"- File: {thread.path}, Line {thread.line}\n"
-            f'- Original comment: "{thread.body}"\n'
-            f"- Current code:\n```\n{snippet}\n```"
+    sections: list[str] = []
+    for path, content, threads in file_groups:
+        issues = "\n".join(
+            f'{idx}. (id: "{t.thread_id}") Line {t.line}: "{t.body}"'
+            for idx, t in enumerate(threads, 1)
+        )
+        sections.append(
+            f"File: {path}\n```\n{content}\n```\n\nIssues to verify in this file:\n{issues}"
         )
 
-    user_content = "\n\n".join(issues)
+    user_content = "\n\n---\n\n".join(sections)
 
     return [
         {
             "role": "system",
             "content": (
                 "You are verifying whether code review issues have been fixed.\n\n"
-                "For each issue below, you will see the original review comment and "
-                "the current code around the commented line.\n"
+                "For each issue below, you will see the current file content "
+                "(full or relevant sections) and a list of previously flagged issues.\n"
+                "Examine the current file content to determine if each issue has been "
+                "addressed. Mark as fixed if the specific concern is no longer present "
+                "in the code.\n\n"
                 "Respond with JSON: "
-                '{"results": [{"id": "<thread_id>", "fixed": true/false}, ...]}\n\n'
-                "Only mark as fixed if the specific issue described in the comment "
-                "has been addressed in the current code. If you are unsure, mark it "
-                "as not fixed."
+                '{"results": [{"id": "<thread_id>", "fixed": true/false}, ...]}'
             ),
         },
         {"role": "user", "content": user_content},

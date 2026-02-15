@@ -72,6 +72,16 @@ Only use these file paths in your comments:
 {% endif %}
 {% endif %}
 
+{% if existing_comments %}
+## Already Flagged Issues
+
+These issues have already been flagged in previous reviews on this PR. Do NOT create new comments for these — they are being tracked separately:
+
+{% for c in existing_comments %}
+- `{{ c.path }}:{{ c.line }}` — {{ c.body[:200] }}
+{% endfor %}
+{% endif %}
+
 ## Diffs to Review
 
 Review the file diffs provided in the user message below.

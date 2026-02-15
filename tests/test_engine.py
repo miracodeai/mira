@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mira.config import MiraConfig
-from mira.core.engine import ReviewEngine
+from mira.core.engine import ReviewEngine, _extract_sections
 from mira.llm.provider import LLMProvider
 from mira.models import PRInfo, UnresolvedThread, WalkthroughResult
 
@@ -465,6 +465,40 @@ class TestReviewEngine:
         mock_provider.post_review.assert_not_called()
 
 
+class TestExtractSections:
+    """Tests for the _extract_sections helper."""
+
+    def test_single_thread_extracts_window(self):
+        lines = [f"line{i}" for i in range(200)]
+        thread = UnresolvedThread(thread_id="T1", path="f.py", line=100, body="issue")
+        result = _extract_sections(lines, [thread], context_lines=5)
+        # Should contain lines around line 100 (0-indexed: 99)
+        assert "line95" in result
+        assert "line104" in result
+
+    def test_overlapping_windows_merged(self):
+        lines = [f"line{i}" for i in range(200)]
+        t1 = UnresolvedThread(thread_id="T1", path="f.py", line=50, body="a")
+        t2 = UnresolvedThread(thread_id="T2", path="f.py", line=55, body="b")
+        result = _extract_sections(lines, [t1, t2], context_lines=10)
+        # Windows overlap, so no "..." separator
+        assert "..." not in result
+
+    def test_distant_windows_separated(self):
+        lines = [f"line{i}" for i in range(500)]
+        t1 = UnresolvedThread(thread_id="T1", path="f.py", line=10, body="a")
+        t2 = UnresolvedThread(thread_id="T2", path="f.py", line=400, body="b")
+        result = _extract_sections(lines, [t1, t2], context_lines=5)
+        assert "..." in result
+
+    def test_edge_clamps_to_file_bounds(self):
+        lines = [f"line{i}" for i in range(20)]
+        thread = UnresolvedThread(thread_id="T1", path="f.py", line=1, body="issue")
+        result = _extract_sections(lines, [thread], context_lines=50)
+        # Should not crash, should contain first line
+        assert "line0" in result
+
+
 class TestThreadResolution:
     """Tests for the _resolve_verified_threads flow."""
 
@@ -541,6 +575,94 @@ class TestThreadResolution:
         provider_with_threads.resolve_threads.assert_awaited_once()
         resolved_ids = provider_with_threads.resolve_threads.call_args[0][1]
         assert resolved_ids == ["T1"]
+
+    @pytest.mark.asyncio
+    async def test_full_flow_passes_full_file_for_small_files(
+        self,
+        sample_llm_response_text: str,
+        provider_with_threads: AsyncMock,
+    ):
+        """Small files (<= 500 lines) pass full content to verify-fixes prompt."""
+        small_content = "line\n" * 100  # 100 lines — well under threshold
+        provider_with_threads.get_file_content = AsyncMock(return_value=small_content)
+
+        verify_response = json.dumps({"results": []})
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        call_count = 0
+
+        async def _side_effect(messages, json_mode=True):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return verify_response
+            if call_count == 2:
+                return json.dumps({"summary": "walkthrough", "file_changes": []})
+            return sample_llm_response_text
+
+        llm.complete = AsyncMock(side_effect=_side_effect)
+
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
+        )
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # Verify the LLM was called with the full file content in the prompt
+        verify_call = llm.complete.call_args_list[0]
+        prompt_content = verify_call[0][0][1]["content"]
+        assert small_content.strip() in prompt_content
+
+    @pytest.mark.asyncio
+    async def test_unresolved_threads_passed_to_review(
+        self,
+        sample_llm_response_text: str,
+        provider_with_threads: AsyncMock,
+        threads: list[UnresolvedThread],
+    ):
+        """Unresolved threads are passed as existing_comments to the review prompt."""
+        # T1 fixed, T2 not fixed — T2 should be passed to review
+        verify_response = json.dumps(
+            {"results": [{"id": "T1", "fixed": True}, {"id": "T2", "fixed": False}]}
+        )
+
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        call_count = 0
+
+        async def _side_effect(messages, json_mode=True):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return verify_response
+            if call_count == 2:
+                return json.dumps({"summary": "walkthrough", "file_changes": []})
+            return sample_llm_response_text
+
+        llm.complete = AsyncMock(side_effect=_side_effect)
+
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
+        )
+
+        with patch(
+            "mira.core.engine.build_review_prompt",
+            wraps=__import__(
+                "mira.llm.prompts.review", fromlist=["build_review_prompt"]
+            ).build_review_prompt,
+        ) as mock_build:
+            await engine.review_pr("https://github.com/test/repo/pull/1")
+
+            # build_review_prompt should have been called with existing_comments
+            assert mock_build.call_count >= 1
+            _, kwargs = mock_build.call_args
+            assert "existing_comments" in kwargs
+            existing = kwargs["existing_comments"]
+            assert len(existing) == 1
+            assert existing[0].thread_id == "T2"
 
     @pytest.mark.asyncio
     async def test_skips_when_no_unresolved_threads(

@@ -33,6 +33,43 @@ from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
+_MAX_FULL_FILE_LINES = 500
+_LARGE_FILE_CONTEXT_LINES = 50  # ±50 lines = 100-line window
+
+
+def _extract_sections(
+    lines: list[str],
+    threads: list[UnresolvedThread],
+    context_lines: int,
+) -> str:
+    """Extract and merge relevant sections around each thread's comment line.
+
+    Returns a string with merged windows joined by ``...`` separators.
+    """
+    total = len(lines)
+    # Collect (start, end) ranges for each thread
+    ranges: list[tuple[int, int]] = []
+    for t in threads:
+        start = max(0, t.line - 1 - context_lines)
+        end = min(total, t.line - 1 + context_lines + 1)
+        ranges.append((start, end))
+
+    # Sort and merge overlapping ranges
+    ranges.sort()
+    merged: list[tuple[int, int]] = [ranges[0]]
+    for start, end in ranges[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+
+    # Build snippet
+    parts: list[str] = []
+    for start, end in merged:
+        parts.append("\n".join(lines[start:end]))
+    return "\n...\n".join(parts)
+
 
 class ReviewEngine:
     """Orchestrates the full PR review pipeline."""
@@ -60,10 +97,15 @@ class ReviewEngine:
         llm_resolved = 0
         fallback_resolved = 0
         threads_checked = 0
+        unresolved_threads: list[UnresolvedThread] = []
 
         if self.bot_name:
             try:
-                threads_checked, llm_resolved = await self._resolve_verified_threads(pr_info)
+                (
+                    threads_checked,
+                    llm_resolved,
+                    unresolved_threads,
+                ) = await self._resolve_verified_threads(pr_info)
             except Exception as exc:
                 logger.warning("Thread resolution failed, continuing: %s", exc)
 
@@ -73,6 +115,7 @@ class ReviewEngine:
             diff_text,
             pr_title=pr_info.title,
             pr_description=pr_info.description,
+            existing_comments=unresolved_threads or None,
         )
 
         # Post walkthrough comment before inline review (upsert: edit if exists)
@@ -120,6 +163,7 @@ class ReviewEngine:
         diff_text: str,
         pr_title: str = "",
         pr_description: str = "",
+        existing_comments: list[UnresolvedThread] | None = None,
     ) -> ReviewResult:
         """Core review pipeline."""
         # Enforce max_diff_size — truncate at last file boundary to avoid mangled hunks
@@ -187,6 +231,7 @@ class ReviewEngine:
                     config=self.config,
                     pr_title=pr_title,
                     pr_description=pr_description,
+                    existing_comments=existing_comments,
                 )
 
                 raw_response = await self.llm.complete(messages)
@@ -218,18 +263,20 @@ class ReviewEngine:
             walkthrough=walkthrough,
         )
 
-    async def _resolve_verified_threads(self, pr_info: PRInfo) -> tuple[int, int]:
+    async def _resolve_verified_threads(
+        self, pr_info: PRInfo
+    ) -> tuple[int, int, list[UnresolvedThread]]:
         """Check all unresolved bot threads and resolve those the LLM confirms as fixed.
 
         Returns:
-            Tuple of (threads_checked, threads_resolved).
+            Tuple of (threads_checked, threads_resolved, remaining_unresolved).
         """
         assert self.provider is not None
 
         threads = await self.provider.get_unresolved_bot_threads(pr_info)
         if not threads:
             logger.debug("No unresolved bot threads found for PR %s", pr_info.url)
-            return 0, 0
+            return 0, 0, []
 
         logger.info(
             "Found %d unresolved bot thread(s) to verify on PR %s",
@@ -245,18 +292,23 @@ class ReviewEngine:
                     pr_info, t.path, pr_info.head_branch
                 )
 
-        # Build context: ~20 lines around the comment line
-        thread_contexts: list[tuple[UnresolvedThread, str]] = []
+        # Group threads by file and build size-aware context
+        threads_by_path: dict[str, list[UnresolvedThread]] = {}
         for t in threads:
-            content = file_contents.get(t.path, "")
+            threads_by_path.setdefault(t.path, []).append(t)
+
+        file_groups: list[tuple[str, str, list[UnresolvedThread]]] = []
+        for path, path_threads in threads_by_path.items():
+            content = file_contents.get(path, "")
             lines = content.splitlines()
-            start = max(0, t.line - 10)
-            end = min(len(lines), t.line + 10)
-            snippet = "\n".join(lines[start:end])
-            thread_contexts.append((t, snippet))
+            if len(lines) <= _MAX_FULL_FILE_LINES:
+                file_groups.append((path, content, path_threads))
+            else:
+                snippet = _extract_sections(lines, path_threads, _LARGE_FILE_CONTEXT_LINES)
+                file_groups.append((path, snippet, path_threads))
 
         # Single LLM call to verify which issues are fixed
-        verified_ids = await self._verify_fixes(thread_contexts)
+        verified_ids = await self._verify_fixes(file_groups)
 
         resolved = 0
         if verified_ids:
@@ -275,10 +327,15 @@ class ReviewEngine:
             len(verified_ids),
             resolved,
         )
-        return len(threads), resolved
 
-    async def _verify_fixes(self, thread_contexts: list[tuple[UnresolvedThread, str]]) -> list[str]:
+        verified_set = set(verified_ids)
+        remaining = [t for t in threads if t.thread_id not in verified_set]
+        return len(threads), resolved, remaining
+
+    async def _verify_fixes(
+        self, file_groups: list[tuple[str, str, list[UnresolvedThread]]]
+    ) -> list[str]:
         """Ask the LLM which review issues have been fixed."""
-        prompt = build_verify_fixes_prompt(thread_contexts)
+        prompt = build_verify_fixes_prompt(file_groups)
         response = await self.llm.complete(prompt, json_mode=True)
         return parse_verify_fixes_response(response)

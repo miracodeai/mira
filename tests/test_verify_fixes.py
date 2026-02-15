@@ -18,41 +18,61 @@ def _make_thread(
 
 
 class TestBuildVerifyFixesPrompt:
-    def test_single_thread(self):
+    def test_single_file_single_thread(self):
         thread = _make_thread()
-        snippet = "api_key = os.environ.get('API_KEY')"
-        messages = build_verify_fixes_prompt([(thread, snippet)])
+        file_content = "api_key = os.environ.get('API_KEY')"
+        messages = build_verify_fixes_prompt([("src/app.py", file_content, [thread])])
 
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
         assert "verifying" in messages[0]["content"].lower()
-        assert messages[1]["role"] == "user"
-        assert "T1" in messages[1]["content"]
-        assert "src/app.py" in messages[1]["content"]
-        assert "Hardcoded API key." in messages[1]["content"]
-        assert snippet in messages[1]["content"]
+        user = messages[1]["content"]
+        assert "File: src/app.py" in user
+        assert "T1" in user
+        assert "Hardcoded API key." in user
+        assert file_content in user
 
-    def test_multiple_threads(self):
-        threads = [
-            (_make_thread("T1", body="Issue one"), "code1"),
-            (_make_thread("T2", body="Issue two"), "code2"),
-            (_make_thread("T3", body="Issue three"), "code3"),
-        ]
-        messages = build_verify_fixes_prompt(threads)
+    def test_single_file_multiple_threads(self):
+        t1 = _make_thread("T1", body="Issue one")
+        t2 = _make_thread("T2", body="Issue two", line=45)
+        file_content = "some code\n" * 20
+        messages = build_verify_fixes_prompt([("src/app.py", file_content, [t1, t2])])
 
-        content = messages[1]["content"]
-        assert "Issue 1" in content
-        assert "Issue 2" in content
-        assert "Issue 3" in content
-        assert "T1" in content
-        assert "T2" in content
-        assert "T3" in content
+        user = messages[1]["content"]
+        # Both threads listed under the same file
+        assert user.count("File: src/app.py") == 1
+        assert "T1" in user
+        assert "T2" in user
+        assert "Issue one" in user
+        assert "Issue two" in user
+
+    def test_multiple_files(self):
+        t1 = _make_thread("T1", path="src/a.py", body="Issue A")
+        t2 = _make_thread("T2", path="src/b.py", body="Issue B")
+        messages = build_verify_fixes_prompt(
+            [
+                ("src/a.py", "code_a", [t1]),
+                ("src/b.py", "code_b", [t2]),
+            ]
+        )
+
+        user = messages[1]["content"]
+        assert "File: src/a.py" in user
+        assert "File: src/b.py" in user
+        assert "code_a" in user
+        assert "code_b" in user
 
     def test_system_prompt_requests_json(self):
-        messages = build_verify_fixes_prompt([(_make_thread(), "code")])
+        messages = build_verify_fixes_prompt([("src/app.py", "code", [_make_thread()])])
         system = messages[0]["content"]
         assert "JSON" in system
         assert '"fixed"' in system
+
+    def test_system_prompt_not_overly_conservative(self):
+        messages = build_verify_fixes_prompt([("src/app.py", "code", [_make_thread()])])
+        system = messages[0]["content"]
+        assert "if you are unsure" not in system.lower()
+        assert "no longer present" in system.lower()
 
 
 class TestParseVerifyFixesResponse:
