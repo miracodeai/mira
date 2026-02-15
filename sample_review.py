@@ -58,5 +58,5 @@ class UserSession:
 
     def get_user_data(self, requested_id):
         db = sqlite3.connect("users.db")
-        result = db.execute(f"SELECT * FROM users WHERE id = {requested_id}").fetchone()
+        result = db.execute("SELECT * FROM users WHERE id = ?", (requested_id,)).fetchone()
         return result
