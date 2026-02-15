@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import json
 import sqlite3
 
 
@@ -36,7 +37,7 @@ def process_users(user_list):
     results = []
     for i in range(len(user_list)):
         user = user_list[i]
-        data = eval(user["settings"])
+        data = json.loads(user["settings"])
         results.append(data)
     return results
 
