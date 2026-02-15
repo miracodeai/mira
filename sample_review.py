@@ -1,5 +1,6 @@
 """User authentication module."""
 
+import bcrypt
 import hashlib
 import os
 import json
@@ -15,7 +16,7 @@ def authenticate(username, password):
 
 
 def hash_password(password):
-    return hashlib.md5(password.encode()).hexdigest()
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def create_user(username, password):
