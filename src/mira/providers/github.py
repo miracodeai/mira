@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 
 _GRAPHQL_URL = "https://api.github.com/graphql"
 
+
+def _normalize_login(login: str) -> str:
+    """Normalize a GitHub login for comparison.
+
+    GitHub Apps have a quirk: ``viewer.login`` returns ``app[bot]`` while
+    review-comment authors are stored as just ``app``.  Strip the ``[bot]``
+    suffix and lower-case so both forms match reliably.
+    """
+    return login.removesuffix("[bot]").lower()
+
+
 _REVIEW_THREADS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   viewer { login }
@@ -342,7 +353,7 @@ class GitHubProvider(BaseProvider):
                     author = comments[0].get("author")
                     if author is None:
                         continue
-                    if author["login"].lower() == bot_login.lower():
+                    if _normalize_login(author["login"]) == _normalize_login(bot_login):
                         total_unresolved += 1
                         if node["isOutdated"]:
                             thread_ids.append(node["id"])
@@ -420,7 +431,7 @@ class GitHubProvider(BaseProvider):
                     continue
                 first = comments[0]
                 author = (first.get("author") or {}).get("login", "")
-                if author.lower() != effective_login.lower():
+                if _normalize_login(author) != _normalize_login(effective_login):
                     skipped_author += 1
                     logger.info(
                         "Skipping thread %s: author %r != %r",
@@ -440,7 +451,7 @@ class GitHubProvider(BaseProvider):
                 )
 
             logger.info(
-                "Page: %d nodes total, %d resolved, %d no comments, %d wrong author, %d matched",
+                "Page: %d nodes, %d resolved, %d no comments, %d wrong author, %d matched",
                 total_nodes,
                 skipped_resolved,
                 skipped_no_comments,
