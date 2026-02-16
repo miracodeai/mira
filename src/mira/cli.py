@@ -175,9 +175,15 @@ def review(
             raise click.UsageError(
                 "--github-token or GITHUB_TOKEN env var is required for PR review"
             )
-        from mira.providers import create_provider
+        from mira.providers import _REGISTRY, create_provider
 
-        github_provider = create_provider(config.provider.type, github_token)
+        try:
+            github_provider = create_provider(config.provider.type, github_token)
+        except ValueError as err:
+            available = ", ".join(sorted(_REGISTRY)) or "(none)"
+            raise click.UsageError(
+                f"Unknown provider type {config.provider.type!r}. Available providers: {available}"
+            ) from err
 
     engine = ReviewEngine(config=config, llm=llm, provider=github_provider, dry_run=dry_run)
 
