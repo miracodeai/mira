@@ -253,7 +253,7 @@ class ReviewEngine:
                     config=self.config,
                     pr_title=pr_title,
                     pr_description=pr_description,
-                    existing_comments=combined_existing or None,
+                    existing_comments=list(combined_existing) or None,
                 )
 
                 raw_response = await self.llm.complete(messages)

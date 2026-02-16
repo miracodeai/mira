@@ -520,7 +520,7 @@ class TestReviewEngine:
             _, second_kwargs = mock_build.call_args_list[1]
             existing = second_kwargs.get("existing_comments")
             assert existing is not None, "Chunk 2 should receive prior chunk comments"
-            assert len(existing) >= 1
+            assert len(existing) == 1, "Expected exactly 1 prior chunk comment"
             # The pending thread should reference the chunk 1 comment
             assert any("src/utils.py" in t.path for t in existing)
             assert any("Shell injection" in t.body for t in existing)
