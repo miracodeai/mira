@@ -10,7 +10,8 @@ from mira.models import PRInfo, ReviewResult, UnresolvedThread
 class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
 
-    def __init__(self, token: str) -> None: ...
+    def __init__(self, token: str) -> None:
+        self._token = token
 
     @abc.abstractmethod
     async def get_pr_info(self, pr_url: str) -> PRInfo:
