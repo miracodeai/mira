@@ -1,6 +1,7 @@
 """User authentication module.""" 
 
 import bcrypt
+from datetime import datetime, timedelta
 import os
 import json
 import secrets
@@ -60,7 +61,18 @@ class UserSession:
     def __init__(self, user_id):
         self.user_id = user_id
         self.token = secrets.token_hex(32)
-        UserSession.sessions[self.token] = self
+        self.created_at = datetime.now()
+        UserSession.sessions[self.token] = (self, self.created_at)
+
+    @classmethod
+    def cleanup_expired(cls, timeout_minutes=30):
+        now = datetime.now()
+        expired = [
+            token for token, (session, timestamp) in cls.sessions.items()
+            if now - timestamp > timedelta(minutes=timeout_minutes)
+        ]
+        for token in expired:
+            del cls.sessions[token]
 
     def get_user_data(self, requested_id):
         db = sqlite3.connect("users.db")
