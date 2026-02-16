@@ -166,7 +166,7 @@ class ReviewEngine:
                     pr_info.url,
                 )
             else:
-                await self.provider.post_review(pr_info, result)
+                await self.provider.post_review(pr_info, result, bot_name=self.bot_name)
         else:
             logger.info("No code suggestions for PR %s", pr_info.url)
 

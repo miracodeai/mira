@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -17,6 +18,7 @@ from mira.providers import create_provider
 logger = logging.getLogger(__name__)
 
 _REVIEW_KEYWORDS = {"review", "review this", "review this pr"}
+_REJECT_KEYWORDS = {"reject", "dismiss", "resolve", "ignore"}
 
 
 async def handle_pull_request(
@@ -129,3 +131,73 @@ async def handle_comment(
                 properties={"error_type": type(e).__name__},
             )
         logger.exception("Error handling comment event")
+
+
+async def handle_thread_reject(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+    metrics: Metrics | None = None,
+) -> None:
+    """Handle a pull_request_review_comment that rejects a review thread."""
+    installation_id: int = payload.get("installation", {}).get("id", 0)
+    try:
+        token = await app_auth.get_installation_token(installation_id)
+
+        comment_body: str = payload["comment"]["body"]
+        comment_node_id: str = payload["comment"]["node_id"]
+
+        # Extract the first word after @bot_name
+        match = re.search(rf"@{re.escape(bot_name)}\s+(\w+)", comment_body, re.IGNORECASE)
+        if not match:
+            return
+        command = match.group(1).lower()
+        if command not in _REJECT_KEYWORDS:
+            return
+
+        owner = payload["repository"]["owner"]["login"]
+        repo = payload["repository"]["name"]
+        number = payload["pull_request"]["number"]
+
+        provider = create_provider("github", token)
+        thread_id = await provider.get_thread_id_for_comment(comment_node_id)
+        if not thread_id:
+            logger.info(
+                "Thread not found or already resolved for comment %s on PR %s/%s#%d",
+                comment_node_id,
+                owner,
+                repo,
+                number,
+            )
+            return
+
+        from mira.models import PRInfo
+
+        pr_info = PRInfo(
+            title="",
+            description="",
+            base_branch="",
+            head_branch="",
+            url=f"https://github.com/{owner}/{repo}/pull/{number}",
+            number=number,
+            owner=owner,
+            repo=repo,
+        )
+        resolved = await provider.resolve_threads(pr_info, [thread_id])
+        logger.info(
+            "Reject command '%s': resolved %d thread(s) on PR %s/%s#%d",
+            command,
+            resolved,
+            owner,
+            repo,
+            number,
+        )
+
+        if metrics:
+            metrics.track(
+                "thread_rejected",
+                installation_id=installation_id,
+                properties={"command": command, "resolved": resolved},
+            )
+    except Exception:
+        logger.exception("Error handling thread reject event")

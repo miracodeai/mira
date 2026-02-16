@@ -31,6 +31,7 @@ class BaseProvider(abc.ABC):
         self,
         pr_info: PRInfo,
         result: ReviewResult,
+        bot_name: str = "miracodeai",
     ) -> None:
         """Post review comments to a pull request."""
 
@@ -59,6 +60,10 @@ class BaseProvider(abc.ABC):
     async def resolve_threads(self, pr_info: PRInfo, thread_ids: list[str]) -> int:
         """Resolve review threads by ID. Returns count of successfully resolved."""
         return 0
+
+    async def get_thread_id_for_comment(self, comment_node_id: str) -> str | None:
+        """Look up the review thread for a comment. Returns thread ID or None."""
+        return None
 
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref."""

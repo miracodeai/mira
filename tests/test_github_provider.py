@@ -291,7 +291,7 @@ class TestFormatCommentBody:
         body = _format_comment_body(self._make_comment(suggestion="return json.loads(f.read())"))
         assert "```suggestion" in body
         assert "return json.loads(f.read())" in body
-        assert body.endswith("```")
+        assert "```\n\n>" in body
 
     def test_blocker_badge(self):
         body = _format_comment_body(self._make_comment(severity=Severity.BLOCKER))
@@ -931,3 +931,102 @@ class TestGetFileContent:
             result = await provider.get_file_content(pr_info, "src/hello.py", "feature")
 
         assert result == file_text
+
+
+class TestGetThreadIdForComment:
+    def _make_provider(self) -> GitHubProvider:
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        provider._github = MagicMock()
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_returns_thread_id(self):
+        """Returns thread ID when comment is found and thread is unresolved."""
+        provider = self._make_provider()
+
+        graphql_resp = {
+            "data": {"node": {"pullRequestReviewThread": {"id": "PRRT_123", "isResolved": False}}}
+        }
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(200, json=graphql_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+
+        assert result == "PRRT_123"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_already_resolved(self):
+        """Returns None when the thread is already resolved."""
+        provider = self._make_provider()
+
+        graphql_resp = {
+            "data": {"node": {"pullRequestReviewThread": {"id": "PRRT_123", "isResolved": True}}}
+        }
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(200, json=graphql_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_graphql_error(self):
+        """Returns None when GraphQL returns an error."""
+        provider = self._make_provider()
+
+        error_resp = {"errors": [{"message": "Something went wrong"}]}
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(200, json=error_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_node_not_found(self):
+        """Returns None when the node is not found."""
+        provider = self._make_provider()
+
+        graphql_resp = {"data": {"node": None}}
+
+        async def _mock_post(self, url, **kwargs):
+            return httpx.Response(200, json=graphql_resp, request=httpx.Request("POST", url))
+
+        with patch.object(httpx.AsyncClient, "post", _mock_post):
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+
+        assert result is None
+
+
+class TestFormatCommentBodyDismissHint:
+    """Tests for the dismiss hint appended to comment bodies."""
+
+    def _make_comment(self, **overrides) -> ReviewComment:
+        defaults = {
+            "path": "src/foo.py",
+            "line": 10,
+            "end_line": None,
+            "severity": Severity.WARNING,
+            "category": "bug",
+            "title": "Something is wrong",
+            "body": "Detailed explanation.",
+            "confidence": 0.9,
+            "suggestion": None,
+        }
+        defaults.update(overrides)
+        return ReviewComment(**defaults)
+
+    def test_default_bot_name(self):
+        body = _format_comment_body(self._make_comment())
+        assert "> Not useful? Reply `@miracodeai reject` to dismiss this suggestion." in body
+
+    def test_custom_bot_name(self):
+        body = _format_comment_body(self._make_comment(), bot_name="mybot")
+        assert "> Not useful? Reply `@mybot reject` to dismiss this suggestion." in body

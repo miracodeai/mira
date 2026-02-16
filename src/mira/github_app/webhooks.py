@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 from mira.github_app.auth import GitHubAppAuth
-from mira.github_app.handlers import handle_comment, handle_pull_request
+from mira.github_app.handlers import handle_comment, handle_pull_request, handle_thread_reject
 from mira.github_app.metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,34 @@ def create_app(
                         properties={"event_type": event, "action": action, "status": "processing"},
                     )
                 background_tasks.add_task(handle_comment, payload, app_auth, bot_name, metrics)
+                return Response(
+                    content='{"status": "processing"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
+
+        if event == "pull_request_review_comment" and action == "created":
+            rc_body: str = payload.get("comment", {}).get("body", "")
+            rc_user: str = payload.get("comment", {}).get("user", {}).get("login", "")
+
+            if rc_user == f"{bot_name}[bot]":
+                logger.debug("Ignoring review comment from self (%s)", rc_user)
+                return Response(
+                    content='{"status": "ignored"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
+
+            if f"@{bot_name}" in rc_body:
+                if metrics:
+                    metrics.track(
+                        "webhook_received",
+                        installation_id=installation_id,
+                        properties={"event_type": event, "action": action, "status": "processing"},
+                    )
+                background_tasks.add_task(
+                    handle_thread_reject, payload, app_auth, bot_name, metrics
+                )
                 return Response(
                     content='{"status": "processing"}',
                     status_code=200,

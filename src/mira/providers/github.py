@@ -79,6 +79,16 @@ mutation($threadId: ID!) {
 }
 """
 
+_COMMENT_THREAD_QUERY = """
+query($nodeId: ID!) {
+  node(id: $nodeId) {
+    ... on PullRequestReviewComment {
+      pullRequestReviewThread { id isResolved }
+    }
+  }
+}
+"""
+
 _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
     "bug": ("\U0001f41b", "Bug"),
     "security": ("\U0001f512", "Security issue"),
@@ -175,6 +185,7 @@ class GitHubProvider(BaseProvider):
         self,
         pr_info: PRInfo,
         result: ReviewResult,
+        bot_name: str = "miracodeai",
     ) -> None:
         if not result.comments:
             return
@@ -182,7 +193,7 @@ class GitHubProvider(BaseProvider):
         # Build inline comments (no retry needed for local formatting)
         review_comments: list[dict[str, str | int]] = []
         for comment in result.comments:
-            body = _format_comment_body(comment)
+            body = _format_comment_body(comment, bot_name=bot_name)
             rc: dict[str, str | int] = {
                 "path": comment.path,
                 "body": body,
@@ -497,8 +508,29 @@ class GitHubProvider(BaseProvider):
             )
         return resolved
 
+    async def get_thread_id_for_comment(self, comment_node_id: str) -> str | None:
+        """Look up the review thread for a comment. Returns thread ID or None."""
+        try:
+            data = await self._graphql_request(_COMMENT_THREAD_QUERY, {"nodeId": comment_node_id})
+        except Exception:
+            logger.warning("Failed to look up thread for comment %s", comment_node_id)
+            return None
 
-def _format_comment_body(comment: ReviewComment) -> str:
+        node = data.get("node")
+        if not node:
+            return None
+
+        thread = node.get("pullRequestReviewThread")
+        if not thread:
+            return None
+
+        if thread.get("isResolved"):
+            return None
+
+        return thread["id"]
+
+
+def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -> str:
     """Format a review comment body with category badge, severity, and suggestion block."""
     emoji, label = _CATEGORY_DISPLAY.get(comment.category, ("\U0001f4cc", "Note"))
     badge = _SEVERITY_BADGE.get(comment.severity, "")
@@ -527,5 +559,8 @@ def _format_comment_body(comment: ReviewComment) -> str:
         parts.append("```")
         parts.append("")
         parts.append("</details>")
+
+    parts.append("")
+    parts.append(f"> Not useful? Reply `@{bot_name} reject` to dismiss this suggestion.")
 
     return "\n".join(parts)
