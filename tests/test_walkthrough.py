@@ -319,7 +319,7 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown()
         assert "**Estimated effort:**" in md
         assert "3 (Moderate)" in md
-        assert "~20 min" in md
+        assert "\u23f1\ufe0f ~20 min" in md
 
     def test_no_effort_no_section(self):
         result = WalkthroughResult(summary="No effort.")

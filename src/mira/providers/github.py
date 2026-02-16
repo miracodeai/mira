@@ -505,7 +505,7 @@ def _format_comment_body(comment: ReviewComment) -> str:
 
     parts = [f"{emoji} **{label}**"]
     if badge:
-        parts.append(f"{comment.severity.emoji} {badge}")
+        parts.append(badge)
     parts.append("")
     parts.append(f"**{comment.title}**")
     parts.append("")
