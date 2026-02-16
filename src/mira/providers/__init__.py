@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import threading
+
 from mira.providers.base import BaseProvider
 
 _REGISTRY: dict[str, type[BaseProvider]] = {}
+_LOCK = threading.Lock()
 
 
 def register_provider(name: str, cls: type[BaseProvider]) -> None:
     """Register a provider class under the given name."""
-    _REGISTRY[name] = cls
+    with _LOCK:
+        _REGISTRY[name] = cls
 
 
 def get_available_providers() -> list[str]:
@@ -19,10 +23,11 @@ def get_available_providers() -> list[str]:
 
 def create_provider(name: str, token: str) -> BaseProvider:
     """Instantiate a registered provider by name."""
-    if name not in _REGISTRY:
-        available = ", ".join(sorted(_REGISTRY)) or "(none)"
-        raise ValueError(f"Unknown provider {name!r}. Available: {available}")
-    return _REGISTRY[name](token)
+    with _LOCK:
+        if name not in _REGISTRY:
+            available = ", ".join(sorted(_REGISTRY)) or "(none)"
+            raise ValueError(f"Unknown provider {name!r}. Available: {available}")
+        return _REGISTRY[name](token)
 
 
 # Register built-in providers
