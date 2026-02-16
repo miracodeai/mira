@@ -48,12 +48,6 @@ class BaseProvider(abc.ABC):
         """Fetch all unresolved review threads authored by the bot."""
         return []
 
-    # Backward-compat alias
-    async def get_outdated_bot_threads(
-        self, pr_info: PRInfo, bot_login: str | None = None
-    ) -> list[UnresolvedThread]:
-        return await self.get_unresolved_bot_threads(pr_info, bot_login)
-
     async def resolve_threads(self, pr_info: PRInfo, thread_ids: list[str]) -> int:
         """Resolve review threads by ID. Returns count of successfully resolved."""
         return 0

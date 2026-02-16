@@ -12,7 +12,7 @@ from mira.github_app.auth import GitHubAppAuth
 from mira.github_app.metrics import Metrics
 from mira.llm.prompts.conversation import build_conversation_prompt
 from mira.llm.provider import LLMProvider
-from mira.providers.github import GitHubProvider
+from mira.providers import create_provider
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ async def handle_pull_request(
 
         config = load_config()
         llm = LLMProvider(config.llm)
-        provider = GitHubProvider(token)
+        provider = create_provider("github", token)
         engine = ReviewEngine(config=config, llm=llm, provider=provider, bot_name=bot_name)
 
         logger.info("Reviewing PR %s", pr_url)
@@ -88,7 +88,7 @@ async def handle_comment(
 
         config = load_config()
         llm = LLMProvider(config.llm)
-        provider = GitHubProvider(token)
+        provider = create_provider("github", token)
 
         is_review = question.lower() in _REVIEW_KEYWORDS
         if is_review:

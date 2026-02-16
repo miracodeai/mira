@@ -62,7 +62,7 @@ def mock_pr_info() -> PRInfo:
 
 
 @patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_pr_event(
@@ -81,12 +81,12 @@ async def test_handle_pr_event(
     await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
 
     mock_app_auth.get_installation_token.assert_awaited_once_with(1)
-    mock_provider_cls.assert_called_once_with("ghs_test_token")
+    mock_provider_cls.assert_called_once_with("github", "ghs_test_token")
     mock_engine.review_pr.assert_awaited_once_with("https://github.com/testowner/testrepo/pull/42")
 
 
 @patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_review_keyword(
@@ -108,7 +108,7 @@ async def test_handle_comment_review_keyword(
     mock_engine.review_pr.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_question(
@@ -140,7 +140,7 @@ async def test_handle_comment_question(
     mock_provider.post_comment.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_formats_reply_with_attribution(

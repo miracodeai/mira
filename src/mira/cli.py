@@ -175,9 +175,9 @@ def review(
             raise click.UsageError(
                 "--github-token or GITHUB_TOKEN env var is required for PR review"
             )
-        from mira.providers.github import GitHubProvider
+        from mira.providers import create_provider
 
-        github_provider = GitHubProvider(github_token)
+        github_provider = create_provider(config.provider.type, github_token)
 
     engine = ReviewEngine(config=config, llm=llm, provider=github_provider, dry_run=dry_run)
 
