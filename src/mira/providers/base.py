@@ -10,8 +10,13 @@ from mira.models import PRInfo, ReviewResult, UnresolvedThread
 class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
 
+    @abc.abstractmethod
     def __init__(self, token: str) -> None:
-        self._token = token
+        """Initialize the provider with an authentication token.
+
+        Subclasses must implement this to configure their API client
+        using the provided token.
+        """
 
     @abc.abstractmethod
     async def get_pr_info(self, pr_url: str) -> PRInfo:

@@ -167,9 +167,10 @@ class WalkthroughResult:
         if self.effort:
             parts.append("")
             e = self.effort
-            effort_str = f"**Estimated effort:** {e.level} ({e.label})"
-            effort_str += f" \u00b7 \u23f1\ufe0f ~{e.minutes} min"
-            parts.append(effort_str)
+            parts.append(
+                f"**Estimated effort:** {e.level} ({e.label})"
+                f" \u00b7 \u23f1\ufe0f ~{e.minutes} min"
+            )
 
         if self.file_changes:
             parts.append("")
