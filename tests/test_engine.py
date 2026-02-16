@@ -449,7 +449,6 @@ class TestReviewEngine:
 
         mock_provider.resolve_outdated_review_threads.assert_not_called()
 
-
     @pytest.mark.asyncio
     async def test_prior_chunk_comments_passed_as_context(self, sample_diff_text: str):
         """Comments from chunk 1 are passed as existing_comments to chunk 2."""
