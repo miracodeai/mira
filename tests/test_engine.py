@@ -506,7 +506,7 @@ class TestReviewEngine:
                 "mira.llm.prompts.review", fromlist=["build_review_prompt"]
             ).build_review_prompt,
         ) as mock_build:
-            result = await engine.review_diff(sample_diff_text)
+            await engine.review_diff(sample_diff_text)
 
             # Need at least 2 review chunks (calls 2+ after walkthrough)
             assert mock_build.call_count >= 2, (

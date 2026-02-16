@@ -138,7 +138,7 @@ class ReviewEngine:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:
                 try:
-                    stats = build_review_stats(result.comments) if result.comments else None
+                    stats = build_review_stats(result.comments)
                     markdown = result.walkthrough.to_markdown(
                         bot_name=self.bot_name, review_stats=stats
                     )
