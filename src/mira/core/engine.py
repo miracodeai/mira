@@ -29,6 +29,7 @@ from mira.models import (
     ThreadDecision,
     UnresolvedThread,
     WalkthroughResult,
+    build_review_stats,
 )
 from mira.providers.base import BaseProvider
 
@@ -137,7 +138,10 @@ class ReviewEngine:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:
                 try:
-                    markdown = result.walkthrough.to_markdown(bot_name=self.bot_name)
+                    stats = build_review_stats(result.comments) if result.comments else None
+                    markdown = result.walkthrough.to_markdown(
+                        bot_name=self.bot_name, review_stats=stats
+                    )
                     existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
                     if existing_id is not None:
                         await self.provider.update_comment(pr_info, existing_id, markdown)

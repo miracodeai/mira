@@ -402,6 +402,44 @@ class TestReviewEngine:
         assert result.reviewed_files > 0
 
     @pytest.mark.asyncio
+    async def test_walkthrough_includes_review_stats(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """Walkthrough markdown includes review stats when comments exist."""
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # The walkthrough was posted — grab the markdown that was passed
+        mock_provider.post_comment.assert_called_once()
+        posted_markdown = mock_provider.post_comment.call_args[0][1]
+        # The sample LLM response produces comments, so stats should be present
+        assert "### Review Status" in posted_markdown
+        assert "Found **" in posted_markdown
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_omits_review_stats_when_no_comments(self, mock_provider: AsyncMock):
+        """Walkthrough markdown omits review stats when there are no comments."""
+        no_comments_response = json.dumps(
+            {
+                "comments": [],
+                "summary": "All good!",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+        llm = MagicMock(spec=LLMProvider)
+        llm.complete = AsyncMock(side_effect=[_WALKTHROUGH_LLM_RESPONSE, no_comments_response])
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # Walkthrough was posted but without review stats
+        mock_provider.post_comment.assert_called_once()
+        posted_markdown = mock_provider.post_comment.call_args[0][1]
+        assert "### Review Status" not in posted_markdown
+
+    @pytest.mark.asyncio
     async def test_no_brute_force_resolve_of_outdated_threads(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):

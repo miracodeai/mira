@@ -17,9 +17,12 @@ from mira.models import (
     FileChangeType,
     FileDiff,
     HunkInfo,
+    ReviewComment,
+    Severity,
     WalkthroughEffort,
     WalkthroughFileEntry,
     WalkthroughResult,
+    build_review_stats,
 )
 
 
@@ -344,3 +347,91 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown()
         assert md.startswith(WALKTHROUGH_MARKER)
         assert md.count(WALKTHROUGH_MARKER) == 1
+
+    def test_review_stats_rendered(self):
+        result = WalkthroughResult(summary="Changes.")
+        stats = {Severity.BLOCKER: 1, Severity.WARNING: 2, Severity.NITPICK: 1}
+        md = result.to_markdown(review_stats=stats)
+        assert "### Review Status" in md
+        assert "Found **4** issues:" in md
+        assert "Blocker" in md
+        assert "Warning" in md
+        assert "Nitpick" in md
+        # Zero-count severities omitted
+        assert "Suggestion" not in md
+
+    def test_review_stats_severity_order(self):
+        result = WalkthroughResult(summary="Changes.")
+        stats = {Severity.NITPICK: 1, Severity.BLOCKER: 2, Severity.SUGGESTION: 3}
+        md = result.to_markdown(review_stats=stats)
+        lines = md.split("\n")
+        sev_lines = [ln for ln in lines if "Blocker" in ln or "Suggestion" in ln or "Nitpick" in ln]
+        assert len(sev_lines) == 3
+        assert "Blocker" in sev_lines[0]
+        assert "Suggestion" in sev_lines[1]
+        assert "Nitpick" in sev_lines[2]
+
+    def test_review_stats_none_omits_section(self):
+        result = WalkthroughResult(summary="No stats.")
+        md = result.to_markdown(review_stats=None)
+        assert "### Review Status" not in md
+
+    def test_review_stats_empty_omits_section(self):
+        result = WalkthroughResult(summary="No stats.")
+        md = result.to_markdown(review_stats={})
+        assert "### Review Status" not in md
+
+    def test_review_stats_single_issue_grammar(self):
+        result = WalkthroughResult(summary="Changes.")
+        stats = {Severity.BLOCKER: 1}
+        md = result.to_markdown(review_stats=stats)
+        assert "Found **1** issue:" in md
+
+    def test_review_stats_between_changes_and_diagram(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            file_changes=[
+                WalkthroughFileEntry(
+                    path="a.py", change_type=FileChangeType.ADDED, description="New file"
+                ),
+            ],
+            sequence_diagram="sequenceDiagram\n    A->>B: call",
+        )
+        stats = {Severity.WARNING: 1}
+        md = result.to_markdown(review_stats=stats)
+        changes_idx = md.index("### Changes")
+        status_idx = md.index("### Review Status")
+        diagram_idx = md.index("### Sequence Diagram")
+        assert changes_idx < status_idx < diagram_idx
+
+
+class TestBuildReviewStats:
+    def _make_comment(self, severity: Severity) -> ReviewComment:
+        return ReviewComment(
+            path="f.py",
+            line=1,
+            end_line=None,
+            severity=severity,
+            category="test",
+            title="t",
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_counts_by_severity(self):
+        comments = [
+            self._make_comment(Severity.BLOCKER),
+            self._make_comment(Severity.BLOCKER),
+            self._make_comment(Severity.WARNING),
+            self._make_comment(Severity.NITPICK),
+        ]
+        stats = build_review_stats(comments)
+        assert stats == {Severity.BLOCKER: 2, Severity.WARNING: 1, Severity.NITPICK: 1}
+
+    def test_empty_comments(self):
+        assert build_review_stats([]) == {}
+
+    def test_single_severity(self):
+        comments = [self._make_comment(Severity.SUGGESTION)] * 3
+        stats = build_review_stats(comments)
+        assert stats == {Severity.SUGGESTION: 3}
