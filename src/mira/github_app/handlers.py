@@ -183,7 +183,35 @@ async def handle_thread_reject(
             owner=owner,
             repo=repo,
         )
-        resolved = await provider.resolve_threads(pr_info, [thread_id])
+        try:
+            resolved = await provider.resolve_threads(pr_info, [thread_id])
+        except Exception as resolve_err:
+            logger.warning(
+                "Failed to resolve thread %s on PR %s/%s#%d: %s",
+                thread_id,
+                owner,
+                repo,
+                number,
+                resolve_err,
+            )
+            if metrics:
+                metrics.track(
+                    "thread_reject_failed",
+                    installation_id=installation_id,
+                    properties={"command": command, "error_type": type(resolve_err).__name__},
+                )
+            try:
+                await provider.post_comment(
+                    pr_info,
+                    "Sorry, I couldn't dismiss this suggestion. "
+                    "Please try again or resolve the thread manually.",
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to post reject failure reply on PR %s/%s#%d", owner, repo, number
+                )
+            return
+
         logger.info(
             "Reject command '%s': resolved %d thread(s) on PR %s/%s#%d",
             command,

@@ -264,7 +264,7 @@ class ReviewEngine:
                 for c in comments:
                     combined_existing.append(
                         UnresolvedThread(
-                            thread_id=f"_pending_{i}_{c.path}_{c.line}",
+                            thread_id=f"__mira_synthetic_{i}_{c.path}_{c.line}",
                             path=c.path,
                             line=c.line,
                             body=f"{c.title}: {c.body}",

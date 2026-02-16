@@ -527,7 +527,8 @@ class GitHubProvider(BaseProvider):
         if thread.get("isResolved"):
             return None
 
-        return thread["id"]
+        thread_id: str = thread["id"]
+        return thread_id
 
 
 def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -> str:

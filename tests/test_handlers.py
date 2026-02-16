@@ -262,6 +262,52 @@ async def test_handle_thread_reject_thread_not_found(
     mock_provider.resolve_threads.assert_not_awaited()
 
 
+@patch("mira.github_app.handlers.create_provider")
+async def test_handle_thread_reject_resolve_failure_posts_reply(
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When resolve_threads raises, logs a warning and posts a failure reply."""
+    mock_provider = AsyncMock()
+    mock_provider.get_thread_id_for_comment = AsyncMock(return_value="PRRT_123")
+    mock_provider.resolve_threads = AsyncMock(side_effect=RuntimeError("network down"))
+    mock_provider.post_comment = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_review_comment_payload("@mira-bot reject")
+    with caplog.at_level(logging.WARNING):
+        await handle_thread_reject(payload, mock_app_auth, "mira-bot")
+
+    assert "network down" in caplog.text
+    mock_provider.post_comment.assert_awaited_once()
+    posted_body = mock_provider.post_comment.call_args[0][1]
+    assert "couldn't dismiss" in posted_body
+
+
+@patch("mira.github_app.handlers.create_provider")
+async def test_handle_thread_reject_resolve_failure_tracks_metrics(
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """When resolve_threads raises, tracks a thread_reject_failed metric."""
+    mock_provider = AsyncMock()
+    mock_provider.get_thread_id_for_comment = AsyncMock(return_value="PRRT_123")
+    mock_provider.resolve_threads = AsyncMock(side_effect=RuntimeError("network down"))
+    mock_provider.post_comment = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    mock_metrics = MagicMock()
+    payload = _make_review_comment_payload("@mira-bot reject")
+    await handle_thread_reject(payload, mock_app_auth, "mira-bot", metrics=mock_metrics)
+
+    mock_metrics.track.assert_called_once_with(
+        "thread_reject_failed",
+        installation_id=1,
+        properties={"command": "reject", "error_type": "RuntimeError"},
+    )
+
+
 async def test_handle_thread_reject_exception_logged_not_raised(
     mock_app_auth: AsyncMock, caplog: pytest.LogCaptureFixture
 ) -> None:

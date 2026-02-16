@@ -20,6 +20,8 @@ def strip_code_fences(text: str | None) -> str:
     text = text.strip()
     # Prefer an explicitly-tagged ```json block anywhere in the response,
     # so we skip unrelated code blocks (```python, etc.) in LLM analysis.
+    # Note: re.search scans the entire text, which may be slower for very large
+    # responses, but is acceptable for typical LLM output sizes.
     json_match = re.search(r"```json\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     if json_match:
         return json_match.group(1).strip()
