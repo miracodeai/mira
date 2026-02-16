@@ -241,6 +241,9 @@ class ReviewEngine:
         valid_paths = {f.path for f in filtered}
         summaries: list[str] = []
 
+        # Accumulate prior chunk suggestions so later chunks avoid duplicates
+        combined_existing = list(existing_comments) if existing_comments else []
+
         for i, chunk in enumerate(chunks):
             logger.info("Reviewing chunk %d/%d (%d files)", i + 1, len(chunks), len(chunk.files))
 
@@ -250,7 +253,7 @@ class ReviewEngine:
                     config=self.config,
                     pr_title=pr_title,
                     pr_description=pr_description,
-                    existing_comments=existing_comments,
+                    existing_comments=list(combined_existing) or None,
                 )
 
                 raw_response = await self.llm.complete(messages)
@@ -258,6 +261,15 @@ class ReviewEngine:
                 comments = convert_to_review_comments(parsed, valid_paths, diff_files=chunk.files)
 
                 all_comments.extend(comments)
+                for c in comments:
+                    combined_existing.append(
+                        UnresolvedThread(
+                            thread_id=f"_pending_{i}_{c.path}_{c.line}",
+                            path=c.path,
+                            line=c.line,
+                            body=f"{c.title}: {c.body}",
+                        )
+                    )
                 if parsed.summary:
                     summaries.append(parsed.summary)
             except ResponseParseError as exc:
@@ -378,6 +390,6 @@ class ReviewEngine:
         """Ask the LLM which review issues have been fixed."""
         prompt = build_verify_fixes_prompt(file_groups)
         logger.debug("Verify-fixes prompt:\n%s", prompt[1]["content"])
-        response = await self.llm.complete(prompt, json_mode=True)
+        response = await self.llm.complete(prompt, json_mode=True, temperature=0.0)
         logger.debug("Verify-fixes raw response:\n%s", response)
         return parse_verify_fixes_response(response)

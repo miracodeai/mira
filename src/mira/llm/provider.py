@@ -30,12 +30,18 @@ class LLMProvider:
         retry=retry_if_exception_type(Exception),
         reraise=True,
     )
-    async def _call_llm(self, model: str, messages: list[dict[str, str]], json_mode: bool) -> str:
+    async def _call_llm(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        json_mode: bool,
+        temperature: float | None = None,
+    ) -> str:
         """Make a single LLM call with retries."""
         kwargs: dict[str, object] = {
             "model": model,
             "messages": messages,
-            "temperature": self.config.temperature,
+            "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
         if json_mode:
@@ -56,10 +62,18 @@ class LLMProvider:
         self,
         messages: list[dict[str, str]],
         json_mode: bool = True,
+        temperature: float | None = None,
     ) -> str:
-        """Complete a prompt, with fallback model support."""
+        """Complete a prompt, with fallback model support.
+
+        Args:
+            temperature: Override the default temperature for this call.
+                         Use ``0.0`` for deterministic tasks like verification.
+        """
         try:
-            return await self._call_llm(self.config.model, messages, json_mode)
+            return await self._call_llm(
+                self.config.model, messages, json_mode, temperature=temperature
+            )
         except Exception as primary_err:
             if self.config.fallback_model:
                 logger.warning(
@@ -69,7 +83,9 @@ class LLMProvider:
                     self.config.fallback_model,
                 )
                 try:
-                    return await self._call_llm(self.config.fallback_model, messages, json_mode)
+                    return await self._call_llm(
+                        self.config.fallback_model, messages, json_mode, temperature=temperature
+                    )
                 except Exception as fallback_err:
                     raise LLMError(
                         f"Both primary ({self.config.model}) and fallback "
