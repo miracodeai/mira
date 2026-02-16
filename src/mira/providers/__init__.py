@@ -12,6 +12,11 @@ def register_provider(name: str, cls: type[BaseProvider]) -> None:
     _REGISTRY[name] = cls
 
 
+def get_available_providers() -> list[str]:
+    """Return a sorted list of registered provider names."""
+    return sorted(_REGISTRY)
+
+
 def create_provider(name: str, token: str) -> BaseProvider:
     """Instantiate a registered provider by name."""
     if name not in _REGISTRY:
