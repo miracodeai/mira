@@ -12,7 +12,9 @@ def authenticate(username, password):
     query = 'SELECT * FROM users WHERE username = ?'
     result = db.execute(query, (username,)).fetchone()
     db.close()
+    dummy_hash = "$2b$12$000000000000000000000uKWhKBMwVEgSBOmExrYji8Q5CiOqXeIa"
     if result is None:
+        bcrypt.checkpw(password.encode(), dummy_hash.encode())
         return False
     stored_hash = result[2]
     return bcrypt.checkpw(password.encode(), stored_hash.encode())
