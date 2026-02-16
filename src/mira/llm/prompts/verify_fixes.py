@@ -72,10 +72,15 @@ def build_verify_fixes_prompt(
     """
     sections: list[str] = []
     for path, content, threads in file_groups:
-        issues = "\n".join(
-            f'{idx}. (id: "{t.thread_id}") Line {t.line}: {_extract_issue_description(t.body)}'
-            for idx, t in enumerate(threads, 1)
-        )
+        issue_lines: list[str] = []
+        for idx, t in enumerate(threads, 1):
+            line_label = f"Line {t.line}" if t.line > 0 else "Location unknown (outdated comment)"
+            outdated_tag = " [OUTDATED — code has changed]" if t.is_outdated else ""
+            issue_lines.append(
+                f'{idx}. (id: "{t.thread_id}") {line_label}{outdated_tag}: '
+                f"{_extract_issue_description(t.body)}"
+            )
+        issues = "\n".join(issue_lines)
         sections.append(
             f"File: {path}\n```\n{content}\n```\n\nIssues to verify in this file:\n{issues}"
         )
@@ -88,10 +93,18 @@ def build_verify_fixes_prompt(
             "content": (
                 "You are verifying whether code review issues have been fixed.\n\n"
                 "For each issue below, you will see the current file content "
-                "(full or relevant sections) and a list of previously flagged issues.\n"
-                "Examine the current file content to determine if each issue has been "
-                "addressed. Mark as fixed if the specific concern is no longer present "
-                "in the code.\n\n"
+                "(full or relevant sections) with line numbers, and a list of "
+                "previously flagged issues.\n\n"
+                "For each issue:\n"
+                "1. Look at the referenced line number in the code.\n"
+                "2. Check if the specific problematic code pattern described in "
+                "the issue (e.g. a dangerous function call) is still present.\n"
+                "3. If the problematic pattern has been removed or replaced with "
+                "a safe alternative, mark it as fixed.\n\n"
+                "Issues tagged [OUTDATED] have been flagged by GitHub as having "
+                "changed code around them — pay extra attention as these are "
+                "likely fixed. For issues with unknown location, search the "
+                "entire file.\n\n"
                 "Respond with JSON: "
                 '{"results": [{"id": "<thread_id>", "fixed": true/false}, ...]}'
             ),
@@ -101,13 +114,16 @@ def build_verify_fixes_prompt(
 
 
 def _strip_code_fences(text: str | None) -> str:
-    """Remove markdown code fences wrapping JSON."""
+    """Remove markdown code fences wrapping JSON.
+
+    Handles trailing text after the closing fence (e.g. LLM explanations).
+    """
     import re
 
     if not text:
         return ""
     text = text.strip()
-    match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", text, re.DOTALL)
+    match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     return match.group(1).strip() if match else text
 
 

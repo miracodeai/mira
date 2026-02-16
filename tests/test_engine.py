@@ -638,10 +638,12 @@ class TestThreadResolution:
         )
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        # Verify the LLM was called with the full file content in the prompt
+        # Verify the LLM was called with line-numbered file content in the prompt
         verify_call = llm.complete.call_args_list[0]
         prompt_content = verify_call[0][0][1]["content"]
-        assert small_content.strip() in prompt_content
+        # Content should be line-numbered (e.g. "  1| line")
+        assert "1| line" in prompt_content
+        assert "100| line" in prompt_content
 
     @pytest.mark.asyncio
     async def test_unresolved_threads_passed_to_review(

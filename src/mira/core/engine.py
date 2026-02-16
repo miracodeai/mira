@@ -38,6 +38,13 @@ _MAX_FULL_FILE_LINES = 500
 _LARGE_FILE_CONTEXT_LINES = 50  # ±50 lines = 100-line window
 
 
+def _number_lines(content: str) -> str:
+    """Add line numbers to file content for LLM context."""
+    lines = content.splitlines()
+    width = len(str(len(lines)))
+    return "\n".join(f"{i + 1:>{width}}| {line}" for i, line in enumerate(lines))
+
+
 def _extract_sections(
     lines: list[str],
     threads: list[UnresolvedThread],
@@ -45,9 +52,10 @@ def _extract_sections(
 ) -> str:
     """Extract and merge relevant sections around each thread's comment line.
 
-    Returns a string with merged windows joined by ``...`` separators.
+    Returns a line-numbered string with merged windows joined by ``...`` separators.
     """
     total = len(lines)
+    width = len(str(total))
     # Collect (start, end) ranges for each thread
     ranges: list[tuple[int, int]] = []
     for t in threads:
@@ -65,10 +73,11 @@ def _extract_sections(
         else:
             merged.append((start, end))
 
-    # Build snippet
+    # Build snippet with original line numbers
     parts: list[str] = []
     for start, end in merged:
-        parts.append("\n".join(lines[start:end]))
+        numbered = [f"{i + 1:>{width}}| {lines[i]}" for i in range(start, end)]
+        parts.append("\n".join(numbered))
     return "\n...\n".join(parts)
 
 
@@ -308,10 +317,15 @@ class ReviewEngine:
             content = file_contents.get(path, "")
             lines = content.splitlines()
             if len(lines) <= _MAX_FULL_FILE_LINES:
-                file_groups.append((path, content, path_threads))
+                file_groups.append((path, _number_lines(content), path_threads))
             else:
-                snippet = _extract_sections(lines, path_threads, _LARGE_FILE_CONTEXT_LINES)
-                file_groups.append((path, snippet, path_threads))
+                has_unknown_lines = any(t.line <= 0 for t in path_threads)
+                if has_unknown_lines:
+                    # Can't extract targeted sections without valid line numbers
+                    file_groups.append((path, _number_lines(content), path_threads))
+                else:
+                    snippet = _extract_sections(lines, path_threads, _LARGE_FILE_CONTEXT_LINES)
+                    file_groups.append((path, snippet, path_threads))
 
         # Single LLM call to verify which issues are fixed
         verified_ids = await self._verify_fixes(file_groups)
@@ -359,5 +373,7 @@ class ReviewEngine:
     ) -> list[str]:
         """Ask the LLM which review issues have been fixed."""
         prompt = build_verify_fixes_prompt(file_groups)
+        logger.debug("Verify-fixes prompt:\n%s", prompt[1]["content"])
         response = await self.llm.complete(prompt, json_mode=True)
+        logger.debug("Verify-fixes raw response:\n%s", response)
         return parse_verify_fixes_response(response)

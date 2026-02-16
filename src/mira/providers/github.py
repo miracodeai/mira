@@ -54,6 +54,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
               body
               path
               line
+              originalLine
             }
           }
         }
@@ -444,7 +445,7 @@ class GitHubProvider(BaseProvider):
                     UnresolvedThread(
                         thread_id=node["id"],
                         path=first.get("path", ""),
-                        line=first.get("line") or 0,
+                        line=first.get("line") or first.get("originalLine") or 0,
                         body=first.get("body", ""),
                         is_outdated=bool(node["isOutdated"]),
                     )

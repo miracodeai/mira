@@ -146,7 +146,7 @@ class TestBuildVerifyFixesPrompt:
         messages = build_verify_fixes_prompt([("src/app.py", "code", [_make_thread()])])
         system = messages[0]["content"]
         assert "if you are unsure" not in system.lower()
-        assert "no longer present" in system.lower()
+        assert "mark it as fixed" in system.lower()
 
     def test_formatted_body_cleaned_in_prompt(self):
         """Formatted review comment body is cleaned before inclusion in prompt."""
