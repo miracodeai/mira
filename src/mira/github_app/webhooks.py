@@ -87,7 +87,7 @@ def create_app(
                 )
 
             pr_body: str = payload.get("pull_request", {}).get("body", "") or ""
-            if re.search(rf"@{re.escape(bot_name)}\s+ignore\b", pr_body, re.IGNORECASE):
+            if re.search(rf"@{re.escape(bot_name)}[ \t]+ignore\b", pr_body, re.IGNORECASE):
                 logger.info("PR ignored via @%s ignore in description", bot_name)
                 return Response(
                     content='{"status": "ignored"}',

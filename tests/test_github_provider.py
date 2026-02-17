@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest

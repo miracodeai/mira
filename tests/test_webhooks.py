@@ -40,16 +40,31 @@ def _sign(payload_bytes: bytes) -> str:
     return f"sha256={sig}"
 
 
-def _pr_opened_payload() -> dict:
+def _make_pr_payload(
+    *,
+    action: str = "opened",
+    number: int = 42,
+    body: str = "",
+    labels: list[dict] | None = None,
+) -> dict:
+    """Build a pull_request webhook payload with all required fields."""
     return {
-        "action": "opened",
+        "action": action,
         "installation": {"id": 1},
-        "pull_request": {"number": 42, "body": "", "labels": []},
+        "pull_request": {
+            "number": number,
+            "body": body,
+            "labels": labels if labels is not None else [],
+        },
         "repository": {
             "owner": {"login": "testowner"},
             "name": "testrepo",
         },
     }
+
+
+def _pr_opened_payload() -> dict:
+    return _make_pr_payload()
 
 
 def _comment_payload(body: str, is_pr: bool = True) -> dict:
@@ -253,8 +268,7 @@ async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None
 async def test_pr_with_paused_label_returns_paused(
     mock_handler: AsyncMock, client: AsyncClient
 ) -> None:
-    payload = _pr_opened_payload()
-    payload["pull_request"]["labels"] = [{"name": "mira-paused"}]
+    payload = _make_pr_payload(labels=[{"name": "mira-paused"}])
     payload_bytes = json.dumps(payload).encode()
     resp = await client.post(
         "/webhook",
@@ -272,8 +286,7 @@ async def test_pr_with_paused_label_returns_paused(
 
 @patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_with_ignore_in_description(mock_handler: AsyncMock, client: AsyncClient) -> None:
-    payload = _pr_opened_payload()
-    payload["pull_request"]["body"] = "Some text\n@mira-bot ignore\nMore text"
+    payload = _make_pr_payload(body="Some text\n@mira-bot ignore\nMore text")
     payload_bytes = json.dumps(payload).encode()
     resp = await client.post(
         "/webhook",
