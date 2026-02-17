@@ -1,8 +1,5 @@
 # Mira
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/xxx)
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
-
 AI-powered PR reviewer with low-noise filtering.
 
 Mira reviews your pull requests using any LLM (via [LiteLLM](https://github.com/BerriAI/litellm)) and posts concise, actionable feedback. Its noise filter ensures you only see comments that matter.
@@ -27,7 +24,11 @@ Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
 - Events: Pull requests, Issue comments
 - Generate a private key (.pem)
 
-**2. Deploy with Docker:**
+**2. Deploy:**
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/workspace/templates/05874bad-2d98-43f4-aa93-332f394e9ebd)
+
+Or with Docker:
 
 ```bash
 docker run -p 8000:8000 \

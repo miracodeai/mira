@@ -21,6 +21,13 @@ _RETRYABLE = (ConnectionError, TimeoutError, httpx.TransportError, GithubExcepti
 
 logger = logging.getLogger(__name__)
 
+_retry_transient = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type(_RETRYABLE),
+    reraise=True,
+)
+
 _GRAPHQL_URL = "https://api.github.com/graphql"
 
 
@@ -72,6 +79,16 @@ mutation($threadId: ID!) {
 }
 """
 
+_COMMENT_THREAD_QUERY = """
+query($nodeId: ID!) {
+  node(id: $nodeId) {
+    ... on PullRequestReviewComment {
+      pullRequestReviewThread { id isResolved }
+    }
+  }
+}
+"""
+
 _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
     "bug": ("\U0001f41b", "Bug"),
     "security": ("\U0001f512", "Security issue"),
@@ -84,10 +101,10 @@ _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
 }
 
 _SEVERITY_BADGE: dict[Severity, str] = {
-    Severity.BLOCKER: "\U0001f6d1 Blocker \u2014 must fix before merge",
-    Severity.WARNING: "\u26a0\ufe0f Warning",
-    Severity.SUGGESTION: "\U0001f4a1 Suggestion",
-    Severity.NITPICK: "\U0001f4ac Nitpick",
+    Severity.BLOCKER: "Blocker \u2014 must fix before merge",
+    Severity.WARNING: "Warning",
+    Severity.SUGGESTION: "Suggestion",
+    Severity.NITPICK: "Nitpick",
 }
 
 # Matches: https://github.com/owner/repo/pull/123 or owner/repo#123
@@ -119,12 +136,7 @@ class GitHubProvider(BaseProvider):
     async def get_pr_info(self, pr_url: str) -> PRInfo:
         owner, repo, number = parse_pr_url(pr_url)
 
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         def _fetch() -> PRInfo:
             gh_repo = self._github.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
@@ -155,12 +167,7 @@ class GitHubProvider(BaseProvider):
             "Accept": "application/vnd.github.v3.diff",
         }
 
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         async def _fetch_diff() -> str:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(diff_url, headers=headers, follow_redirects=True)
@@ -178,6 +185,7 @@ class GitHubProvider(BaseProvider):
         self,
         pr_info: PRInfo,
         result: ReviewResult,
+        bot_name: str = "miracodeai",
     ) -> None:
         if not result.comments:
             return
@@ -185,7 +193,7 @@ class GitHubProvider(BaseProvider):
         # Build inline comments (no retry needed for local formatting)
         review_comments: list[dict[str, str | int]] = []
         for comment in result.comments:
-            body = _format_comment_body(comment)
+            body = _format_comment_body(comment, bot_name=bot_name)
             rc: dict[str, str | int] = {
                 "path": comment.path,
                 "body": body,
@@ -203,12 +211,7 @@ class GitHubProvider(BaseProvider):
         if result.summary:
             review_body = f"**Mira Review Summary**\n\n{result.summary}"
 
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         def _post() -> None:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
@@ -233,12 +236,7 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to post review: {e}") from e
 
     async def post_comment(self, pr_info: PRInfo, body: str) -> None:
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         def _post_comment() -> None:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
@@ -252,12 +250,7 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to post comment: {e}") from e
 
     async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         def _find() -> int | None:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
@@ -274,12 +267,7 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to find bot comment: {e}") from e
 
     async def update_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         def _update() -> None:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
@@ -318,12 +306,7 @@ class GitHubProvider(BaseProvider):
             return result
 
     async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         async def _resolve() -> int:
             # Phase 1: Paginate through review threads and collect bot-authored
             # unresolved threads that GitHub has marked as outdated.
@@ -476,12 +459,6 @@ class GitHubProvider(BaseProvider):
         )
         return threads
 
-    # Backward-compat alias
-    async def get_outdated_bot_threads(
-        self, pr_info: PRInfo, bot_login: str | None = None
-    ) -> list[UnresolvedThread]:
-        return await self.get_unresolved_bot_threads(pr_info, bot_login)
-
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref via the REST API."""
         url = f"https://api.github.com/repos/{pr_info.owner}/{pr_info.repo}/contents/{path}"
@@ -490,12 +467,7 @@ class GitHubProvider(BaseProvider):
             "Accept": "application/vnd.github.v3+json",
         }
 
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=30),
-            retry=retry_if_exception_type(_RETRYABLE),
-            reraise=True,
-        )
+        @_retry_transient
         async def _fetch() -> str:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(
@@ -536,8 +508,30 @@ class GitHubProvider(BaseProvider):
             )
         return resolved
 
+    async def get_thread_id_for_comment(self, comment_node_id: str) -> str | None:
+        """Look up the review thread for a comment. Returns thread ID or None."""
+        try:
+            data = await self._graphql_request(_COMMENT_THREAD_QUERY, {"nodeId": comment_node_id})
+        except Exception:
+            logger.warning("Failed to look up thread for comment %s", comment_node_id)
+            return None
 
-def _format_comment_body(comment: ReviewComment) -> str:
+        node = data.get("node")
+        if not node:
+            return None
+
+        thread = node.get("pullRequestReviewThread")
+        if not thread:
+            return None
+
+        if thread.get("isResolved"):
+            return None
+
+        thread_id: str = thread["id"]
+        return thread_id
+
+
+def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -> str:
     """Format a review comment body with category badge, severity, and suggestion block."""
     emoji, label = _CATEGORY_DISPLAY.get(comment.category, ("\U0001f4cc", "Note"))
     badge = _SEVERITY_BADGE.get(comment.severity, "")
@@ -552,7 +546,6 @@ def _format_comment_body(comment: ReviewComment) -> str:
 
     if comment.suggestion:
         parts.append("")
-        parts.append("**Suggested fix:**")
         parts.append("```suggestion")
         parts.append(comment.suggestion)
         parts.append("```")
@@ -560,12 +553,15 @@ def _format_comment_body(comment: ReviewComment) -> str:
     if comment.agent_prompt:
         parts.append("")
         parts.append("<details>")
-        parts.append("<summary>🤖 Prompt for AI Agents</summary>")
+        parts.append("<summary>Prompt for AI Agents</summary>")
         parts.append("")
         parts.append("```text")
         parts.append(comment.agent_prompt)
         parts.append("```")
         parts.append("")
         parts.append("</details>")
+
+    parts.append("")
+    parts.append(f"> Not useful? Reply `@{bot_name} reject` to dismiss this suggestion.")
 
     return "\n".join(parts)

@@ -172,3 +172,75 @@ async def test_comment_on_issue_not_pr_ignored(client: AsyncClient) -> None:
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ignored"
+
+
+# ── pull_request_review_comment tests ────────────────────────────────────────
+
+
+def _review_comment_payload(body: str, user: str = "alice") -> dict:
+    return {
+        "action": "created",
+        "installation": {"id": 1},
+        "comment": {
+            "body": body,
+            "node_id": "MDI0Ol_abc",
+            "user": {"login": user},
+        },
+        "pull_request": {"number": 42},
+        "repository": {
+            "owner": {"login": "testowner"},
+            "name": "testrepo",
+        },
+    }
+
+
+@patch("mira.github_app.webhooks.handle_thread_reject", new_callable=AsyncMock)
+async def test_review_comment_reject_triggers_handler(
+    mock_handler: AsyncMock, client: AsyncClient
+) -> None:
+    payload = _review_comment_payload(f"@{BOT_NAME} reject")
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "pull_request_review_comment",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+async def test_review_comment_without_mention_ignored(client: AsyncClient) -> None:
+    payload = _review_comment_payload("Just a regular reply")
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "pull_request_review_comment",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"
+
+
+async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None:
+    payload = _review_comment_payload(f"@{BOT_NAME} reject", user=f"{BOT_NAME}[bot]")
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "pull_request_review_comment",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"

@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mira.github_app.handlers import handle_comment, handle_pull_request
+from mira.github_app.handlers import (
+    _REJECT_KEYWORDS,
+    handle_comment,
+    handle_pull_request,
+    handle_thread_reject,
+)
 from mira.models import PRInfo, ReviewResult
 
 
@@ -62,7 +67,7 @@ def mock_pr_info() -> PRInfo:
 
 
 @patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_pr_event(
@@ -81,12 +86,12 @@ async def test_handle_pr_event(
     await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
 
     mock_app_auth.get_installation_token.assert_awaited_once_with(1)
-    mock_provider_cls.assert_called_once_with("ghs_test_token")
+    mock_provider_cls.assert_called_once_with("github", "ghs_test_token")
     mock_engine.review_pr.assert_awaited_once_with("https://github.com/testowner/testrepo/pull/42")
 
 
 @patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_review_keyword(
@@ -108,7 +113,7 @@ async def test_handle_comment_review_keyword(
     mock_engine.review_pr.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_question(
@@ -140,7 +145,7 @@ async def test_handle_comment_question(
     mock_provider.post_comment.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.GitHubProvider")
+@patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_formats_reply_with_attribution(
@@ -179,5 +184,141 @@ async def test_handler_exception_logged_not_raised(
     with caplog.at_level(logging.ERROR):
         # Should not raise
         await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
+
+    assert "boom" in caplog.text
+
+
+# ── handle_thread_reject tests ──────────────────────────────────────────────
+
+
+def _make_review_comment_payload(body: str, node_id: str = "MDI0Ol_abc") -> dict[str, Any]:
+    return {
+        "installation": {"id": 1},
+        "action": "created",
+        "comment": {
+            "body": body,
+            "node_id": node_id,
+            "user": {"login": "alice"},
+        },
+        "pull_request": {"number": 42},
+        "repository": {
+            "owner": {"login": "testowner"},
+            "name": "testrepo",
+        },
+    }
+
+
+@pytest.mark.parametrize("keyword", sorted(_REJECT_KEYWORDS))
+@patch("mira.github_app.handlers.create_provider")
+async def test_handle_thread_reject_resolves_for_each_keyword(
+    mock_provider_cls: MagicMock,
+    keyword: str,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """Each reject keyword resolves the thread."""
+    mock_provider = AsyncMock()
+    mock_provider.get_thread_id_for_comment = AsyncMock(return_value="PRRT_123")
+    mock_provider.resolve_threads = AsyncMock(return_value=1)
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_review_comment_payload(f"@mira-bot {keyword}")
+    await handle_thread_reject(payload, mock_app_auth, "mira-bot")
+
+    mock_provider.get_thread_id_for_comment.assert_awaited_once_with("MDI0Ol_abc")
+    mock_provider.resolve_threads.assert_awaited_once()
+    args = mock_provider.resolve_threads.call_args
+    assert args[0][1] == ["PRRT_123"]
+
+
+@patch("mira.github_app.handlers.create_provider")
+async def test_handle_thread_reject_exits_early_for_non_reject_command(
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """Non-reject commands are ignored."""
+    mock_provider = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_review_comment_payload("@mira-bot review")
+    await handle_thread_reject(payload, mock_app_auth, "mira-bot")
+
+    mock_provider.get_thread_id_for_comment.assert_not_awaited()
+
+
+@patch("mira.github_app.handlers.create_provider")
+async def test_handle_thread_reject_thread_not_found(
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """Handles thread-not-found gracefully (no resolve attempt)."""
+    mock_provider = AsyncMock()
+    mock_provider.get_thread_id_for_comment = AsyncMock(return_value=None)
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_review_comment_payload("@mira-bot reject")
+    await handle_thread_reject(payload, mock_app_auth, "mira-bot")
+
+    mock_provider.get_thread_id_for_comment.assert_awaited_once()
+    mock_provider.resolve_threads.assert_not_awaited()
+
+
+@patch("mira.github_app.handlers.create_provider")
+async def test_handle_thread_reject_resolve_failure_posts_reply(
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When resolve_threads raises, logs a warning and posts a failure reply."""
+    mock_provider = AsyncMock()
+    mock_provider.get_thread_id_for_comment = AsyncMock(return_value="PRRT_123")
+    mock_provider.resolve_threads = AsyncMock(side_effect=RuntimeError("network down"))
+    mock_provider.post_comment = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_review_comment_payload("@mira-bot reject")
+    with caplog.at_level(logging.WARNING):
+        await handle_thread_reject(payload, mock_app_auth, "mira-bot")
+
+    assert "network down" in caplog.text
+    mock_provider.post_comment.assert_awaited_once()
+    posted_body = mock_provider.post_comment.call_args[0][1]
+    assert "couldn't dismiss" in posted_body
+
+
+@patch("mira.github_app.handlers.create_provider")
+async def test_handle_thread_reject_resolve_failure_tracks_metrics(
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """When resolve_threads raises, tracks a thread_reject_failed metric."""
+    mock_provider = AsyncMock()
+    mock_provider.get_thread_id_for_comment = AsyncMock(return_value="PRRT_123")
+    mock_provider.resolve_threads = AsyncMock(side_effect=RuntimeError("network down"))
+    mock_provider.post_comment = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    mock_metrics = MagicMock()
+    payload = _make_review_comment_payload("@mira-bot reject")
+    await handle_thread_reject(payload, mock_app_auth, "mira-bot", metrics=mock_metrics)
+
+    mock_metrics.track.assert_called_once_with(
+        "thread_reject_failed",
+        installation_id=1,
+        properties={"command": "reject", "error_type": "RuntimeError"},
+    )
+
+
+async def test_handle_thread_reject_exception_logged_not_raised(
+    mock_app_auth: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Exceptions in reject handler are logged, not propagated."""
+    mock_app_auth.get_installation_token = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with caplog.at_level(logging.ERROR):
+        await handle_thread_reject(
+            _make_review_comment_payload("@mira-bot reject"),
+            mock_app_auth,
+            "mira-bot",
+        )
 
     assert "boom" in caplog.text

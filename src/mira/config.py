@@ -67,10 +67,15 @@ class ReviewConfig(BaseModel):
     walkthrough_sequence_diagram: bool = True
 
 
+class ProviderConfig(BaseModel):
+    type: str = "github"
+
+
 class MiraConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    provider: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 def find_config_file(start_dir: Path | None = None) -> Path | None:

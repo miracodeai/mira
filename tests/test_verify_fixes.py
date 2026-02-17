@@ -146,7 +146,7 @@ class TestBuildVerifyFixesPrompt:
         messages = build_verify_fixes_prompt([("src/app.py", "code", [_make_thread()])])
         system = messages[0]["content"]
         assert "if you are unsure" not in system.lower()
-        assert "mark it as fixed" in system.lower()
+        assert "mark as fixed" in system.lower()
 
     def test_formatted_body_cleaned_in_prompt(self):
         """Formatted review comment body is cleaned before inclusion in prompt."""
@@ -223,3 +223,35 @@ class TestParseVerifyFixesResponse:
 
     def test_none_input(self):
         assert parse_verify_fixes_response(None) == []
+
+    def test_json_block_after_analysis_with_other_code_blocks(self):
+        """LLM returns markdown analysis with ```python blocks before the ```json result."""
+        raw = (
+            "I'll analyze each issue.\n\n"
+            "## Issue 1\n"
+            "Looking at line 171:\n"
+            "```python\n"
+            'f"**Estimated effort:** {e.level}"\n'
+            "```\n"
+            "The emoji is still present.\n\n"
+            "## Issue 2\n"
+            "Looking at line 506:\n"
+            "```python\n"
+            'emoji, label = _CATEGORY_DISPLAY.get(comment.category, ("pin", "Note"))\n'
+            "```\n"
+            "No duplication.\n\n"
+            "```json\n"
+            '{"results": [{"id": "T1", "fixed": true}, {"id": "T2", "fixed": false}]}\n'
+            "```\n"
+        )
+        assert parse_verify_fixes_response(raw) == ["T1"]
+
+    def test_json_block_after_plain_analysis(self):
+        """LLM returns plain text analysis followed by a ```json result."""
+        raw = (
+            "All issues have been addressed in the current code.\n\n"
+            "```json\n"
+            '{"results": [{"id": "T1", "fixed": true}]}\n'
+            "```\n"
+        )
+        assert parse_verify_fixes_response(raw) == ["T1"]

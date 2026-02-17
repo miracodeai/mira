@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import re
 
 from pydantic import BaseModel, Field
 
 from mira.core.context import extract_hunk_lines
 from mira.exceptions import ResponseParseError
+from mira.llm.utils import strip_code_fences
 from mira.models import (
     FileChangeType,
     FileDiff,
@@ -45,20 +45,9 @@ class LLMReviewResponse(BaseModel):
     metadata: LLMMetadata = Field(default_factory=LLMMetadata)
 
 
-def _strip_code_fences(text: str) -> str:
-    """Remove markdown code fences wrapping JSON."""
-    text = text.strip()
-    # Remove ```json ... ``` or ``` ... ```
-    pattern = r"^```(?:json)?\s*\n?(.*?)\n?\s*```$"
-    match = re.match(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text
-
-
 def parse_llm_response(raw_text: str) -> LLMReviewResponse:
     """Parse raw LLM text output into a validated LLMReviewResponse."""
-    cleaned = _strip_code_fences(raw_text)
+    cleaned = strip_code_fences(raw_text)
 
     try:
         data = json.loads(cleaned)
@@ -172,7 +161,7 @@ _CHANGE_TYPE_MAP: dict[str, FileChangeType] = {
 
 def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
     """Parse raw LLM text output into a validated LLMWalkthroughResponse."""
-    cleaned = _strip_code_fences(raw_text)
+    cleaned = strip_code_fences(raw_text)
 
     try:
         data = json.loads(cleaned)

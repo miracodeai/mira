@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from mira.llm.utils import strip_code_fences
 from mira.models import UnresolvedThread
 
 # Markers that signal the start of noise sections in formatted review comments.
@@ -96,16 +97,20 @@ def build_verify_fixes_prompt(
                 "(full or relevant sections) with line numbers, and a list of "
                 "previously flagged issues.\n\n"
                 "For each issue:\n"
-                "1. Look at the referenced line number in the code.\n"
-                "2. Check if the specific problematic code pattern described in "
-                "the issue (e.g. a dangerous function call) is still present.\n"
-                "3. If the problematic pattern has been removed or replaced with "
-                "a safe alternative, mark it as fixed.\n\n"
+                "1. Look at the referenced line number in the current code.\n"
+                "2. Check if the EXACT problematic code pattern described in "
+                "the issue is still present at or near that line.\n"
+                "3. Mark as fixed (true) if ANY of these apply:\n"
+                "   - The problematic pattern has been removed or replaced.\n"
+                "   - The issue description does not match the actual code "
+                "(i.e. the issue was wrong or outdated).\n"
+                "   - The code at the referenced location has changed such "
+                "that the concern no longer applies.\n"
+                "4. Mark as not fixed (false) ONLY if the exact problematic "
+                "pattern described in the issue is still clearly present.\n\n"
                 "Issues tagged [OUTDATED] have been flagged by GitHub as having "
-                "changed code around them — pay extra attention as these are "
-                "likely fixed. For issues with unknown location, search the "
-                "entire file.\n\n"
-                "Respond with JSON: "
+                "changed code around them — these are very likely fixed.\n\n"
+                "Respond with ONLY the JSON object below, no other text:\n"
                 '{"results": [{"id": "<thread_id>", "fixed": true/false}, ...]}'
             ),
         },
@@ -113,26 +118,12 @@ def build_verify_fixes_prompt(
     ]
 
 
-def _strip_code_fences(text: str | None) -> str:
-    """Remove markdown code fences wrapping JSON.
-
-    Handles trailing text after the closing fence (e.g. LLM explanations).
-    """
-    import re
-
-    if not text:
-        return ""
-    text = text.strip()
-    match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
-    return match.group(1).strip() if match else text
-
-
 def parse_verify_fixes_response(raw: str) -> list[str]:
     """Parse the LLM response and return thread IDs confirmed as fixed."""
     import json
 
     try:
-        data = json.loads(_strip_code_fences(raw))
+        data = json.loads(strip_code_fences(raw))
     except (json.JSONDecodeError, TypeError):
         return []
 

@@ -100,6 +100,17 @@ class PatchSet:
         return sum(f.deleted_lines for f in self.files)
 
 
+def build_review_stats(comments: list[ReviewComment]) -> dict[Severity, int]:
+    """Count review comments grouped by severity.
+
+    Returns a mapping of severity → count, only including severities with > 0 comments.
+    """
+    counts: dict[Severity, int] = {}
+    for c in comments:
+        counts[c.severity] = counts.get(c.severity, 0) + 1
+    return counts
+
+
 @dataclass
 class ReviewComment:
     """A single review comment to post."""
@@ -144,7 +155,11 @@ class WalkthroughResult:
     effort: WalkthroughEffort | None = None
     sequence_diagram: str | None = None
 
-    def to_markdown(self, bot_name: str = "miracodeai") -> str:
+    def to_markdown(
+        self,
+        bot_name: str = "miracodeai",
+        review_stats: dict[Severity, int] | None = None,
+    ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
@@ -153,8 +168,7 @@ class WalkthroughResult:
             parts.append("")
             e = self.effort
             parts.append(
-                f"**Estimated effort:** \U0001f3af {e.level} ({e.label})"
-                f" \u00b7 \u23f1\ufe0f ~{e.minutes} min"
+                f"**Estimated effort:** {e.level} ({e.label}) \u00b7 \u23f1\ufe0f ~{e.minutes} min"
             )
 
         if self.file_changes:
@@ -188,6 +202,18 @@ class WalkthroughResult:
                 parts.append("|------|--------|-------------|")
                 for fc in self.file_changes:
                     parts.append(_file_row(fc))
+
+        if review_stats:
+            total = sum(review_stats.values())
+            parts.append("")
+            parts.append("### Review Status")
+            parts.append("")
+            parts.append(f"Found **{total}** issue{'s' if total != 1 else ''}:")
+            parts.append("")
+            parts.append("| Severity | Count |")
+            parts.append("|----------|-------|")
+            for sev in sorted(review_stats, reverse=True):
+                parts.append(f"| {sev.emoji} {sev.name.capitalize()} | {review_stats[sev]} |")
 
         if self.sequence_diagram:
             parts.append("")
@@ -253,10 +279,6 @@ class UnresolvedThread:
     line: int
     body: str
     is_outdated: bool = False
-
-
-# Backward-compat alias
-OutdatedThread = UnresolvedThread
 
 
 @dataclass

@@ -11,6 +11,14 @@ class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
 
     @abc.abstractmethod
+    def __init__(self, token: str) -> None:
+        """Initialize the provider with an authentication token.
+
+        Subclasses must implement this to configure their API client
+        using the provided token.
+        """
+
+    @abc.abstractmethod
     async def get_pr_info(self, pr_url: str) -> PRInfo:
         """Fetch metadata about a pull request."""
 
@@ -23,6 +31,7 @@ class BaseProvider(abc.ABC):
         self,
         pr_info: PRInfo,
         result: ReviewResult,
+        bot_name: str = "miracodeai",
     ) -> None:
         """Post review comments to a pull request."""
 
@@ -48,15 +57,13 @@ class BaseProvider(abc.ABC):
         """Fetch all unresolved review threads authored by the bot."""
         return []
 
-    # Backward-compat alias
-    async def get_outdated_bot_threads(
-        self, pr_info: PRInfo, bot_login: str | None = None
-    ) -> list[UnresolvedThread]:
-        return await self.get_unresolved_bot_threads(pr_info, bot_login)
-
     async def resolve_threads(self, pr_info: PRInfo, thread_ids: list[str]) -> int:
         """Resolve review threads by ID. Returns count of successfully resolved."""
         return 0
+
+    async def get_thread_id_for_comment(self, comment_node_id: str) -> str | None:
+        """Look up the review thread for a comment. Returns thread ID or None."""
+        return None
 
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref."""

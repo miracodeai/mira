@@ -194,7 +194,7 @@ class TestReviewEngine:
 
         call_count = 0
 
-        async def _side_effect(messages, json_mode=True):
+        async def _side_effect(messages, json_mode=True, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -321,7 +321,7 @@ class TestReviewEngine:
         """Walkthrough failure does not block the review."""
         call_count = 0
 
-        async def _side_effect(messages, json_mode=True):
+        async def _side_effect(messages, json_mode=True, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -402,6 +402,44 @@ class TestReviewEngine:
         assert result.reviewed_files > 0
 
     @pytest.mark.asyncio
+    async def test_walkthrough_includes_review_stats(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """Walkthrough markdown includes review stats when comments exist."""
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # The walkthrough was posted — grab the markdown that was passed
+        mock_provider.post_comment.assert_called_once()
+        posted_markdown = mock_provider.post_comment.call_args[0][1]
+        # The sample LLM response produces comments, so stats should be present
+        assert "### Review Status" in posted_markdown
+        assert "Found **" in posted_markdown
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_omits_review_stats_when_no_comments(self, mock_provider: AsyncMock):
+        """Walkthrough markdown omits review stats when there are no comments."""
+        no_comments_response = json.dumps(
+            {
+                "comments": [],
+                "summary": "All good!",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+        llm = MagicMock(spec=LLMProvider)
+        llm.complete = AsyncMock(side_effect=[_WALKTHROUGH_LLM_RESPONSE, no_comments_response])
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # Walkthrough was posted but without review stats
+        mock_provider.post_comment.assert_called_once()
+        posted_markdown = mock_provider.post_comment.call_args[0][1]
+        assert "### Review Status" not in posted_markdown
+
+    @pytest.mark.asyncio
     async def test_no_brute_force_resolve_of_outdated_threads(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
@@ -410,6 +448,82 @@ class TestReviewEngine:
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
         mock_provider.resolve_outdated_review_threads.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prior_chunk_comments_passed_as_context(self, sample_diff_text: str):
+        """Comments from chunk 1 are passed as existing_comments to chunk 2."""
+        chunk1_response = json.dumps(
+            {
+                "comments": [
+                    {
+                        "path": "src/utils.py",
+                        "line": 9,
+                        "severity": "warning",
+                        "category": "security",
+                        "title": "Shell injection risk",
+                        "body": "Avoid shell=True.",
+                        "confidence": 0.95,
+                    }
+                ],
+                "summary": "Chunk 1 issues.",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+        chunk2_response = json.dumps(
+            {
+                "comments": [],
+                "summary": "Chunk 2 clean.",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+
+        call_count = 0
+
+        async def _side_effect(messages, json_mode=True, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _WALKTHROUGH_LLM_RESPONSE
+            if call_count == 2:
+                return chunk1_response
+            return chunk2_response
+
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=50)
+        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        config = MiraConfig()
+        config.llm.max_context_tokens = 100  # Force multiple chunks
+        config.filter.confidence_threshold = 0.0
+
+        engine = ReviewEngine(config=config, llm=llm)
+
+        with patch(
+            "mira.core.engine.build_review_prompt",
+            wraps=__import__(
+                "mira.llm.prompts.review", fromlist=["build_review_prompt"]
+            ).build_review_prompt,
+        ) as mock_build:
+            await engine.review_diff(sample_diff_text)
+
+            # Need at least 2 review chunks (calls 2+ after walkthrough)
+            assert mock_build.call_count >= 2, (
+                f"Expected >=2 chunk calls, got {mock_build.call_count}"
+            )
+
+            # First chunk: no prior comments (existing_comments should be None)
+            _, first_kwargs = mock_build.call_args_list[0]
+            assert first_kwargs.get("existing_comments") is None
+
+            # Second chunk: should include comments generated by chunk 1
+            _, second_kwargs = mock_build.call_args_list[1]
+            existing = second_kwargs.get("existing_comments")
+            assert existing is not None, "Chunk 2 should receive prior chunk comments"
+            assert len(existing) == 1, "Expected exactly 1 prior chunk comment"
+            # The pending thread should reference the chunk 1 comment
+            assert any("src/utils.py" in t.path for t in existing)
+            assert any("Shell injection" in t.body for t in existing)
 
 
 class TestDryRun:
@@ -460,7 +574,7 @@ class TestDryRun:
 
         call_count = 0
 
-        async def _side_effect(messages, json_mode=True):
+        async def _side_effect(messages, json_mode=True, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -582,7 +696,7 @@ class TestThreadResolution:
 
         call_count = 0
 
-        async def _side_effect(messages, json_mode=True):
+        async def _side_effect(messages, json_mode=True, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -622,7 +736,7 @@ class TestThreadResolution:
 
         call_count = 0
 
-        async def _side_effect(messages, json_mode=True):
+        async def _side_effect(messages, json_mode=True, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -664,7 +778,7 @@ class TestThreadResolution:
 
         call_count = 0
 
-        async def _side_effect(messages, json_mode=True):
+        async def _side_effect(messages, json_mode=True, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -689,9 +803,10 @@ class TestThreadResolution:
 
             # build_review_prompt should have been called with existing_comments
             assert mock_build.call_count >= 1
-            _, kwargs = mock_build.call_args
-            assert "existing_comments" in kwargs
-            existing = kwargs["existing_comments"]
+            # Check the first chunk call — should include the unresolved T2 thread
+            _, first_kwargs = mock_build.call_args_list[0]
+            assert "existing_comments" in first_kwargs
+            existing = first_kwargs["existing_comments"]
             assert len(existing) == 1
             assert existing[0].thread_id == "T2"
 
