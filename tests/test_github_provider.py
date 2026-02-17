@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from github import GithubException
 
 from mira.exceptions import ProviderError
 from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
@@ -282,7 +283,7 @@ class TestFormatCommentBody:
 
     def test_basic_comment(self):
         body = _format_comment_body(self._make_comment())
-        assert "\U0001f41b **Bug**\nWarning" in body
+        assert "\U0001f41b **Bug**\n\u26a0\ufe0f Warning" in body
         assert "**Something is wrong**" in body
         assert "Detailed explanation." in body
         assert "Suggested fix:" not in body
@@ -295,7 +296,7 @@ class TestFormatCommentBody:
 
     def test_blocker_badge(self):
         body = _format_comment_body(self._make_comment(severity=Severity.BLOCKER))
-        assert "\U0001f41b **Bug**\nBlocker \u2014 must fix before merge" in body
+        assert "\U0001f41b **Bug**\n\U0001f6d1 Blocker \u2014 must fix before merge" in body
 
     def test_unknown_category_fallback(self):
         body = _format_comment_body(self._make_comment(category="unknown_cat"))
@@ -350,6 +351,32 @@ class TestFormatCommentBodyAgentPrompt:
         suggestion_pos = body.index("```suggestion")
         details_pos = body.index("<details>")
         assert details_pos > suggestion_pos
+
+    def test_agent_prompt_includes_suggestion_code(self):
+        body = _format_comment_body(
+            self._make_comment(
+                suggestion="return bar()",
+                agent_prompt="In src/foo.py at line 10, replace foo() with bar().",
+            )
+        )
+        # The agent prompt section should contain the suggestion code
+        details_start = body.index("<details>")
+        details_end = body.index("</details>")
+        details_section = body[details_start:details_end]
+        assert "Apply this code change:" in details_section
+        assert "return bar()" in details_section
+
+    def test_agent_prompt_without_suggestion_has_no_code_block(self):
+        body = _format_comment_body(
+            self._make_comment(
+                suggestion=None,
+                agent_prompt="In src/foo.py at line 10, check the return value.",
+            )
+        )
+        details_start = body.index("<details>")
+        details_end = body.index("</details>")
+        details_section = body[details_start:details_end]
+        assert "Apply this code change:" not in details_section
 
 
 class TestPostComment:
@@ -1030,3 +1057,67 @@ class TestFormatCommentBodyDismissHint:
     def test_custom_bot_name(self):
         body = _format_comment_body(self._make_comment(), bot_name="mybot")
         assert "> Not useful? Reply `@mybot reject` to dismiss this suggestion." in body
+
+
+class TestAddLabel:
+    @pytest.mark.asyncio
+    async def test_add_label_calls_issue_add_to_labels(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.add_label(pr_info, "mira-paused")
+
+        mock_repo.get_issue.assert_called_once_with(1)
+        mock_issue.add_to_labels.assert_called_once_with("mira-paused")
+
+
+class TestRemoveLabel:
+    @pytest.mark.asyncio
+    async def test_remove_label_calls_issue_remove_from_labels(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.remove_label(pr_info, "mira-paused")
+
+        mock_repo.get_issue.assert_called_once_with(1)
+        mock_issue.remove_from_labels.assert_called_once_with("mira-paused")
+
+    @pytest.mark.asyncio
+    async def test_remove_label_silently_handles_404(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        exc = GithubException(404, {"message": "Label does not exist"}, {})
+        mock_issue.remove_from_labels.side_effect = exc
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        # Should not raise
+        await provider.remove_label(pr_info, "mira-paused")

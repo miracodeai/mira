@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -12,12 +13,21 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 from mira.github_app.auth import GitHubAppAuth
-from mira.github_app.handlers import handle_comment, handle_pull_request, handle_thread_reject
+from mira.github_app.handlers import (
+    _PAUSE_KEYWORDS,
+    _RESUME_KEYWORDS,
+    PAUSE_LABEL,
+    handle_comment,
+    handle_pause_resume,
+    handle_pull_request,
+    handle_thread_reject,
+)
 from mira.github_app.metrics import Metrics
 
 logger = logging.getLogger(__name__)
 
 _PR_ACTIONS = {"opened", "synchronize", "reopened"}
+_SAFE_BOT_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 def _verify_signature(payload_bytes: bytes, signature_header: str, secret: str) -> bool:
@@ -35,6 +45,8 @@ def create_app(
     metrics: Metrics | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI webhook application."""
+    if not _SAFE_BOT_NAME.match(bot_name):
+        raise ValueError(f"Invalid bot_name {bot_name!r}: must match [a-zA-Z0-9_-]+")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -76,6 +88,25 @@ def create_app(
                     status_code=200,
                     media_type="application/json",
                 )
+
+            pr_body: str = payload.get("pull_request", {}).get("body", "") or ""
+            if re.search(rf"@{re.escape(bot_name)}[ \t]+ignore\b", pr_body, re.IGNORECASE):
+                logger.info("PR ignored via @%s ignore in description", bot_name)
+                return Response(
+                    content='{"status": "ignored"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
+
+            pr_labels = payload.get("pull_request", {}).get("labels", [])
+            if any(lbl.get("name") == PAUSE_LABEL for lbl in pr_labels):
+                logger.info("PR paused via %s label", PAUSE_LABEL)
+                return Response(
+                    content='{"status": "paused"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
+
             if metrics:
                 metrics.track(
                     "webhook_received",
@@ -104,6 +135,37 @@ def create_app(
                 )
 
             if is_pr and f"@{bot_name}" in comment_body:
+                # Extract command word after @bot_name
+                cmd_match = re.search(
+                    rf"@{re.escape(bot_name)}\s+(\w+)", comment_body, re.IGNORECASE
+                )
+                cmd_word = cmd_match.group(1).lower() if cmd_match else ""
+
+                if cmd_word in _PAUSE_KEYWORDS | _RESUME_KEYWORDS:
+                    if metrics:
+                        metrics.track(
+                            "webhook_received",
+                            installation_id=installation_id,
+                            properties={
+                                "event_type": event,
+                                "action": action,
+                                "status": "processing",
+                            },
+                        )
+                    background_tasks.add_task(
+                        handle_pause_resume,
+                        payload,
+                        app_auth,
+                        bot_name,
+                        cmd_word,
+                        metrics,
+                    )
+                    return Response(
+                        content='{"status": "processing"}',
+                        status_code=200,
+                        media_type="application/json",
+                    )
+
                 if metrics:
                     metrics.track(
                         "webhook_received",

@@ -101,10 +101,10 @@ _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
 }
 
 _SEVERITY_BADGE: dict[Severity, str] = {
-    Severity.BLOCKER: "Blocker \u2014 must fix before merge",
-    Severity.WARNING: "Warning",
-    Severity.SUGGESTION: "Suggestion",
-    Severity.NITPICK: "Nitpick",
+    Severity.BLOCKER: "\U0001f6d1 Blocker \u2014 must fix before merge",
+    Severity.WARNING: "\u26a0\ufe0f Warning",
+    Severity.SUGGESTION: "\U0001f4a1 Suggestion",
+    Severity.NITPICK: "\U0001f4ac Nitpick",
 }
 
 # Matches: https://github.com/owner/repo/pull/123 or owner/repo#123
@@ -459,6 +459,39 @@ class GitHubProvider(BaseProvider):
         )
         return threads
 
+    async def add_label(self, pr_info: PRInfo, label: str) -> None:
+        @_retry_transient
+        def _add() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            issue.add_to_labels(label)
+
+        try:
+            await asyncio.to_thread(_add)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to add label: {e}") from e
+
+    async def remove_label(self, pr_info: PRInfo, label: str) -> None:
+        @_retry_transient
+        def _remove() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            try:
+                issue.remove_from_labels(label)
+            except GithubException as exc:
+                if exc.status == 404:
+                    return
+                raise
+
+        try:
+            await asyncio.to_thread(_remove)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to remove label: {e}") from e
+
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref via the REST API."""
         url = f"https://api.github.com/repos/{pr_info.owner}/{pr_info.repo}/contents/{path}"
@@ -551,12 +584,15 @@ def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -
         parts.append("```")
 
     if comment.agent_prompt:
+        prompt_text = comment.agent_prompt
+        if comment.suggestion:
+            prompt_text += f"\n\nApply this code change:\n```\n{comment.suggestion}\n```"
         parts.append("")
         parts.append("<details>")
         parts.append("<summary>Prompt for AI Agents</summary>")
         parts.append("")
         parts.append("```text")
-        parts.append(comment.agent_prompt)
+        parts.append(prompt_text)
         parts.append("```")
         parts.append("")
         parts.append("</details>")

@@ -40,16 +40,31 @@ def _sign(payload_bytes: bytes) -> str:
     return f"sha256={sig}"
 
 
-def _pr_opened_payload() -> dict:
+def _make_pr_payload(
+    *,
+    action: str = "opened",
+    number: int = 42,
+    body: str = "",
+    labels: list[dict] | None = None,
+) -> dict:
+    """Build a pull_request webhook payload with all required fields."""
     return {
-        "action": "opened",
+        "action": action,
         "installation": {"id": 1},
-        "pull_request": {"number": 42},
+        "pull_request": {
+            "number": number,
+            "body": body,
+            "labels": labels if labels is not None else [],
+        },
         "repository": {
             "owner": {"login": "testowner"},
             "name": "testrepo",
         },
     }
+
+
+def _pr_opened_payload() -> dict:
+    return _make_pr_payload()
 
 
 def _comment_payload(body: str, is_pr: bool = True) -> dict:
@@ -66,6 +81,11 @@ def _comment_payload(body: str, is_pr: bool = True) -> dict:
             "name": "testrepo",
         },
     }
+
+
+def test_invalid_bot_name_rejected(app_auth: GitHubAppAuth) -> None:
+    with pytest.raises(ValueError, match="Invalid bot_name"):
+        create_app(app_auth=app_auth, webhook_secret=WEBHOOK_SECRET, bot_name="bad name!")
 
 
 async def test_health(client: AsyncClient) -> None:
@@ -244,3 +264,110 @@ async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ignored"
+
+
+# ── pause / resume / ignore tests ────────────────────────────────────────────
+
+
+@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_with_paused_label_returns_paused(
+    mock_handler: AsyncMock, client: AsyncClient
+) -> None:
+    payload = _make_pr_payload(labels=[{"name": "mira-paused"}])
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "pull_request",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "paused"
+    mock_handler.assert_not_awaited()
+
+
+@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_with_ignore_in_description(mock_handler: AsyncMock, client: AsyncClient) -> None:
+    payload = _make_pr_payload(body="Some text\n@mira-bot ignore\nMore text")
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "pull_request",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"
+    mock_handler.assert_not_awaited()
+
+
+@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+async def test_pause_comment_dispatches_pause_handler(
+    mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
+) -> None:
+    payload = _comment_payload(f"@{BOT_NAME} pause")
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "issue_comment",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"
+    mock_pause.assert_awaited_once()
+    mock_comment.assert_not_awaited()
+
+
+@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+async def test_resume_comment_dispatches_pause_handler(
+    mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
+) -> None:
+    payload = _comment_payload(f"@{BOT_NAME} resume")
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "issue_comment",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"
+    mock_pause.assert_awaited_once()
+    mock_comment.assert_not_awaited()
+
+
+@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+async def test_review_comment_still_dispatches_handle_comment(
+    mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
+) -> None:
+    payload = _comment_payload(f"@{BOT_NAME} review")
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "issue_comment",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"
+    mock_comment.assert_awaited_once()
+    mock_pause.assert_not_awaited()

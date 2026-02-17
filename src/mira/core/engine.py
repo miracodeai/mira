@@ -140,7 +140,9 @@ class ReviewEngine:
                 try:
                     stats = build_review_stats(result.comments)
                     markdown = result.walkthrough.to_markdown(
-                        bot_name=self.bot_name, review_stats=stats
+                        bot_name=self.bot_name,
+                        review_stats=stats,
+                        existing_issues=len(unresolved_threads),
                     )
                     existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
                     if existing_id is not None:
