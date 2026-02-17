@@ -83,6 +83,11 @@ def _comment_payload(body: str, is_pr: bool = True) -> dict:
     }
 
 
+def test_invalid_bot_name_rejected(app_auth: GitHubAppAuth) -> None:
+    with pytest.raises(ValueError, match="Invalid bot_name"):
+        create_app(app_auth=app_auth, webhook_secret=WEBHOOK_SECRET, bot_name="bad name!")
+
+
 async def test_health(client: AsyncClient) -> None:
     resp = await client.get("/health")
     assert resp.status_code == 200

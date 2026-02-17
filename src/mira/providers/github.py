@@ -584,12 +584,15 @@ def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -
         parts.append("```")
 
     if comment.agent_prompt:
+        prompt_text = comment.agent_prompt
+        if comment.suggestion:
+            prompt_text += f"\n\nApply this code change:\n```\n{comment.suggestion}\n```"
         parts.append("")
         parts.append("<details>")
         parts.append("<summary>Prompt for AI Agents</summary>")
         parts.append("")
         parts.append("```text")
-        parts.append(comment.agent_prompt)
+        parts.append(prompt_text)
         parts.append("```")
         parts.append("")
         parts.append("</details>")

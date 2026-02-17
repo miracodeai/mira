@@ -352,6 +352,32 @@ class TestFormatCommentBodyAgentPrompt:
         details_pos = body.index("<details>")
         assert details_pos > suggestion_pos
 
+    def test_agent_prompt_includes_suggestion_code(self):
+        body = _format_comment_body(
+            self._make_comment(
+                suggestion="return bar()",
+                agent_prompt="In src/foo.py at line 10, replace foo() with bar().",
+            )
+        )
+        # The agent prompt section should contain the suggestion code
+        details_start = body.index("<details>")
+        details_end = body.index("</details>")
+        details_section = body[details_start:details_end]
+        assert "Apply this code change:" in details_section
+        assert "return bar()" in details_section
+
+    def test_agent_prompt_without_suggestion_has_no_code_block(self):
+        body = _format_comment_body(
+            self._make_comment(
+                suggestion=None,
+                agent_prompt="In src/foo.py at line 10, check the return value.",
+            )
+        )
+        details_start = body.index("<details>")
+        details_end = body.index("</details>")
+        details_section = body[details_start:details_end]
+        assert "Apply this code change:" not in details_section
+
 
 class TestPostComment:
     @pytest.mark.asyncio
@@ -1084,7 +1110,7 @@ class TestRemoveLabel:
         pr_info = _make_pr_info()
 
         mock_issue = MagicMock()
-        exc = GithubException(404, {"message": "Label does not exist"}, None)
+        exc = GithubException(404, {"message": "Label does not exist"}, {})
         mock_issue.remove_from_labels.side_effect = exc
         mock_repo = MagicMock()
         mock_repo.get_issue.return_value = mock_issue

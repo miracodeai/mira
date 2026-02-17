@@ -27,6 +27,7 @@ from mira.github_app.metrics import Metrics
 logger = logging.getLogger(__name__)
 
 _PR_ACTIONS = {"opened", "synchronize", "reopened"}
+_SAFE_BOT_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 def _verify_signature(payload_bytes: bytes, signature_header: str, secret: str) -> bool:
@@ -44,6 +45,8 @@ def create_app(
     metrics: Metrics | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI webhook application."""
+    if not _SAFE_BOT_NAME.match(bot_name):
+        raise ValueError(f"Invalid bot_name {bot_name!r}: must match [a-zA-Z0-9_-]+")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
