@@ -283,7 +283,7 @@ class TestFormatCommentBody:
 
     def test_basic_comment(self):
         body = _format_comment_body(self._make_comment())
-        assert "\U0001f41b **Bug**\nWarning" in body
+        assert "\U0001f41b **Bug**\n\u26a0\ufe0f Warning" in body
         assert "**Something is wrong**" in body
         assert "Detailed explanation." in body
         assert "Suggested fix:" not in body
@@ -296,7 +296,7 @@ class TestFormatCommentBody:
 
     def test_blocker_badge(self):
         body = _format_comment_body(self._make_comment(severity=Severity.BLOCKER))
-        assert "\U0001f41b **Bug**\nBlocker \u2014 must fix before merge" in body
+        assert "\U0001f41b **Bug**\n\U0001f6d1 Blocker \u2014 must fix before merge" in body
 
     def test_unknown_category_fallback(self):
         body = _format_comment_body(self._make_comment(category="unknown_cat"))

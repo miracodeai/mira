@@ -387,6 +387,28 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown(review_stats=stats)
         assert "Found **1** issue:" in md
 
+    def test_existing_issues_included_in_total(self):
+        result = WalkthroughResult(summary="Changes.")
+        stats = {Severity.WARNING: 2}
+        md = result.to_markdown(review_stats=stats, existing_issues=3)
+        assert "Found **5** issues:" in md
+        assert "Existing" in md
+        assert "| 3 |" in md
+
+    def test_existing_issues_only(self):
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(review_stats=None, existing_issues=4)
+        assert "### Review Status" in md
+        assert "Found **4** issues:" in md
+        assert "Existing" in md
+
+    def test_existing_issues_zero_omitted(self):
+        result = WalkthroughResult(summary="Changes.")
+        stats = {Severity.WARNING: 1}
+        md = result.to_markdown(review_stats=stats, existing_issues=0)
+        assert "Existing" not in md
+        assert "Found **1** issue:" in md
+
     def test_review_stats_between_changes_and_diagram(self):
         result = WalkthroughResult(
             summary="Changes.",

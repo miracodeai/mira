@@ -101,10 +101,10 @@ _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
 }
 
 _SEVERITY_BADGE: dict[Severity, str] = {
-    Severity.BLOCKER: "Blocker \u2014 must fix before merge",
-    Severity.WARNING: "Warning",
-    Severity.SUGGESTION: "Suggestion",
-    Severity.NITPICK: "Nitpick",
+    Severity.BLOCKER: "\U0001f6d1 Blocker \u2014 must fix before merge",
+    Severity.WARNING: "\u26a0\ufe0f Warning",
+    Severity.SUGGESTION: "\U0001f4a1 Suggestion",
+    Severity.NITPICK: "\U0001f4ac Nitpick",
 }
 
 # Matches: https://github.com/owner/repo/pull/123 or owner/repo#123

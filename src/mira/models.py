@@ -159,6 +159,7 @@ class WalkthroughResult:
         self,
         bot_name: str = "miracodeai",
         review_stats: dict[Severity, int] | None = None,
+        existing_issues: int = 0,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -203,8 +204,9 @@ class WalkthroughResult:
                 for fc in self.file_changes:
                     parts.append(_file_row(fc))
 
-        if review_stats:
-            total = sum(review_stats.values())
+        if review_stats or existing_issues:
+            new_total = sum(review_stats.values()) if review_stats else 0
+            total = new_total + existing_issues
             parts.append("")
             parts.append("### Review Status")
             parts.append("")
@@ -212,8 +214,11 @@ class WalkthroughResult:
             parts.append("")
             parts.append("| Severity | Count |")
             parts.append("|----------|-------|")
-            for sev in sorted(review_stats, reverse=True):
-                parts.append(f"| {sev.emoji} {sev.name.capitalize()} | {review_stats[sev]} |")
+            if review_stats:
+                for sev in sorted(review_stats, reverse=True):
+                    parts.append(f"| {sev.emoji} {sev.name.capitalize()} | {review_stats[sev]} |")
+            if existing_issues:
+                parts.append(f"| \U0001f4cc Existing | {existing_issues} |")
 
         if self.sequence_diagram:
             parts.append("")
