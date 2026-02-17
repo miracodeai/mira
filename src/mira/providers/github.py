@@ -459,6 +459,39 @@ class GitHubProvider(BaseProvider):
         )
         return threads
 
+    async def add_label(self, pr_info: PRInfo, label: str) -> None:
+        @_retry_transient
+        def _add() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            issue.add_to_labels(label)
+
+        try:
+            await asyncio.to_thread(_add)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to add label: {e}") from e
+
+    async def remove_label(self, pr_info: PRInfo, label: str) -> None:
+        @_retry_transient
+        def _remove() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            issue = gh_repo.get_issue(pr_info.number)
+            try:
+                issue.remove_from_labels(label)
+            except GithubException as exc:
+                if exc.status == 404:
+                    return
+                raise
+
+        try:
+            await asyncio.to_thread(_remove)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to remove label: {e}") from e
+
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref via the REST API."""
         url = f"https://api.github.com/repos/{pr_info.owner}/{pr_info.repo}/contents/{path}"

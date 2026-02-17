@@ -65,6 +65,14 @@ class BaseProvider(abc.ABC):
         """Look up the review thread for a comment. Returns thread ID or None."""
         return None
 
+    async def add_label(self, pr_info: PRInfo, label: str) -> None:
+        """Add a label to a pull request."""
+        return
+
+    async def remove_label(self, pr_info: PRInfo, label: str) -> None:
+        """Remove a label from a pull request."""
+        return
+
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref."""
         return ""

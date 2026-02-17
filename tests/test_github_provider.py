@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import base64
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import httpx
 import pytest
+from github import GithubException
 
 from mira.exceptions import ProviderError
 from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
@@ -1030,3 +1031,67 @@ class TestFormatCommentBodyDismissHint:
     def test_custom_bot_name(self):
         body = _format_comment_body(self._make_comment(), bot_name="mybot")
         assert "> Not useful? Reply `@mybot reject` to dismiss this suggestion." in body
+
+
+class TestAddLabel:
+    @pytest.mark.asyncio
+    async def test_add_label_calls_issue_add_to_labels(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.add_label(pr_info, "mira-paused")
+
+        mock_repo.get_issue.assert_called_once_with(1)
+        mock_issue.add_to_labels.assert_called_once_with("mira-paused")
+
+
+class TestRemoveLabel:
+    @pytest.mark.asyncio
+    async def test_remove_label_calls_issue_remove_from_labels(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        await provider.remove_label(pr_info, "mira-paused")
+
+        mock_repo.get_issue.assert_called_once_with(1)
+        mock_issue.remove_from_labels.assert_called_once_with("mira-paused")
+
+    @pytest.mark.asyncio
+    async def test_remove_label_silently_handles_404(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+
+        pr_info = _make_pr_info()
+
+        mock_issue = MagicMock()
+        exc = GithubException(404, {"message": "Label does not exist"}, None)
+        mock_issue.remove_from_labels.side_effect = exc
+        mock_repo = MagicMock()
+        mock_repo.get_issue.return_value = mock_issue
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+
+        # Should not raise
+        await provider.remove_label(pr_info, "mira-paused")

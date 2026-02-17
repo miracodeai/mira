@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 _REVIEW_KEYWORDS = {"review", "review this", "review this pr"}
 _REJECT_KEYWORDS = {"reject", "dismiss", "resolve", "ignore"}
 
+PAUSE_LABEL = "mira-paused"
+_PAUSE_KEYWORDS = {"pause"}
+_RESUME_KEYWORDS = {"resume"}
+
 
 async def handle_pull_request(
     payload: dict[str, Any],
@@ -229,3 +233,60 @@ async def handle_thread_reject(
             )
     except Exception:
         logger.exception("Error handling thread reject event")
+
+
+async def handle_pause_resume(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+    command: str,
+    metrics: Metrics | None = None,
+) -> None:
+    """Handle a pause or resume command from an issue comment."""
+    installation_id: int = payload.get("installation", {}).get("id", 0)
+    try:
+        token = await app_auth.get_installation_token(installation_id)
+
+        owner = payload["repository"]["owner"]["login"]
+        repo = payload["repository"]["name"]
+        number = payload["issue"]["number"]
+
+        from mira.models import PRInfo
+
+        pr_info = PRInfo(
+            title="",
+            description="",
+            base_branch="",
+            head_branch="",
+            url=f"https://github.com/{owner}/{repo}/pull/{number}",
+            number=number,
+            owner=owner,
+            repo=repo,
+        )
+
+        provider = create_provider("github", token)
+
+        if command in _PAUSE_KEYWORDS:
+            await provider.add_label(pr_info, PAUSE_LABEL)
+            await provider.post_comment(
+                pr_info,
+                f"Automatic reviews paused. You can still request a manual review "
+                f"by commenting `@{bot_name} review`.",
+            )
+            logger.info("Paused automatic reviews on PR %s/%s#%d", owner, repo, number)
+        elif command in _RESUME_KEYWORDS:
+            await provider.remove_label(pr_info, PAUSE_LABEL)
+            await provider.post_comment(
+                pr_info,
+                "Automatic reviews resumed.",
+            )
+            logger.info("Resumed automatic reviews on PR %s/%s#%d", owner, repo, number)
+
+        if metrics:
+            metrics.track(
+                "review_pause_toggle",
+                installation_id=installation_id,
+                properties={"command": command},
+            )
+    except Exception:
+        logger.exception("Error handling pause/resume event")
