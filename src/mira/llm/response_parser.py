@@ -16,6 +16,7 @@ from mira.models import (
     Severity,
     WalkthroughEffort,
     WalkthroughFileEntry,
+    WalkthroughQualityScore,
     WalkthroughResult,
 )
 
@@ -34,6 +35,12 @@ class LLMComment(BaseModel):
     existing_code: str = ""
 
 
+class LLMKeyIssue(BaseModel):
+    issue: str = ""
+    path: str = ""
+    line: int = 0
+
+
 class LLMMetadata(BaseModel):
     reviewed_files: int = 0
     skipped_reason: str | None = None
@@ -41,6 +48,7 @@ class LLMMetadata(BaseModel):
 
 class LLMReviewResponse(BaseModel):
     comments: list[LLMComment] = Field(default_factory=list)
+    key_issues: list[LLMKeyIssue] = Field(default_factory=list)
     summary: str = ""
     metadata: LLMMetadata = Field(default_factory=LLMMetadata)
 
@@ -144,10 +152,17 @@ class LLMWalkthroughEffort(BaseModel):
     minutes: int = 15
 
 
+class LLMWalkthroughQualityScore(BaseModel):
+    score: int = 0
+    reason: str = ""
+
+
 class LLMWalkthroughResponse(BaseModel):
     summary: str = ""
+    pr_type: list[str] = Field(default_factory=list)
     change_groups: list[LLMWalkthroughChangeGroup] = Field(default_factory=list)
     effort: LLMWalkthroughEffort | None = None
+    quality_score: LLMWalkthroughQualityScore | None = None
     sequence_diagram: str | None = None
 
 
@@ -198,9 +213,17 @@ def convert_to_walkthrough_result(response: LLMWalkthroughResponse) -> Walkthrou
             label=response.effort.label,
             minutes=response.effort.minutes,
         )
+    quality_score: WalkthroughQualityScore | None = None
+    if response.quality_score:
+        quality_score = WalkthroughQualityScore(
+            score=response.quality_score.score,
+            reason=response.quality_score.reason,
+        )
     return WalkthroughResult(
         summary=response.summary,
+        pr_type=response.pr_type,
         file_changes=entries,
         effort=effort,
+        quality_score=quality_score,
         sequence_diagram=response.sequence_diagram,
     )

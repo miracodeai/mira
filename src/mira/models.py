@@ -112,6 +112,15 @@ def build_review_stats(comments: list[ReviewComment]) -> dict[Severity, int]:
 
 
 @dataclass
+class KeyIssue:
+    """A critical issue highlighted for human reviewers."""
+
+    issue: str
+    path: str
+    line: int
+
+
+@dataclass
 class ReviewComment:
     """A single review comment to post."""
 
@@ -125,6 +134,14 @@ class ReviewComment:
     confidence: float
     suggestion: str | None = None
     agent_prompt: str | None = None
+
+
+@dataclass
+class WalkthroughQualityScore:
+    """Code quality score for a PR."""
+
+    score: int
+    reason: str
 
 
 @dataclass
@@ -151,8 +168,10 @@ class WalkthroughResult:
     """Result of the PR walkthrough generation."""
 
     summary: str = ""
+    pr_type: list[str] = field(default_factory=list)
     file_changes: list[WalkthroughFileEntry] = field(default_factory=list)
     effort: WalkthroughEffort | None = None
+    quality_score: WalkthroughQualityScore | None = None
     sequence_diagram: str | None = None
 
     def to_markdown(
@@ -164,6 +183,16 @@ class WalkthroughResult:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
+
+        if self.pr_type:
+            parts.append("")
+            parts.append(f"**Type:** {', '.join(self.pr_type)}")
+
+        if self.quality_score:
+            parts.append("")
+            parts.append(
+                f"**Quality:** {self.quality_score.score}/100 \u2014 {self.quality_score.reason}"
+            )
 
         if self.effort:
             parts.append("")
@@ -253,6 +282,7 @@ class ReviewResult:
     """The complete result of a review."""
 
     comments: list[ReviewComment] = field(default_factory=list)
+    key_issues: list[KeyIssue] = field(default_factory=list)
     summary: str = ""
     reviewed_files: int = 0
     skipped_reason: str | None = None

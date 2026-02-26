@@ -23,6 +23,7 @@ from mira.llm.response_parser import (
 )
 from mira.models import (
     WALKTHROUGH_MARKER,
+    KeyIssue,
     PRInfo,
     ReviewComment,
     ReviewResult,
@@ -240,6 +241,7 @@ class ReviewEngine:
 
         # Review each chunk
         all_comments: list[ReviewComment] = []
+        all_key_issues: list[KeyIssue] = []
         valid_paths = {f.path for f in filtered}
         summaries: list[str] = []
 
@@ -263,6 +265,10 @@ class ReviewEngine:
                 comments = convert_to_review_comments(parsed, valid_paths, diff_files=chunk.files)
 
                 all_comments.extend(comments)
+                for ki in parsed.key_issues:
+                    all_key_issues.append(
+                        KeyIssue(issue=ki.issue, path=ki.path, line=ki.line)
+                    )
                 for c in comments:
                     combined_existing.append(
                         UnresolvedThread(
@@ -290,6 +296,7 @@ class ReviewEngine:
 
         return ReviewResult(
             comments=final_comments,
+            key_issues=all_key_issues,
             summary=summary,
             reviewed_files=len(filtered),
             token_usage=self.llm.usage,
