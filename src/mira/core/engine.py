@@ -286,9 +286,7 @@ class ReviewEngine:
 
                 all_comments.extend(comments)
                 for ki in parsed.key_issues:
-                    all_key_issues.append(
-                        KeyIssue(issue=ki.issue, path=ki.path, line=ki.line)
-                    )
+                    all_key_issues.append(KeyIssue(issue=ki.issue, path=ki.path, line=ki.line))
                 for c in comments:
                     combined_existing.append(
                         UnresolvedThread(

@@ -71,8 +71,10 @@ class TestIndexStoreBasic:
     def test_get_summaries_multiple(self, store, sample_summary):
         store.upsert_summary(sample_summary)
         other = FileSummary(
-            path="src/config.py", language="python",
-            summary="Configuration loader.", content_hash="def456",
+            path="src/config.py",
+            language="python",
+            summary="Configuration loader.",
+            content_hash="def456",
         )
         store.upsert_summary(other)
 
@@ -84,8 +86,10 @@ class TestIndexStoreBasic:
     def test_upsert_updates_existing(self, store, sample_summary):
         store.upsert_summary(sample_summary)
         updated = FileSummary(
-            path="src/auth/service.py", language="python",
-            summary="Updated summary.", content_hash="new_hash",
+            path="src/auth/service.py",
+            language="python",
+            summary="Updated summary.",
+            content_hash="new_hash",
         )
         store.upsert_summary(updated)
 
@@ -98,9 +102,12 @@ class TestIndexStoreBasic:
     def test_upsert_batch(self, store):
         summaries = [
             FileSummary(
-                path=f"file{i}.py", language="python",
-                summary=f"File {i}.", content_hash=f"hash{i}",
-            ) for i in range(5)
+                path=f"file{i}.py",
+                language="python",
+                summary=f"File {i}.",
+                content_hash=f"hash{i}",
+            )
+            for i in range(5)
         ]
         store.upsert_batch(summaries)
         assert len(store.all_paths()) == 5
@@ -138,12 +145,18 @@ class TestIndexStoreDependencies:
     def test_get_reverse_deps(self, store):
         # A -> B -> C (import chain)
         a = FileSummary(
-            path="a.py", language="python", summary="",
-            content_hash="h1", imports=["b.py"],
+            path="a.py",
+            language="python",
+            summary="",
+            content_hash="h1",
+            imports=["b.py"],
         )
         b = FileSummary(
-            path="b.py", language="python", summary="",
-            content_hash="h2", imports=["c.py"],
+            path="b.py",
+            language="python",
+            summary="",
+            content_hash="h2",
+            imports=["c.py"],
         )
         c = FileSummary(path="c.py", language="python", summary="", content_hash="h3")
         store.upsert_batch([a, b, c])
@@ -158,13 +171,17 @@ class TestIndexStoreBlastRadius:
     def test_blast_radius(self, store):
         # Setup: routes.py calls authenticate() from auth/service.py
         auth = FileSummary(
-            path="src/auth/service.py", language="python",
-            summary="Auth service.", content_hash="h1",
+            path="src/auth/service.py",
+            language="python",
+            summary="Auth service.",
+            content_hash="h1",
             symbols=[SymbolInfo("authenticate", "function", "def authenticate()", "Auth")],
         )
         routes = FileSummary(
-            path="src/api/routes.py", language="python",
-            summary="API routes.", content_hash="h2",
+            path="src/api/routes.py",
+            language="python",
+            summary="API routes.",
+            content_hash="h2",
             symbols=[SymbolInfo("handle_request", "function", "def handle_request()", "Handler")],
             symbol_refs=[("handle_request", "src/auth/service.py", "authenticate")],
         )

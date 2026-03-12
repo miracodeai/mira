@@ -30,12 +30,14 @@ def populated_store(store):
         summary="Handles user authentication and session management.",
         symbols=[
             SymbolInfo(
-                "authenticate", "function",
+                "authenticate",
+                "function",
                 "def authenticate(token: str) -> Session",
                 "Validates JWT",
             ),
             SymbolInfo(
-                "revoke_session", "function",
+                "revoke_session",
+                "function",
                 "def revoke_session(session_id: str) -> None",
                 "Invalidates session",
             ),
@@ -59,24 +61,30 @@ def populated_store(store):
         summary="API route handlers.",
         symbols=[
             SymbolInfo(
-                "handle_request", "function",
-                "def handle_request()", "Main request handler",
+                "handle_request",
+                "function",
+                "def handle_request()",
+                "Main request handler",
             ),
         ],
         symbol_refs=[("handle_request", "src/auth/service.py", "authenticate")],
         content_hash="h3",
     )
     store.upsert_batch([auth, models, routes])
-    store.upsert_directory(DirectorySummary(
-        path="src/auth",
-        summary="Authentication middleware and session management.",
-        file_count=2,
-    ))
-    store.upsert_directory(DirectorySummary(
-        path="src/db",
-        summary="Database models and connection management.",
-        file_count=4,
-    ))
+    store.upsert_directory(
+        DirectorySummary(
+            path="src/auth",
+            summary="Authentication middleware and session management.",
+            file_count=2,
+        )
+    )
+    store.upsert_directory(
+        DirectorySummary(
+            path="src/db",
+            summary="Database models and connection management.",
+            file_count=4,
+        )
+    )
     return store
 
 
@@ -128,6 +136,5 @@ class TestBuildCodeContext:
                 in_related = False
             if in_related and "src/db/models.py" in line:
                 pytest.fail(
-                    "Changed file src/db/models.py should not "
-                    "appear in Related Files section"
+                    "Changed file src/db/models.py should not appear in Related Files section"
                 )

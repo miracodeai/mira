@@ -41,8 +41,13 @@ async def handle_installation(
             try:
                 store = IndexStore.open(owner, repo)
                 count = await index_repo(
-                    owner=owner, repo=repo, token=token,
-                    config=config, store=store, llm=llm, full=True,
+                    owner=owner,
+                    repo=repo,
+                    token=token,
+                    config=config,
+                    store=store,
+                    llm=llm,
+                    full=True,
                 )
                 store.close()
                 logger.info("Full index complete for %s: %d files", full_name, count)
@@ -87,8 +92,13 @@ async def handle_repos_added(
             try:
                 store = IndexStore.open(owner, repo)
                 count = await index_repo(
-                    owner=owner, repo=repo, token=token,
-                    config=config, store=store, llm=llm, full=True,
+                    owner=owner,
+                    repo=repo,
+                    token=token,
+                    config=config,
+                    store=store,
+                    llm=llm,
+                    full=True,
                 )
                 store.close()
                 logger.info("Full index complete for %s: %d files", full_name, count)
@@ -145,8 +155,12 @@ async def handle_push_index(
         store = IndexStore.open(owner, repo_name)
 
         count = await index_diff(
-            owner=owner, repo=repo_name, token=token,
-            config=config, store=store, llm=llm,
+            owner=owner,
+            repo=repo_name,
+            token=token,
+            config=config,
+            store=store,
+            llm=llm,
             changed_paths=list(changed_paths),
             removed_paths=list(removed_paths),
             branch=default_branch,

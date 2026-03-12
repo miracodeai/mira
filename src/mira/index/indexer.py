@@ -23,23 +23,76 @@ _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts" / "te
 
 # File extensions we index (source code only)
 _INDEXABLE_EXTENSIONS = {
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java",
-    ".rb", ".php", ".c", ".cpp", ".h", ".hpp", ".cs", ".swift",
-    ".kt", ".scala", ".sh", ".bash", ".zsh", ".yaml", ".yml",
-    ".toml", ".json", ".sql", ".graphql", ".proto",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".rb",
+    ".php",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".swift",
+    ".kt",
+    ".scala",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".json",
+    ".sql",
+    ".graphql",
+    ".proto",
 }
 
 # Patterns to always skip (binaries, vendored code, lock files, etc.)
 _SKIP_PATTERNS = [
-    "*.lock", "*.lockb", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
-    "Pipfile.lock", "poetry.lock", "go.sum",
-    "*.min.js", "*.min.css", "*.map",
-    "*.svg", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.ico",
-    "*.woff", "*.woff2", "*.ttf", "*.eot",
-    "*.pdf", "*.zip", "*.tar.gz", "*.gz", "*.bz2",
-    "*.exe", "*.dll", "*.so", "*.dylib",
-    "node_modules/*", "vendor/*", ".git/*", "__pycache__/*",
-    "dist/*", "build/*", ".next/*", ".nuxt/*",
+    "*.lock",
+    "*.lockb",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Pipfile.lock",
+    "poetry.lock",
+    "go.sum",
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+    "*.svg",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.ico",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
+    "*.pdf",
+    "*.zip",
+    "*.tar.gz",
+    "*.gz",
+    "*.bz2",
+    "*.exe",
+    "*.dll",
+    "*.so",
+    "*.dylib",
+    "node_modules/*",
+    "vendor/*",
+    ".git/*",
+    "__pycache__/*",
+    "dist/*",
+    "build/*",
+    ".next/*",
+    ".nuxt/*",
 ]
 
 _FILE_FETCH_SEMAPHORE = 10
@@ -84,7 +137,11 @@ async def _fetch_repo_tree(owner: str, repo: str, token: str, branch: str = "mai
 
 
 async def _fetch_file_content(
-    owner: str, repo: str, path: str, token: str, ref: str = "main",
+    owner: str,
+    repo: str,
+    path: str,
+    token: str,
+    ref: str = "main",
     semaphore: asyncio.Semaphore | None = None,
 ) -> str | None:
     """Fetch a single file's content from GitHub."""
@@ -130,12 +187,14 @@ def _build_file_summary(path: str, content: str, file_data: dict) -> FileSummary
     """Convert LLM output for a single file into a FileSummary."""
     symbols = []
     for sym in file_data.get("symbols", []):
-        symbols.append(SymbolInfo(
-            name=sym.get("name", ""),
-            kind=sym.get("kind", "function"),
-            signature=sym.get("signature", ""),
-            description=sym.get("description", ""),
-        ))
+        symbols.append(
+            SymbolInfo(
+                name=sym.get("name", ""),
+                kind=sym.get("kind", "function"),
+                signature=sym.get("signature", ""),
+                description=sym.get("description", ""),
+            )
+        )
 
     symbol_refs = []
     for ref in file_data.get("symbol_references", []):
@@ -225,7 +284,10 @@ async def index_repo(
     indexable = [p for p in tree_paths if _should_index(p)]
     logger.info(
         "Found %d indexable files in %s/%s (out of %d total)",
-        len(indexable), owner, repo, len(tree_paths),
+        len(indexable),
+        owner,
+        repo,
+        len(tree_paths),
     )
 
     # Fetch content for all indexable files
@@ -249,7 +311,8 @@ async def index_repo(
 
     logger.info(
         "Indexing %d files (skipped %d unchanged)",
-        len(file_pairs), len(indexable) - len(file_pairs),
+        len(file_pairs),
+        len(indexable) - len(file_pairs),
     )
 
     # Clean up deleted files
@@ -262,7 +325,7 @@ async def index_repo(
 
     # Batch summarize
     llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)
-    batches = [file_pairs[i:i + _BATCH_SIZE] for i in range(0, len(file_pairs), _BATCH_SIZE)]
+    batches = [file_pairs[i : i + _BATCH_SIZE] for i in range(0, len(file_pairs), _BATCH_SIZE)]
 
     indexed_count = 0
     for batch in batches:
@@ -303,11 +366,13 @@ async def _summarize_directories(
             if s:
                 file_summaries.append(f"- {fp}: {s.summary}")
         if file_summaries:
-            dir_entries.append({
-                "path": dir_path or "(root)",
-                "file_count": len(file_paths),
-                "files": "\n".join(file_summaries),
-            })
+            dir_entries.append(
+                {
+                    "path": dir_path or "(root)",
+                    "file_count": len(file_paths),
+                    "files": "\n".join(file_summaries),
+                }
+            )
 
     if not dir_entries:
         return
@@ -319,8 +384,7 @@ async def _summarize_directories(
     )
     for entry in dir_entries:
         prompt += (
-            f"\n### Directory: {entry['path']} "
-            f"({entry['file_count']} files)\n{entry['files']}\n"
+            f"\n### Directory: {entry['path']} ({entry['file_count']} files)\n{entry['files']}\n"
         )
 
     messages = [
@@ -336,11 +400,13 @@ async def _summarize_directories(
                 dir_path = d.get("path", "")
                 if dir_path == "(root)":
                     dir_path = ""
-                store.upsert_directory(DirectorySummary(
-                    path=dir_path,
-                    summary=d.get("summary", ""),
-                    file_count=len(dirs.get(dir_path, [])),
-                ))
+                store.upsert_directory(
+                    DirectorySummary(
+                        path=dir_path,
+                        summary=d.get("summary", ""),
+                        file_count=len(dirs.get(dir_path, [])),
+                    )
+                )
         except Exception as exc:
             logger.warning("Directory summarization failed: %s", exc)
 
@@ -395,7 +461,7 @@ async def index_diff(
 
     # Summarize
     llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)
-    batches = [file_pairs[i:i + _BATCH_SIZE] for i in range(0, len(file_pairs), _BATCH_SIZE)]
+    batches = [file_pairs[i : i + _BATCH_SIZE] for i in range(0, len(file_pairs), _BATCH_SIZE)]
 
     indexed_count = 0
     for batch in batches:
@@ -413,11 +479,14 @@ async def index_diff(
             if dependents:
                 logger.debug(
                     "File %s has %d dependents that may need re-indexing",
-                    path, len(dependents),
+                    path,
+                    len(dependents),
                 )
 
     logger.info(
         "Incremental index: %d files re-indexed for %s/%s",
-        indexed_count, owner, repo,
+        indexed_count,
+        owner,
+        repo,
     )
     return indexed_count

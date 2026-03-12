@@ -87,7 +87,8 @@ class TestBuildFileSummary:
             "summary": "A test file.",
             "symbols": [
                 {
-                    "name": "foo", "kind": "function",
+                    "name": "foo",
+                    "kind": "function",
                     "signature": "def foo()",
                     "description": "Does foo",
                 },
@@ -121,33 +122,48 @@ class TestIndexRepo:
         store = IndexStore(str(tmp_path / "test.db"))
 
         mock_llm = AsyncMock()
-        mock_llm.complete = AsyncMock(return_value=json.dumps({
-            "files": [
+        mock_llm.complete = AsyncMock(
+            return_value=json.dumps(
                 {
-                    "path": "src/main.py",
-                    "language": "python",
-                    "summary": "Main entry point.",
-                    "symbols": [{
-                        "name": "main", "kind": "function",
-                        "signature": "def main()",
-                        "description": "Entry",
-                    }],
-                    "imports": [],
-                    "symbol_references": [],
-                },
-            ],
-        }))
+                    "files": [
+                        {
+                            "path": "src/main.py",
+                            "language": "python",
+                            "summary": "Main entry point.",
+                            "symbols": [
+                                {
+                                    "name": "main",
+                                    "kind": "function",
+                                    "signature": "def main()",
+                                    "description": "Entry",
+                                }
+                            ],
+                            "imports": [],
+                            "symbol_references": [],
+                        },
+                    ],
+                }
+            )
+        )
 
-        with patch(
-            "mira.index.indexer._fetch_repo_tree",
-            return_value=["src/main.py", "README.md"],
-        ), patch(
-            "mira.index.indexer._fetch_file_content",
-            return_value="print('hello')",
+        with (
+            patch(
+                "mira.index.indexer._fetch_repo_tree",
+                return_value=["src/main.py", "README.md"],
+            ),
+            patch(
+                "mira.index.indexer._fetch_file_content",
+                return_value="print('hello')",
+            ),
         ):
             count = await index_repo(
-                owner="test", repo="repo", token="fake-token",
-                config=MiraConfig(), store=store, llm=mock_llm, full=True,
+                owner="test",
+                repo="repo",
+                token="fake-token",
+                config=MiraConfig(),
+                store=store,
+                llm=mock_llm,
+                full=True,
             )
 
         assert count == 1
@@ -164,23 +180,31 @@ class TestIndexDiff:
         store = IndexStore(str(tmp_path / "test.db"))
 
         mock_llm = AsyncMock()
-        mock_llm.complete = AsyncMock(return_value=json.dumps({
-            "files": [
+        mock_llm.complete = AsyncMock(
+            return_value=json.dumps(
                 {
-                    "path": "src/utils.py",
-                    "language": "python",
-                    "summary": "Utility functions.",
-                    "symbols": [],
-                    "imports": [],
-                    "symbol_references": [],
-                },
-            ],
-        }))
+                    "files": [
+                        {
+                            "path": "src/utils.py",
+                            "language": "python",
+                            "summary": "Utility functions.",
+                            "symbols": [],
+                            "imports": [],
+                            "symbol_references": [],
+                        },
+                    ],
+                }
+            )
+        )
 
         with patch("mira.index.indexer._fetch_file_content", return_value="def helper(): pass"):
             count = await index_diff(
-                owner="test", repo="repo", token="fake-token",
-                config=MiraConfig(), store=store, llm=mock_llm,
+                owner="test",
+                repo="repo",
+                token="fake-token",
+                config=MiraConfig(),
+                store=store,
+                llm=mock_llm,
                 changed_paths=["src/utils.py"],
             )
 
@@ -191,17 +215,26 @@ class TestIndexDiff:
     async def test_index_diff_removes_deleted(self, tmp_path):
         store = IndexStore(str(tmp_path / "test.db"))
         from mira.index.store import FileSummary
-        store.upsert_summary(FileSummary(
-            path="old.py", language="python",
-            summary="Old.", content_hash="h",
-        ))
+
+        store.upsert_summary(
+            FileSummary(
+                path="old.py",
+                language="python",
+                summary="Old.",
+                content_hash="h",
+            )
+        )
 
         mock_llm = AsyncMock()
         mock_llm.complete = AsyncMock(return_value='{"files": []}')
 
         await index_diff(
-            owner="test", repo="repo", token="fake-token",
-            config=MiraConfig(), store=store, llm=mock_llm,
+            owner="test",
+            repo="repo",
+            token="fake-token",
+            config=MiraConfig(),
+            store=store,
+            llm=mock_llm,
             removed_paths=["old.py"],
         )
 
