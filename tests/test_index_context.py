@@ -29,8 +29,16 @@ def populated_store(store):
         language="python",
         summary="Handles user authentication and session management.",
         symbols=[
-            SymbolInfo("authenticate", "function", "def authenticate(token: str) -> Session", "Validates JWT"),
-            SymbolInfo("revoke_session", "function", "def revoke_session(session_id: str) -> None", "Invalidates session"),
+            SymbolInfo(
+                "authenticate", "function",
+                "def authenticate(token: str) -> Session",
+                "Validates JWT",
+            ),
+            SymbolInfo(
+                "revoke_session", "function",
+                "def revoke_session(session_id: str) -> None",
+                "Invalidates session",
+            ),
         ],
         imports=["src/db/models.py", "src/config.py"],
         content_hash="h1",
@@ -50,14 +58,25 @@ def populated_store(store):
         language="python",
         summary="API route handlers.",
         symbols=[
-            SymbolInfo("handle_request", "function", "def handle_request()", "Main request handler"),
+            SymbolInfo(
+                "handle_request", "function",
+                "def handle_request()", "Main request handler",
+            ),
         ],
         symbol_refs=[("handle_request", "src/auth/service.py", "authenticate")],
         content_hash="h3",
     )
     store.upsert_batch([auth, models, routes])
-    store.upsert_directory(DirectorySummary(path="src/auth", summary="Authentication middleware and session management.", file_count=2))
-    store.upsert_directory(DirectorySummary(path="src/db", summary="Database models and connection management.", file_count=4))
+    store.upsert_directory(DirectorySummary(
+        path="src/auth",
+        summary="Authentication middleware and session management.",
+        file_count=2,
+    ))
+    store.upsert_directory(DirectorySummary(
+        path="src/db",
+        summary="Database models and connection management.",
+        file_count=4,
+    ))
     return store
 
 
@@ -98,7 +117,8 @@ class TestBuildCodeContext:
     def test_no_self_reference_in_related(self, populated_store):
         """Changed files should not appear in the 'related files' section."""
         ctx = build_code_context(["src/auth/service.py", "src/db/models.py"], populated_store)
-        # models.py is imported by service.py but since it's also changed, it shouldn't be in "Related Files"
+        # models.py is imported by service.py but since it's also changed,
+        # it shouldn't be in "Related Files"
         lines = ctx.split("\n")
         in_related = False
         for line in lines:
@@ -107,4 +127,7 @@ class TestBuildCodeContext:
             elif line.startswith("###"):
                 in_related = False
             if in_related and "src/db/models.py" in line:
-                pytest.fail("Changed file src/db/models.py should not appear in Related Files section")
+                pytest.fail(
+                    "Changed file src/db/models.py should not "
+                    "appear in Related Files section"
+                )

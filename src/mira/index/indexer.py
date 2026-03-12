@@ -223,7 +223,10 @@ async def index_repo(
     # Fetch repo tree
     tree_paths = await _fetch_repo_tree(owner, repo, token, branch)
     indexable = [p for p in tree_paths if _should_index(p)]
-    logger.info("Found %d indexable files in %s/%s (out of %d total)", len(indexable), owner, repo, len(tree_paths))
+    logger.info(
+        "Found %d indexable files in %s/%s (out of %d total)",
+        len(indexable), owner, repo, len(tree_paths),
+    )
 
     # Fetch content for all indexable files
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
@@ -235,7 +238,7 @@ async def index_repo(
 
     # Filter out failed fetches and compute hashes for staleness check
     file_pairs: list[tuple[str, str]] = []
-    for path, content in zip(indexable, contents):
+    for path, content in zip(indexable, contents, strict=False):
         if content is None:
             continue
         if not full:
@@ -244,7 +247,10 @@ async def index_repo(
                 continue
         file_pairs.append((path, content))
 
-    logger.info("Indexing %d files (skipped %d unchanged)", len(file_pairs), len(indexable) - len(file_pairs))
+    logger.info(
+        "Indexing %d files (skipped %d unchanged)",
+        len(file_pairs), len(indexable) - len(file_pairs),
+    )
 
     # Clean up deleted files
     existing_paths = store.all_paths()
@@ -312,7 +318,10 @@ async def _summarize_directories(
         '{"directories": [{"path": "...", "summary": "..."}]}\n\n'
     )
     for entry in dir_entries:
-        prompt += f"\n### Directory: {entry['path']} ({entry['file_count']} files)\n{entry['files']}\n"
+        prompt += (
+            f"\n### Directory: {entry['path']} "
+            f"({entry['file_count']} files)\n{entry['files']}\n"
+        )
 
     messages = [
         {"role": "system", "content": prompt},
@@ -377,7 +386,7 @@ async def index_diff(
     contents = await asyncio.gather(*tasks)
 
     file_pairs: list[tuple[str, str]] = []
-    for path, content in zip(to_index, contents):
+    for path, content in zip(to_index, contents, strict=False):
         if content is not None:
             file_pairs.append((path, content))
 
@@ -397,12 +406,18 @@ async def index_diff(
             indexed_count += 1
 
     # Re-index dependents if exported symbols changed
-    for path, content in file_pairs:
+    for path, _content in file_pairs:
         existing = store.get_summary(path)
         if existing:
             dependents = store.get_dependents(path)
             if dependents:
-                logger.debug("File %s has %d dependents that may need re-indexing", path, len(dependents))
+                logger.debug(
+                    "File %s has %d dependents that may need re-indexing",
+                    path, len(dependents),
+                )
 
-    logger.info("Incremental index: %d files re-indexed for %s/%s", indexed_count, owner, repo)
+    logger.info(
+        "Incremental index: %d files re-indexed for %s/%s",
+        indexed_count, owner, repo,
+    )
     return indexed_count

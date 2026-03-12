@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
@@ -72,7 +71,8 @@ class FileSummary:
     summary: str
     symbols: list[SymbolInfo] = field(default_factory=list)
     imports: list[str] = field(default_factory=list)
-    symbol_refs: list[tuple[str, str, str]] = field(default_factory=list)  # (source_symbol, target_path, target_symbol)
+    # (source_symbol, target_path, target_symbol)
+    symbol_refs: list[tuple[str, str, str]] = field(default_factory=list)
     content_hash: str = ""
     updated_at: float = 0.0
 
@@ -185,7 +185,8 @@ class IndexStore:
         self._conn.execute("DELETE FROM symbols WHERE file_path = ?", (summary.path,))
         for sym in summary.symbols:
             self._conn.execute(
-                "INSERT INTO symbols (file_path, name, kind, signature, description) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO symbols (file_path, name, kind, signature, description) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (summary.path, sym.name, sym.kind, sym.signature, sym.description),
             )
         # Replace imports
@@ -199,7 +200,9 @@ class IndexStore:
         self._conn.execute("DELETE FROM symbol_refs WHERE source_path = ?", (summary.path,))
         for src_sym, tgt_path, tgt_sym in summary.symbol_refs:
             self._conn.execute(
-                "INSERT INTO symbol_refs (source_path, source_symbol, target_path, target_symbol) VALUES (?, ?, ?, ?)",
+                "INSERT INTO symbol_refs "
+                "(source_path, source_symbol, target_path, target_symbol) "
+                "VALUES (?, ?, ?, ?)",
                 (summary.path, src_sym, tgt_path, tgt_sym),
             )
         self._conn.commit()
@@ -237,7 +240,8 @@ class IndexStore:
     def get_call_graph(self, path: str, symbol: str) -> list[tuple[str, str]]:
         """Who calls this symbol? Returns list of (file_path, calling_symbol)."""
         rows = self._conn.execute(
-            "SELECT source_path, source_symbol FROM symbol_refs WHERE target_path = ? AND target_symbol = ?",
+            "SELECT source_path, source_symbol FROM symbol_refs "
+            "WHERE target_path = ? AND target_symbol = ?",
             (path, symbol),
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
@@ -328,7 +332,8 @@ class IndexStore:
 
     def _load_symbol_refs(self, path: str) -> list[tuple[str, str, str]]:
         rows = self._conn.execute(
-            "SELECT source_symbol, target_path, target_symbol FROM symbol_refs WHERE source_path = ?",
+            "SELECT source_symbol, target_path, target_symbol "
+            "FROM symbol_refs WHERE source_path = ?",
             (path,),
         ).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]

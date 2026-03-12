@@ -123,7 +123,6 @@ async def handle_push_index(
 
         owner = payload["repository"]["owner"]["login"]
         repo_name = payload["repository"]["name"]
-        ref = payload.get("ref", "")
         default_branch = payload.get("repository", {}).get("default_branch", "main")
 
         # Extract changed and removed paths from commits

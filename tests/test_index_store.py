@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-
 import pytest
 
 from mira.index.store import (
-    BlastRadiusEntry,
     DirectorySummary,
     FileSummary,
     IndexStore,
@@ -101,8 +97,10 @@ class TestIndexStoreBasic:
 
     def test_upsert_batch(self, store):
         summaries = [
-            FileSummary(path=f"file{i}.py", language="python", summary=f"File {i}.", content_hash=f"hash{i}")
-            for i in range(5)
+            FileSummary(
+                path=f"file{i}.py", language="python",
+                summary=f"File {i}.", content_hash=f"hash{i}",
+            ) for i in range(5)
         ]
         store.upsert_batch(summaries)
         assert len(store.all_paths()) == 5
@@ -139,8 +137,14 @@ class TestIndexStoreDependencies:
 
     def test_get_reverse_deps(self, store):
         # A -> B -> C (import chain)
-        a = FileSummary(path="a.py", language="python", summary="", content_hash="h1", imports=["b.py"])
-        b = FileSummary(path="b.py", language="python", summary="", content_hash="h2", imports=["c.py"])
+        a = FileSummary(
+            path="a.py", language="python", summary="",
+            content_hash="h1", imports=["b.py"],
+        )
+        b = FileSummary(
+            path="b.py", language="python", summary="",
+            content_hash="h2", imports=["c.py"],
+        )
         c = FileSummary(path="c.py", language="python", summary="", content_hash="h3")
         store.upsert_batch([a, b, c])
 
