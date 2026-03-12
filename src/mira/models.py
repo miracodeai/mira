@@ -137,10 +137,11 @@ class ReviewComment:
 
 
 @dataclass
-class WalkthroughQualityScore:
-    """Code quality score for a PR."""
+class WalkthroughConfidenceScore:
+    """Confidence score for merge readiness."""
 
     score: int
+    label: str
     reason: str
 
 
@@ -168,10 +169,9 @@ class WalkthroughResult:
     """Result of the PR walkthrough generation."""
 
     summary: str = ""
-    pr_type: list[str] = field(default_factory=list)
     file_changes: list[WalkthroughFileEntry] = field(default_factory=list)
     effort: WalkthroughEffort | None = None
-    quality_score: WalkthroughQualityScore | None = None
+    confidence_score: WalkthroughConfidenceScore | None = None
     sequence_diagram: str | None = None
 
     def to_markdown(
@@ -184,78 +184,19 @@ class WalkthroughResult:
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
 
-        if self.pr_type:
-            parts.append("")
-            parts.append(f"**Type:** {', '.join(self.pr_type)}")
-
-        if self.quality_score:
-            parts.append("")
-            parts.append(
-                f"**Quality:** {self.quality_score.score}/100 \u2014 {self.quality_score.reason}"
-            )
-
-        if self.effort:
-            parts.append("")
-            e = self.effort
-            parts.append(
-                f"**Estimated effort:** {e.level} ({e.label}) \u00b7 \u23f1\ufe0f ~{e.minutes} min"
-            )
-
-        if self.file_changes:
-            parts.append("")
-            parts.append("### Changes")
-
-            # Check if any files have group labels
-            has_groups = any(fc.group for fc in self.file_changes)
-
-            def _file_row(fc: WalkthroughFileEntry) -> str:
-                change = fc.change_type.value.capitalize()
-                return f"| `{fc.path}` | {change} | {fc.description} |"
-
-            if has_groups:
-                # Collect groups preserving order of first appearance
-                groups: dict[str, list[WalkthroughFileEntry]] = {}
-                for fc in self.file_changes:
-                    label = fc.group or "Other"
-                    groups.setdefault(label, []).append(fc)
-                for label, entries in groups.items():
-                    parts.append("")
-                    parts.append(f"**{label}**")
-                    parts.append("")
-                    parts.append("| File | Change | Description |")
-                    parts.append("|------|--------|-------------|")
-                    for fc in entries:
-                        parts.append(_file_row(fc))
-            else:
-                parts.append("")
-                parts.append("| File | Change | Description |")
-                parts.append("|------|--------|-------------|")
-                for fc in self.file_changes:
-                    parts.append(_file_row(fc))
-
-        if review_stats or existing_issues:
-            new_total = sum(review_stats.values()) if review_stats else 0
-            total = new_total + existing_issues
-            parts.append("")
-            parts.append("### Review Status")
-            parts.append("")
-            parts.append(f"Found **{total}** issue{'s' if total != 1 else ''}:")
-            parts.append("")
-            parts.append("| Severity | Count |")
-            parts.append("|----------|-------|")
-            if review_stats:
-                for sev in sorted(review_stats, reverse=True):
-                    parts.append(f"| {sev.emoji} {sev.name.capitalize()} | {review_stats[sev]} |")
-            if existing_issues:
-                parts.append(f"| \U0001f4cc Existing | {existing_issues} |")
-
         if self.sequence_diagram:
-            parts.append("")
-            parts.append("### Sequence Diagram")
             parts.append("")
             parts.append("```mermaid")
             parts.append(self.sequence_diagram)
             parts.append("```")
+
+        if self.confidence_score:
+            parts.append("")
+            cs = self.confidence_score
+            label = cs.label.upper() if cs.label else ""
+            parts.append(f"**{cs.score}/5** {label}")
+            if cs.reason:
+                parts.append(f"> {cs.reason}")
 
         parts.append("")
         parts.append("---")

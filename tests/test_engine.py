@@ -402,19 +402,17 @@ class TestReviewEngine:
         assert result.reviewed_files > 0
 
     @pytest.mark.asyncio
-    async def test_walkthrough_includes_review_stats(
+    async def test_walkthrough_posted_with_summary(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
-        """Walkthrough markdown includes review stats when comments exist."""
+        """Walkthrough markdown is posted and includes the summary."""
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
         # The walkthrough was posted — grab the markdown that was passed
         mock_provider.post_comment.assert_called_once()
         posted_markdown = mock_provider.post_comment.call_args[0][1]
-        # The sample LLM response produces comments, so stats should be present
-        assert "### Review Status" in posted_markdown
-        assert "Found **" in posted_markdown
+        assert "## Mira PR Walkthrough" in posted_markdown
 
     @pytest.mark.asyncio
     async def test_walkthrough_omits_review_stats_when_no_comments(self, mock_provider: AsyncMock):
