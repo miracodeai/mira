@@ -9,6 +9,7 @@ import logging
 import os
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Any
 
 import httpx
 from jinja2 import Environment, FileSystemLoader
@@ -169,21 +170,22 @@ async def _fetch_file_content(
     return await _fetch()
 
 
-def _parse_summarize_response(raw: str) -> list[dict]:
+def _parse_summarize_response(raw: str) -> list[dict[str, Any]]:
     """Parse the LLM response from the summarization prompt."""
     try:
         data = json.loads(raw)
         if isinstance(data, dict) and "files" in data:
-            return data["files"]
+            result: list[dict[str, Any]] = data["files"]
+            return result
         if isinstance(data, list):
-            return data
+            return list(data)
         return []
     except (json.JSONDecodeError, TypeError):
         logger.warning("Failed to parse summarization response")
         return []
 
 
-def _build_file_summary(path: str, content: str, file_data: dict) -> FileSummary:
+def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> FileSummary:
     """Convert LLM output for a single file into a FileSummary."""
     symbols = []
     for sym in file_data.get("symbols", []):
@@ -220,7 +222,7 @@ async def _summarize_batch(
     files: list[tuple[str, str]],  # (path, content)
     llm: LLMProvider,
     semaphore: asyncio.Semaphore,
-) -> list[tuple[str, str, dict]]:
+) -> list[tuple[str, str, dict[str, Any]]]:
     """Summarize a batch of files using the LLM. Returns (path, content, data) triples."""
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATE_DIR)),

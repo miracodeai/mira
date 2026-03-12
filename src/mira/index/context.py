@@ -57,9 +57,9 @@ def build_code_context(
     # 3. Related files (imported by changed files)
     import_paths: set[str] = set()
     for path in changed_paths:
-        fs = changed_summaries.get(path)
-        if fs:
-            import_paths.update(fs.imports)
+        changed_fs = changed_summaries.get(path)
+        if changed_fs:
+            import_paths.update(changed_fs.imports)
     # Exclude changed files themselves
     import_paths -= set(changed_paths)
 
