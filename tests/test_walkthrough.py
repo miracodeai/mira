@@ -19,7 +19,6 @@ from mira.models import (
     HunkInfo,
     ReviewComment,
     Severity,
-    WalkthroughEffort,
     WalkthroughFileEntry,
     WalkthroughResult,
     build_review_stats,
