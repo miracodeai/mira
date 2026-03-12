@@ -29,6 +29,7 @@ def build_review_prompt(
     pr_title: str = "",
     pr_description: str = "",
     existing_comments: list[UnresolvedThread] | None = None,
+    code_context: str = "",
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -57,11 +58,18 @@ def build_review_prompt(
         max_comments=config.filter.max_comments,
         focus_only_on_problems=config.review.focus_only_on_problems,
         existing_comments=cleaned_comments,
+        has_code_context=bool(code_context),
     )
+
+    # Build user message with optional code context before diffs
+    user_parts = []
+    if code_context:
+        user_parts.append(code_context)
+    user_parts.extend(file_contexts)
 
     return [
         {"role": "system", "content": system_content},
-        {"role": "user", "content": "\n\n".join(file_contexts)},
+        {"role": "user", "content": "\n\n".join(user_parts)},
     ]
 
 

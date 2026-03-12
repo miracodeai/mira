@@ -12,6 +12,8 @@ from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
 from mira.core.file_filter import filter_files
 from mira.exceptions import ResponseParseError
+from mira.index.context import build_code_context
+from mira.index.store import IndexStore
 from mira.llm.prompts.review import build_review_prompt, build_walkthrough_prompt
 from mira.llm.prompts.verify_fixes import build_verify_fixes_prompt, parse_verify_fixes_response
 from mira.llm.provider import LLMProvider
@@ -106,6 +108,7 @@ class ReviewEngine:
             raise RuntimeError("A provider is required for PR review")
 
         pr_info = await self.provider.get_pr_info(pr_url)
+        self._pr_info = pr_info
 
         # Resolve previously-posted threads that are now fixed
         llm_resolved = 0
@@ -229,6 +232,22 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Walkthrough generation failed, skipping: %s", exc)
 
+        # Build code context from index
+        code_context_block = ""
+        if self.config.review.code_context:
+            try:
+                pr_info = getattr(self, "_pr_info", None)
+                if pr_info is not None:
+                    store = IndexStore.open(pr_info.owner, pr_info.repo)
+                    code_context_block = build_code_context(
+                        changed_paths=[f.path for f in filtered],
+                        store=store,
+                        token_budget=self.config.review.context_token_budget,
+                    )
+                    store.close()
+            except Exception as exc:
+                logger.warning("Code context lookup failed, continuing without: %s", exc)
+
         # Expand context
         expanded = expand_context(filtered, self.config.review.context_lines)
 
@@ -258,6 +277,7 @@ class ReviewEngine:
                     pr_title=pr_title,
                     pr_description=pr_description,
                     existing_comments=list(combined_existing) or None,
+                    code_context=code_context_block,
                 )
 
                 raw_response = await self.llm.complete(messages)

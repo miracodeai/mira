@@ -22,6 +22,11 @@ from mira.github_app.handlers import (
     handle_pull_request,
     handle_thread_reject,
 )
+from mira.github_app.index_handlers import (
+    handle_installation,
+    handle_push_index,
+    handle_repos_added,
+)
 from mira.github_app.metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -201,6 +206,34 @@ def create_app(
                 background_tasks.add_task(
                     handle_thread_reject, payload, app_auth, bot_name, metrics
                 )
+                return Response(
+                    content='{"status": "processing"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
+
+        # Indexing events: installation, repos added, push to default branch
+        if event == "installation" and action == "created":
+            background_tasks.add_task(handle_installation, payload, app_auth, bot_name, metrics)
+            return Response(
+                content='{"status": "processing"}',
+                status_code=200,
+                media_type="application/json",
+            )
+
+        if event == "installation_repositories" and action == "added":
+            background_tasks.add_task(handle_repos_added, payload, app_auth, bot_name, metrics)
+            return Response(
+                content='{"status": "processing"}',
+                status_code=200,
+                media_type="application/json",
+            )
+
+        if event == "push":
+            ref = payload.get("ref", "")
+            default_branch = payload.get("repository", {}).get("default_branch", "main")
+            if ref == f"refs/heads/{default_branch}":
+                background_tasks.add_task(handle_push_index, payload, app_auth, bot_name, metrics)
                 return Response(
                     content='{"status": "processing"}',
                     status_code=200,
