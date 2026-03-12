@@ -13,7 +13,7 @@ from github import Github, GithubException
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from mira.exceptions import ProviderError
-from mira.models import PRInfo, ReviewComment, ReviewResult, Severity, UnresolvedThread
+from mira.models import KeyIssue, PRInfo, ReviewComment, ReviewResult, Severity, UnresolvedThread
 from mira.providers.base import BaseProvider
 
 # Transient errors worth retrying — network issues and GitHub server errors.
@@ -93,6 +93,9 @@ _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
     "bug": ("\U0001f41b", "Bug"),
     "security": ("\U0001f512", "Security issue"),
     "performance": ("\u26a1", "Performance"),
+    "error-handling": ("\u26a0\ufe0f", "Error Handling"),
+    "race-condition": ("\U0001f3c1", "Race Condition"),
+    "resource-leak": ("\U0001f4a7", "Resource Leak"),
     "maintainability": ("\U0001f527", "Refactor suggestion"),
     "style": ("\U0001f3a8", "Style"),
     "clarity": ("\U0001f4dd", "Clarity"),
@@ -210,6 +213,8 @@ class GitHubProvider(BaseProvider):
         review_body = ""
         if result.summary:
             review_body = f"**Mira Review Summary**\n\n{result.summary}"
+        if result.key_issues:
+            review_body += _format_key_issues(result.key_issues)
 
         @_retry_transient
         def _post() -> None:
@@ -562,6 +567,21 @@ class GitHubProvider(BaseProvider):
 
         thread_id: str = thread["id"]
         return thread_id
+
+
+def _format_key_issues(key_issues: list[KeyIssue]) -> str:
+    """Format key issues as a markdown table for the review body."""
+    lines = [
+        "",
+        "",
+        "### Key Issues",
+        "",
+        "| | Issue | Location |",
+        "|---|---|---|",
+    ]
+    for ki in key_issues:
+        lines.append(f"| :red_circle: | {ki.issue} | `{ki.path}:{ki.line}` |")
+    return "\n".join(lines)
 
 
 def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -> str:

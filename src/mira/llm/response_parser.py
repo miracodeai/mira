@@ -14,6 +14,7 @@ from mira.models import (
     FileDiff,
     ReviewComment,
     Severity,
+    WalkthroughConfidenceScore,
     WalkthroughEffort,
     WalkthroughFileEntry,
     WalkthroughResult,
@@ -34,6 +35,12 @@ class LLMComment(BaseModel):
     existing_code: str = ""
 
 
+class LLMKeyIssue(BaseModel):
+    issue: str = ""
+    path: str = ""
+    line: int = 0
+
+
 class LLMMetadata(BaseModel):
     reviewed_files: int = 0
     skipped_reason: str | None = None
@@ -41,6 +48,7 @@ class LLMMetadata(BaseModel):
 
 class LLMReviewResponse(BaseModel):
     comments: list[LLMComment] = Field(default_factory=list)
+    key_issues: list[LLMKeyIssue] = Field(default_factory=list)
     summary: str = ""
     metadata: LLMMetadata = Field(default_factory=LLMMetadata)
 
@@ -144,10 +152,17 @@ class LLMWalkthroughEffort(BaseModel):
     minutes: int = 15
 
 
+class LLMWalkthroughConfidenceScore(BaseModel):
+    score: int = 3
+    label: str = ""
+    reason: str = ""
+
+
 class LLMWalkthroughResponse(BaseModel):
     summary: str = ""
     change_groups: list[LLMWalkthroughChangeGroup] = Field(default_factory=list)
     effort: LLMWalkthroughEffort | None = None
+    confidence_score: LLMWalkthroughConfidenceScore | None = None
     sequence_diagram: str | None = None
 
 
@@ -198,9 +213,17 @@ def convert_to_walkthrough_result(response: LLMWalkthroughResponse) -> Walkthrou
             label=response.effort.label,
             minutes=response.effort.minutes,
         )
+    confidence_score: WalkthroughConfidenceScore | None = None
+    if response.confidence_score:
+        confidence_score = WalkthroughConfidenceScore(
+            score=response.confidence_score.score,
+            label=response.confidence_score.label,
+            reason=response.confidence_score.reason,
+        )
     return WalkthroughResult(
         summary=response.summary,
         file_changes=entries,
         effort=effort,
+        confidence_score=confidence_score,
         sequence_diagram=response.sequence_diagram,
     )

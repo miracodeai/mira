@@ -65,6 +65,8 @@ class ReviewConfig(BaseModel):
     focus_only_on_problems: bool = False
     walkthrough: bool = True
     walkthrough_sequence_diagram: bool = True
+    code_context: bool = True
+    context_token_budget: int = 8_000
 
 
 class ProviderConfig(BaseModel):

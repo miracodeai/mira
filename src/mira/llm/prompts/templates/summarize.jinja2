@@ -1,0 +1,47 @@
+You are a code indexing assistant. For each file provided below, generate:
+1. A 1-3 sentence summary of what the file does
+2. A list of exported symbols (functions, classes, constants) with their signatures and one-line descriptions
+3. A list of import paths (resolved to repo-relative paths where possible)
+4. A list of symbol references: for each function/method, which external symbols it calls
+
+Respond in JSON with this structure (no markdown fences):
+
+{
+  "files": [
+    {
+      "path": "relative/path/to/file.ext",
+      "language": "python",
+      "summary": "Brief description of what this file does.",
+      "symbols": [
+        {
+          "name": "function_name",
+          "kind": "function",
+          "signature": "def function_name(param: Type) -> ReturnType",
+          "description": "One-line description of what it does"
+        }
+      ],
+      "imports": ["src/other/module.py", "src/utils/helpers.py"],
+      "symbol_references": [
+        {
+          "source": "function_name",
+          "calls": [
+            {"path": "src/other/module.py", "symbol": "other_function"},
+            {"path": "src/utils/helpers.py", "symbol": "helper"}
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+Be concise — these summaries will be used as context for code reviews, not as documentation. Only include exported/public symbols. Resolve relative imports to repo-relative paths.
+
+## Files to Summarize
+
+{% for file in files %}
+### {{ file.path }}
+```
+{{ file.content }}
+```
+
+{% endfor %}

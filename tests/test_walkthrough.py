@@ -19,7 +19,6 @@ from mira.models import (
     HunkInfo,
     ReviewComment,
     Severity,
-    WalkthroughEffort,
     WalkthroughFileEntry,
     WalkthroughResult,
     build_review_stats,
@@ -240,7 +239,7 @@ class TestConvertToWalkthroughResult:
 
 
 class TestWalkthroughToMarkdown:
-    def test_grouped_markdown(self):
+    def test_summary_rendered(self):
         result = WalkthroughResult(
             summary="Added new features.",
             file_changes=[
@@ -250,44 +249,16 @@ class TestWalkthroughToMarkdown:
                     description="New utils",
                     group="Core",
                 ),
-                WalkthroughFileEntry(
-                    path="tests/test_utils.py",
-                    change_type=FileChangeType.ADDED,
-                    description="Tests for utils",
-                    group="Tests",
-                ),
             ],
         )
         md = result.to_markdown()
         assert "## Mira PR Walkthrough" in md
         assert "Added new features." in md
-        assert "**Core**" in md
-        assert "| `src/utils.py` | Added | New utils |" in md
-        assert "**Tests**" in md
-        assert "| `tests/test_utils.py` | Added | Tests for utils |" in md
         lines = md.split("\n")
         assert "---" in lines, "Expected separator '---' in markdown output"
         separator_idx = len(lines) - 1 - lines[::-1].index("---")
         footer_text = "\n".join(lines[separator_idx:])
         assert "@miracodeai help" in footer_text
-
-    def test_flat_fallback_when_no_groups(self):
-        result = WalkthroughResult(
-            summary="Simple change.",
-            file_changes=[
-                WalkthroughFileEntry(
-                    path="src/utils.py",
-                    change_type=FileChangeType.ADDED,
-                    description="New utils",
-                ),
-            ],
-        )
-        md = result.to_markdown()
-        assert "## Mira PR Walkthrough" in md
-        assert "| `src/utils.py` | Added | New utils |" in md
-        # No group headers in flat mode
-        assert "**Core**" not in md
-        assert "**Other**" not in md
 
     def test_with_sequence_diagram(self):
         result = WalkthroughResult(
@@ -295,7 +266,6 @@ class TestWalkthroughToMarkdown:
             sequence_diagram="sequenceDiagram\n    A->>B: call",
         )
         md = result.to_markdown()
-        assert "### Sequence Diagram" in md
         assert "```mermaid" in md
         assert "sequenceDiagram" in md
 
@@ -311,20 +281,24 @@ class TestWalkthroughToMarkdown:
         assert "### Sequence Diagram" not in md
         assert "```mermaid" not in md
 
-    def test_with_effort(self):
+    def test_with_confidence_score(self):
+        from mira.models import WalkthroughConfidenceScore
+
         result = WalkthroughResult(
             summary="Changes.",
-            effort=WalkthroughEffort(level=3, label="Moderate", minutes=20),
+            confidence_score=WalkthroughConfidenceScore(
+                score=4, label="Safe with minor fixes", reason="Looks good overall."
+            ),
         )
         md = result.to_markdown()
-        assert "**Estimated effort:**" in md
-        assert "3 (Moderate)" in md
-        assert "\u23f1\ufe0f ~20 min" in md
+        assert "**4/5**" in md
+        assert "SAFE WITH MINOR FIXES" in md
+        assert "Looks good overall." in md
 
-    def test_no_effort_no_section(self):
-        result = WalkthroughResult(summary="No effort.")
+    def test_no_confidence_score_no_section(self):
+        result = WalkthroughResult(summary="No score.")
         md = result.to_markdown()
-        assert "**Estimated effort:**" not in md
+        assert "/5" not in md
 
     def test_help_footer(self):
         result = WalkthroughResult(summary="Footer test.")
@@ -348,68 +322,15 @@ class TestWalkthroughToMarkdown:
         assert md.startswith(WALKTHROUGH_MARKER)
         assert md.count(WALKTHROUGH_MARKER) == 1
 
-    def test_review_stats_rendered(self):
+    def test_review_stats_params_accepted(self):
+        """to_markdown still accepts review_stats/existing_issues params without error."""
         result = WalkthroughResult(summary="Changes.")
-        stats = {Severity.BLOCKER: 1, Severity.WARNING: 2, Severity.NITPICK: 1}
-        md = result.to_markdown(review_stats=stats)
-        assert "### Review Status" in md
-        assert "Found **4** issues:" in md
-        assert "Blocker" in md
-        assert "Warning" in md
-        assert "Nitpick" in md
-        # Zero-count severities omitted
-        assert "Suggestion" not in md
-
-    def test_review_stats_severity_order(self):
-        result = WalkthroughResult(summary="Changes.")
-        stats = {Severity.NITPICK: 1, Severity.BLOCKER: 2, Severity.SUGGESTION: 3}
-        md = result.to_markdown(review_stats=stats)
-        lines = md.split("\n")
-        sev_lines = [ln for ln in lines if "Blocker" in ln or "Suggestion" in ln or "Nitpick" in ln]
-        assert len(sev_lines) == 3
-        assert "Blocker" in sev_lines[0]
-        assert "Suggestion" in sev_lines[1]
-        assert "Nitpick" in sev_lines[2]
-
-    def test_review_stats_none_omits_section(self):
-        result = WalkthroughResult(summary="No stats.")
-        md = result.to_markdown(review_stats=None)
-        assert "### Review Status" not in md
-
-    def test_review_stats_empty_omits_section(self):
-        result = WalkthroughResult(summary="No stats.")
-        md = result.to_markdown(review_stats={})
-        assert "### Review Status" not in md
-
-    def test_review_stats_single_issue_grammar(self):
-        result = WalkthroughResult(summary="Changes.")
-        stats = {Severity.BLOCKER: 1}
-        md = result.to_markdown(review_stats=stats)
-        assert "Found **1** issue:" in md
-
-    def test_existing_issues_included_in_total(self):
-        result = WalkthroughResult(summary="Changes.")
-        stats = {Severity.WARNING: 2}
+        stats = {Severity.BLOCKER: 1, Severity.WARNING: 2}
         md = result.to_markdown(review_stats=stats, existing_issues=3)
-        assert "Found **5** issues:" in md
-        assert "Existing" in md
-        assert "| 3 |" in md
+        assert "## Mira PR Walkthrough" in md
 
-    def test_existing_issues_only(self):
-        result = WalkthroughResult(summary="Changes.")
-        md = result.to_markdown(review_stats=None, existing_issues=4)
-        assert "### Review Status" in md
-        assert "Found **4** issues:" in md
-        assert "Existing" in md
-
-    def test_existing_issues_zero_omitted(self):
-        result = WalkthroughResult(summary="Changes.")
-        stats = {Severity.WARNING: 1}
-        md = result.to_markdown(review_stats=stats, existing_issues=0)
-        assert "Existing" not in md
-        assert "Found **1** issue:" in md
-
-    def test_review_stats_between_changes_and_diagram(self):
+    def test_clean_output_no_changes_table(self):
+        """Walkthrough markdown does not include a changes table."""
         result = WalkthroughResult(
             summary="Changes.",
             file_changes=[
@@ -417,14 +338,10 @@ class TestWalkthroughToMarkdown:
                     path="a.py", change_type=FileChangeType.ADDED, description="New file"
                 ),
             ],
-            sequence_diagram="sequenceDiagram\n    A->>B: call",
         )
-        stats = {Severity.WARNING: 1}
-        md = result.to_markdown(review_stats=stats)
-        changes_idx = md.index("### Changes")
-        status_idx = md.index("### Review Status")
-        diagram_idx = md.index("### Sequence Diagram")
-        assert changes_idx < status_idx < diagram_idx
+        md = result.to_markdown()
+        assert "### Changes" not in md
+        assert "| File |" not in md
 
 
 class TestBuildReviewStats:
