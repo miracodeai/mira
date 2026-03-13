@@ -13,6 +13,7 @@ from mira.index.indexer import (
     _content_hash,
     _parse_summarize_response,
     _should_index,
+    _strip_code_fences,
     index_diff,
     index_repo,
 )
@@ -78,6 +79,33 @@ class TestParseSummarizeResponse:
     def test_empty_response(self):
         result = _parse_summarize_response("{}")
         assert result == []
+
+    def test_markdown_fenced_json(self):
+        inner = json.dumps({"files": [{"path": "a.py", "summary": "Test"}]})
+        raw = f"```json\n{inner}\n```"
+        result = _parse_summarize_response(raw)
+        assert len(result) == 1
+        assert result[0]["path"] == "a.py"
+
+    def test_markdown_fenced_no_lang(self):
+        inner = json.dumps({"files": [{"path": "b.py", "summary": "B"}]})
+        raw = f"```\n{inner}\n```"
+        result = _parse_summarize_response(raw)
+        assert len(result) == 1
+
+
+class TestStripCodeFences:
+    def test_json_fence(self):
+        assert _strip_code_fences('```json\n{"a": 1}\n```') == '{"a": 1}'
+
+    def test_plain_fence(self):
+        assert _strip_code_fences("```\nhello\n```") == "hello"
+
+    def test_no_fence(self):
+        assert _strip_code_fences('{"a": 1}') == '{"a": 1}'
+
+    def test_whitespace(self):
+        assert _strip_code_fences('  ```json\n{"a": 1}\n```  ') == '{"a": 1}'
 
 
 class TestBuildFileSummary:
