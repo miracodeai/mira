@@ -170,18 +170,42 @@ async def _fetch_file_content(
     return await _fetch()
 
 
+def _strip_code_fences(raw: str) -> str:
+    """Strip markdown code fences (```json ... ```) from LLM output."""
+    text = raw.strip()
+    if text.startswith("```"):
+        # Remove opening fence (```json or ```)
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 :]
+        # Remove closing fence
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    return text.strip()
+
+
 def _parse_summarize_response(raw: str) -> list[dict[str, Any]]:
     """Parse the LLM response from the summarization prompt."""
+    text = _strip_code_fences(raw)
     try:
-        data = json.loads(raw)
+        data = json.loads(text)
         if isinstance(data, dict) and "files" in data:
             result: list[dict[str, Any]] = data["files"]
             return result
         if isinstance(data, list):
             return list(data)
+        logger.warning(
+            "Summarization response has unexpected structure (keys: %s): %s",
+            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            text[:200],
+        )
         return []
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("Failed to parse summarization response")
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning(
+            "Failed to parse summarization response (%s): %s",
+            exc,
+            raw[:300],
+        )
         return []
 
 
