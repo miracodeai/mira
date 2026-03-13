@@ -63,3 +63,65 @@ class GitHubAppAuth:
         self._token_cache[installation_id] = (new_token, new_expires_at)
         logger.debug("Cached installation token for %d", installation_id)
         return new_token
+
+    async def list_installations(self) -> list[dict[str, object]]:
+        """List all installations for this GitHub App."""
+        app_jwt = self._generate_jwt()
+        headers = {
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+        }
+        installations: list[dict[str, object]] = []
+        url: str | None = "https://api.github.com/app/installations?per_page=100"
+
+        async with httpx.AsyncClient() as client:
+            while url:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Failed to list installations (HTTP %d): %s",
+                        resp.status_code,
+                        resp.text,
+                    )
+                    break
+                installations.extend(resp.json())
+                # Follow pagination Link header
+                url = _parse_next_link(resp.headers.get("link", ""))
+
+        return installations
+
+    async def list_installation_repos(self, installation_id: int) -> list[dict[str, object]]:
+        """List all repos accessible to an installation."""
+        token = await self.get_installation_token(installation_id)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+        repos: list[dict[str, object]] = []
+        url: str | None = "https://api.github.com/installation/repositories?per_page=100"
+
+        async with httpx.AsyncClient() as client:
+            while url:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Failed to list repos for installation %d (HTTP %d)",
+                        installation_id,
+                        resp.status_code,
+                    )
+                    break
+                data = resp.json()
+                repos.extend(data.get("repositories", []))
+                url = _parse_next_link(resp.headers.get("link", ""))
+
+        return repos
+
+
+def _parse_next_link(link_header: str) -> str | None:
+    """Extract the 'next' URL from a GitHub Link header."""
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        if 'rel="next"' in part:
+            return part.split(";")[0].strip().strip("<>")
+    return None
