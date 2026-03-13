@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -23,6 +24,7 @@ from mira.github_app.handlers import (
     handle_thread_reject,
 )
 from mira.github_app.index_handlers import (
+    backfill_missing_indexes,
     handle_installation,
     handle_push_index,
     handle_repos_added,
@@ -57,7 +59,16 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if metrics:
             metrics.track("server_started", installation_id=0)
+        # Fire-and-forget: index repos that don't have an index yet
+        backfill_task = asyncio.create_task(backfill_missing_indexes(app_auth, metrics))
+        backfill_task.add_done_callback(
+            lambda t: (
+                logger.warning("Backfill failed: %s", t.exception()) if t.exception() else None
+            )
+        )
         yield
+        if not backfill_task.done():
+            backfill_task.cancel()
         if metrics:
             metrics.shutdown()
 

@@ -1,8 +1,9 @@
-"""Webhook handlers for indexing events (installation, push)."""
+"""Webhook handlers for indexing events (installation, push, startup)."""
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -182,3 +183,96 @@ async def handle_push_index(
             )
     except Exception:
         logger.exception("Error handling push indexing")
+
+
+def _index_exists(owner: str, repo: str) -> bool:
+    """Check whether an index DB already exists for this repo."""
+    index_dir = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
+    db_path = os.path.join(index_dir, owner, f"{repo}.db")
+    return os.path.isfile(db_path)
+
+
+async def backfill_missing_indexes(
+    app_auth: GitHubAppAuth,
+    metrics: Metrics | None = None,
+) -> None:
+    """Index all repos that don't have an index yet.
+
+    Called at server startup to handle existing installations that were
+    present before the indexing feature was deployed.
+    """
+    start = time.monotonic()
+    try:
+        installations = await app_auth.list_installations()
+        logger.info("Startup backfill: found %d installation(s)", len(installations))
+
+        config = load_config()
+        llm = LLMProvider(config.llm)
+        indexed_count = 0
+
+        for inst in installations:
+            raw_id = inst.get("id", 0)
+            installation_id = int(raw_id) if isinstance(raw_id, (int, str)) else 0
+            if not installation_id:
+                continue
+
+            try:
+                repos = await app_auth.list_installation_repos(installation_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to list repos for installation %d: %s",
+                    installation_id,
+                    exc,
+                )
+                continue
+
+            for repo_info in repos:
+                full_name = str(repo_info.get("full_name", ""))
+                if "/" not in full_name:
+                    continue
+                owner, repo = full_name.split("/", 1)
+
+                if _index_exists(owner, repo):
+                    continue
+
+                try:
+                    token = await app_auth.get_installation_token(installation_id)
+                    store = IndexStore.open(owner, repo)
+                    count = await index_repo(
+                        owner=owner,
+                        repo=repo,
+                        token=token,
+                        config=config,
+                        store=store,
+                        llm=llm,
+                        full=True,
+                    )
+                    store.close()
+                    indexed_count += 1
+                    logger.info(
+                        "Backfill index complete for %s: %d files",
+                        full_name,
+                        count,
+                    )
+                except Exception as exc:
+                    logger.warning("Backfill index failed for %s: %s", full_name, exc)
+
+        duration = round(time.monotonic() - start, 2)
+        logger.info(
+            "Startup backfill complete: %d repo(s) indexed in %.1fs",
+            indexed_count,
+            duration,
+        )
+
+        if metrics:
+            metrics.track(
+                "index_backfill_completed",
+                installation_id=0,
+                properties={
+                    "duration_s": duration,
+                    "repos_indexed": indexed_count,
+                    "installations_checked": len(installations),
+                },
+            )
+    except Exception:
+        logger.exception("Error during startup backfill indexing")
