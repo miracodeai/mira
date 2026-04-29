@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -15,10 +16,24 @@ import httpx
 from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig, load_config
-from mira.index.store import DirectorySummary, FileSummary, IndexStore, SymbolInfo
+from mira.index.manifests import is_manifest, parse_manifest
+from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
 from mira.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+
+class IndexingCancelled(Exception):
+    """Raised by index_repo when a cancel_check callback returns True.
+
+    The partial count of files indexed before cancellation is attached as
+    the exception's single arg.
+    """
+
+    def __init__(self, files_indexed: int) -> None:
+        super().__init__(f"Indexing cancelled after {files_indexed} files")
+        self.files_indexed = files_indexed
+
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts" / "templates"
 
@@ -116,6 +131,23 @@ def _should_index(path: str) -> bool:
 def _content_hash(content: str) -> str:
     """Compute SHA256 hash of file content."""
     return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+
+
+async def _fetch_default_branch(owner: str, repo: str, token: str) -> str:
+    """Fetch the default branch name for a repo."""
+    url = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            return str(resp.json().get("default_branch", "main"))
+    except Exception as exc:
+        logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
+        return "main"
 
 
 async def _fetch_repo_tree(owner: str, repo: str, token: str, branch: str = "main") -> list[str]:
@@ -231,6 +263,20 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
             if source_sym and target_path and target_sym:
                 symbol_refs.append((source_sym, target_path, target_sym))
 
+    external_refs = []
+    for eref in file_data.get("external_refs", []):
+        kind = eref.get("kind", "")
+        target = eref.get("target", "")
+        if kind and target:
+            external_refs.append(
+                ExternalRef(
+                    file_path=path,
+                    kind=kind,
+                    target=target,
+                    description=eref.get("description", ""),
+                )
+            )
+
     return FileSummary(
         path=path,
         language=file_data.get("language", ""),
@@ -238,6 +284,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
         symbols=symbols,
         imports=file_data.get("imports", []),
         symbol_refs=symbol_refs,
+        external_refs=external_refs,
         content_hash=_content_hash(content),
     )
 
@@ -290,20 +337,31 @@ async def index_repo(
     store: IndexStore | None = None,
     llm: LLMProvider | None = None,
     full: bool = False,
-    branch: str = "main",
+    branch: str | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> int:
     """Index a full repository. Returns number of files indexed.
 
     Args:
         full: If True, re-index all files regardless of content hash.
         branch: Branch to index from.
+        cancel_check: Optional zero-arg callable returning True to request
+            early termination. Checked between summarization batches. Raises
+            ``IndexingCancelled`` on cancel so callers can distinguish a
+            deliberate stop from a failure.
     """
     if config is None:
         config = load_config()
     if llm is None:
-        llm = LLMProvider(config.llm)
+        from mira.dashboard.models_config import llm_config_for
+
+        llm = LLMProvider(llm_config_for("indexing", config.llm))
     if store is None:
         store = IndexStore.open(owner, repo)
+
+    # Auto-detect default branch if not specified
+    if branch is None:
+        branch = await _fetch_default_branch(owner, repo, token)
 
     # Fetch repo tree
     tree_paths = await _fetch_repo_tree(owner, repo, token, branch)
@@ -355,11 +413,46 @@ async def index_repo(
 
     indexed_count = 0
     for batch in batches:
+        if cancel_check and cancel_check():
+            logger.info(
+                "Indexing cancelled for %s/%s after %d files",
+                owner,
+                repo,
+                indexed_count,
+            )
+            raise IndexingCancelled(indexed_count)
         results = await _summarize_batch(batch, llm, llm_sem)
         for path, content, data in results:
             summary = _build_file_summary(path, content, data)
             store.upsert_summary(summary)
             indexed_count += 1
+
+    if cancel_check and cancel_check():
+        logger.info(
+            "Indexing cancelled for %s/%s before directory pass",
+            owner,
+            repo,
+        )
+        raise IndexingCancelled(indexed_count)
+
+    # ── Package manifest pass (no LLM calls — pure parsers) ──
+    # Fetches known manifest files (package.json, requirements.txt, etc.) and
+    # records each declared dependency with its version constraint.
+    try:
+        await _index_manifests(owner, repo, token, branch, store, tree_paths, fetch_sem)
+    except Exception as exc:
+        logger.warning("Manifest indexing failed for %s/%s: %s", owner, repo, exc)
+
+    # ── Vulnerability scan (fire-and-forget) ──
+    # Triggers an OSV.dev poll for this repo's packages so freshly-indexed
+    # manifests get a vuln check without waiting for the next hourly tick.
+    # Doesn't block indexing completion.
+    try:
+        from mira.security.poller import poll_repo as _vuln_poll_repo
+
+        asyncio.create_task(_vuln_poll_repo(owner, repo))
+    except Exception as exc:
+        logger.debug("Failed to schedule vuln poll for %s/%s: %s", owner, repo, exc)
 
     # Directory summarization pass
     await _summarize_directories(store, llm, llm_sem)
@@ -368,10 +461,78 @@ async def index_repo(
     return indexed_count
 
 
+async def _index_manifests(
+    owner: str,
+    repo: str,
+    token: str,
+    branch: str,
+    store: IndexStore,
+    tree_paths: list[str],
+    fetch_sem: asyncio.Semaphore,
+) -> None:
+    """Fetch known manifest files, parse them, and persist declared packages.
+
+    Runs after the LLM summarization pass. Entirely deterministic — no LLM
+    calls, so the marginal indexing cost is one network round-trip per
+    manifest file found in the repo tree.
+    """
+    manifest_paths = [p for p in tree_paths if is_manifest(p)]
+    if not manifest_paths:
+        store.clear_manifest_packages_for_missing_files(set())
+        return
+
+    tasks = [
+        _fetch_file_content(owner, repo, p, token, ref=branch, semaphore=fetch_sem)
+        for p in manifest_paths
+    ]
+    contents = await asyncio.gather(*tasks)
+
+    live: set[str] = set()
+    total_packages = 0
+    for path, content in zip(manifest_paths, contents, strict=False):
+        if content is None:
+            continue
+        live.add(path)
+        packages = parse_manifest(path, content)
+        if not packages:
+            # Still replace with empty so stale entries for this path are dropped.
+            store.replace_manifest_packages(path, [])
+            continue
+        store.replace_manifest_packages(
+            path,
+            [
+                {
+                    "name": pkg.name,
+                    "kind": pkg.kind,
+                    "version": pkg.version,
+                    "file_path": pkg.file_path,
+                    "is_dev": pkg.is_dev,
+                }
+                for pkg in packages
+            ],
+        )
+        total_packages += len(packages)
+
+    # Drop manifest entries whose source file disappeared from the repo.
+    store.clear_manifest_packages_for_missing_files(live)
+
+    if total_packages:
+        logger.info(
+            "Indexed %d package(s) across %d manifest file(s) for %s/%s",
+            total_packages,
+            len(live),
+            owner,
+            repo,
+        )
+
+
 async def _summarize_directories(
     store: IndexStore, llm: LLMProvider, semaphore: asyncio.Semaphore
 ) -> None:
-    """Generate directory summaries from file summaries."""
+    """Generate directory summaries from file summaries.
+
+    Processes one directory at a time to avoid token limits and partial failures.
+    """
     all_paths = store.all_paths()
     dirs: dict[str, list[str]] = {}
     for path in all_paths:
@@ -383,58 +544,47 @@ async def _summarize_directories(
     if not dirs:
         return
 
-    # Build directory info for LLM
-    dir_entries = []
+    logger.info("Generating summaries for %d directories", len(dirs))
+
     for dir_path, file_paths in sorted(dirs.items()):
+        # Build file summaries list for this directory (truncate to prevent huge prompts)
         file_summaries = []
-        for fp in file_paths:
+        for fp in file_paths[:30]:  # cap at 30 files per directory
             s = store.get_summary(fp)
-            if s:
-                file_summaries.append(f"- {fp}: {s.summary}")
-        if file_summaries:
-            dir_entries.append(
-                {
-                    "path": dir_path or "(root)",
-                    "file_count": len(file_paths),
-                    "files": "\n".join(file_summaries),
-                }
-            )
+            if s and s.summary:
+                file_summaries.append(f"- {os.path.basename(fp)}: {s.summary}")
+        if not file_summaries:
+            continue
 
-    if not dir_entries:
-        return
-
-    prompt = (
-        "You are a code indexing assistant. For each directory, generate a 1-2 sentence summary "
-        "describing what the directory contains and its purpose. Respond in JSON:\n"
-        '{"directories": [{"path": "...", "summary": "..."}]}\n\n'
-    )
-    for entry in dir_entries:
-        prompt += (
-            f"\n### Directory: {entry['path']} ({entry['file_count']} files)\n{entry['files']}\n"
+        display_path = dir_path or "(root)"
+        prompt = (
+            "You are a code indexing assistant. Generate a concise 1-2 sentence summary "
+            f"describing what this directory contains and its purpose.\n\n"
+            f"Directory: {display_path} ({len(file_paths)} files)\n"
+            + "\n".join(file_summaries)
+            + '\n\nRespond with JSON: {"summary": "..."}'
         )
 
-    messages = [
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": "Summarize the directories above."},
-    ]
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "Summarize this directory."},
+        ]
 
-    async with semaphore:
-        try:
-            raw = await llm.complete(messages, json_mode=True, temperature=0.0)
-            data = json.loads(raw)
-            for d in data.get("directories", []):
-                dir_path = d.get("path", "")
-                if dir_path == "(root)":
-                    dir_path = ""
-                store.upsert_directory(
-                    DirectorySummary(
-                        path=dir_path,
-                        summary=d.get("summary", ""),
-                        file_count=len(dirs.get(dir_path, [])),
+        async with semaphore:
+            try:
+                raw = await llm.complete(messages, json_mode=True, temperature=0.0)
+                data = json.loads(_strip_code_fences(raw))
+                summary_text = data.get("summary", "")
+                if summary_text:
+                    store.upsert_directory(
+                        DirectorySummary(
+                            path=dir_path,
+                            summary=summary_text,
+                            file_count=len(file_paths),
+                        )
                     )
-                )
-        except Exception as exc:
-            logger.warning("Directory summarization failed: %s", exc)
+            except Exception as exc:
+                logger.warning("Directory summary failed for %s: %s", display_path, exc)
 
 
 async def index_diff(
@@ -452,7 +602,9 @@ async def index_diff(
     if config is None:
         config = load_config()
     if llm is None:
-        llm = LLMProvider(config.llm)
+        from mira.dashboard.models_config import llm_config_for
+
+        llm = LLMProvider(llm_config_for("indexing", config.llm))
     if store is None:
         store = IndexStore.open(owner, repo)
 
@@ -482,32 +634,31 @@ async def index_diff(
         if content is not None:
             file_pairs.append((path, content))
 
-    if not file_pairs:
-        return 0
-
-    # Summarize
+    # Summarize changed files
     llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)
-    batches = [file_pairs[i : i + _BATCH_SIZE] for i in range(0, len(file_pairs), _BATCH_SIZE)]
-
     indexed_count = 0
-    for batch in batches:
-        results = await _summarize_batch(batch, llm, llm_sem)
-        for path, content, data in results:
-            summary = _build_file_summary(path, content, data)
-            store.upsert_summary(summary)
-            indexed_count += 1
 
-    # Re-index dependents if exported symbols changed
-    for path, _content in file_pairs:
-        existing = store.get_summary(path)
-        if existing:
-            dependents = store.get_dependents(path)
-            if dependents:
-                logger.debug(
-                    "File %s has %d dependents that may need re-indexing",
-                    path,
-                    len(dependents),
-                )
+    if file_pairs:
+        batches = [file_pairs[i : i + _BATCH_SIZE] for i in range(0, len(file_pairs), _BATCH_SIZE)]
+        for batch in batches:
+            results = await _summarize_batch(batch, llm, llm_sem)
+            for path, content, data in results:
+                summary = _build_file_summary(path, content, data)
+                store.upsert_summary(summary)
+                indexed_count += 1
+
+    # Re-generate directory summaries for affected parent dirs
+    affected_dirs: set[str] = set()
+    for path in changed_paths or []:
+        parent = str(Path(path).parent)
+        affected_dirs.add("" if parent == "." else parent)
+    if removed_paths:
+        for path in removed_paths:
+            parent = str(Path(path).parent)
+            affected_dirs.add("" if parent == "." else parent)
+    if affected_dirs:
+        logger.info("Re-generating summaries for %d affected directories", len(affected_dirs))
+        await _summarize_directories_selective(store, llm, llm_sem, affected_dirs)
 
     logger.info(
         "Incremental index: %d files re-indexed for %s/%s",
@@ -516,3 +667,61 @@ async def index_diff(
         repo,
     )
     return indexed_count
+
+
+async def _summarize_directories_selective(
+    store: IndexStore,
+    llm: LLMProvider,
+    semaphore: asyncio.Semaphore,
+    target_dirs: set[str],
+) -> None:
+    """Re-generate directory summaries only for the specified directories."""
+    all_paths = store.all_paths()
+
+    for dir_path in sorted(target_dirs):
+        # Collect files in this directory
+        file_paths = [
+            p
+            for p in all_paths
+            if (str(Path(p).parent) == dir_path) or (dir_path == "" and str(Path(p).parent) == ".")
+        ]
+        if not file_paths:
+            continue
+
+        file_summaries = []
+        for fp in file_paths[:30]:
+            s = store.get_summary(fp)
+            if s and s.summary:
+                file_summaries.append(f"- {os.path.basename(fp)}: {s.summary}")
+        if not file_summaries:
+            continue
+
+        display_path = dir_path or "(root)"
+        prompt = (
+            "You are a code indexing assistant. Generate a concise 1-2 sentence summary "
+            f"describing what this directory contains and its purpose.\n\n"
+            f"Directory: {display_path} ({len(file_paths)} files)\n"
+            + "\n".join(file_summaries)
+            + '\n\nRespond with JSON: {"summary": "..."}'
+        )
+
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "Summarize this directory."},
+        ]
+
+        async with semaphore:
+            try:
+                raw = await llm.complete(messages, json_mode=True, temperature=0.0)
+                data = json.loads(_strip_code_fences(raw))
+                summary_text = data.get("summary", "")
+                if summary_text:
+                    store.upsert_directory(
+                        DirectorySummary(
+                            path=dir_path,
+                            summary=summary_text,
+                            file_count=len(file_paths),
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("Directory summary failed for %s: %s", display_path, exc)

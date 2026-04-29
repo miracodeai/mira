@@ -51,8 +51,18 @@ def extract_hunk_lines(file_diff: FileDiff) -> str:
     """Return the raw content of all hunks for a file as a single string.
 
     Used for validating that LLM-quoted ``existing_code`` actually appears in the diff.
+    Strips diff markers (+/-/space prefix) so clean code from the LLM can match.
     """
-    return "\n".join(h.content for h in file_diff.hunks)
+    lines: list[str] = []
+    for hunk in file_diff.hunks:
+        for line in hunk.content.splitlines():
+            if line.startswith("@@"):
+                continue
+            if line and line[0] in ("+", "-", " "):
+                lines.append(line[1:])
+            else:
+                lines.append(line)
+    return "\n".join(lines)
 
 
 def build_file_context_string(file_diff: FileDiff) -> str:

@@ -24,7 +24,6 @@ dependencies = [
     "click>=8.1",
     "httpx>=0.27",
     "jinja2>=3.1",
-    "litellm>=1.30",
     "pydantic>=2.5",
     "PyGithub>=2.1",
     "pyyaml>=6.0",
@@ -49,15 +48,16 @@ serve = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.28",
     "PyJWT[crypto]>=2.8",
-    "posthog>=3.0",
 ]
 
 [project.scripts]
 mira = "mira.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mira-reviewer/mira"
-Repository = "https://github.com/mira-reviewer/mira"
+Homepage = "https://github.com/miracodeai/mira"
+Repository = "https://github.com/miracodeai/mira"
+Issues = "https://github.com/miracodeai/mira/issues"
+Changelog = "https://github.com/miracodeai/mira/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mira"]
@@ -70,9 +70,28 @@ asyncio_mode = "auto"
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
+# Test fixtures intentionally mirror real-world (sometimes ugly) third-party
+# code; lint/format on them adds nothing.
+extend-exclude = ["tests/fixtures/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "PIE", "RET", "T20"]
+# Long lines — formatter already chooses where to wrap; ruff catches strings/URLs
+# that aren't worth manually splitting.
+ignore = [
+    "E501",   # line too long (formatter handles this)
+    "PIE810", # multiple .startswith — pre-existing, not worth refactoring
+    "RET504", # unnecessary assignment before return — readability preference
+    "N806",   # uppercase var in function — common for tunable constants
+    "N818",   # exception name should end with Error (we use IndexingCancelled deliberately)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Helper scripts use print() as their primary output mechanism.
+"scripts/**" = ["T20"]
+# Tests routinely have unused vars (fixtures, intentional throwaways), and
+# eval scripts intentionally print results to stdout.
+"tests/**" = ["F841", "B007", "T20"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -86,6 +105,6 @@ warn_return_any = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "unidiff.*", "github.*", "uvicorn.*", "fastapi.*", "jwt.*", "posthog.*"]
+module = ["unidiff.*", "github.*", "uvicorn.*", "fastapi.*", "jwt.*"]
 ignore_missing_imports = true
 

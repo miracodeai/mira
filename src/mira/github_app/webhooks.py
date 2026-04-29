@@ -20,20 +20,23 @@ from mira.github_app.handlers import (
     PAUSE_LABEL,
     handle_comment,
     handle_pause_resume,
+    handle_pr_merged,
     handle_pull_request,
     handle_thread_reject,
 )
 from mira.github_app.index_handlers import (
     backfill_missing_indexes,
     handle_installation,
+    handle_installation_deleted,
     handle_push_index,
     handle_repos_added,
+    handle_repos_removed,
 )
-from mira.github_app.metrics import Metrics
 
 logger = logging.getLogger(__name__)
 
 _PR_ACTIONS = {"opened", "synchronize", "reopened"}
+_PR_MERGE_ACTIONS = {"closed"}
 _SAFE_BOT_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -49,7 +52,6 @@ def create_app(
     app_auth: GitHubAppAuth,
     webhook_secret: str,
     bot_name: str,
-    metrics: Metrics | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI webhook application."""
     if not _SAFE_BOT_NAME.match(bot_name):
@@ -57,20 +59,32 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if metrics:
-            metrics.track("server_started", installation_id=0)
         # Fire-and-forget: index repos that don't have an index yet
-        backfill_task = asyncio.create_task(backfill_missing_indexes(app_auth, metrics))
+        backfill_task = asyncio.create_task(backfill_missing_indexes(app_auth))
         backfill_task.add_done_callback(
             lambda t: (
                 logger.warning("Backfill failed: %s", t.exception()) if t.exception() else None
             )
         )
+
+        # OSV.dev vulnerability poller — runs hourly across the org's
+        # package_manifests. No-ops on SQLite-only deployments.
+        from mira.security.poller import run_forever as run_vuln_poller
+
+        vuln_task = asyncio.create_task(run_vuln_poller())
+        vuln_task.add_done_callback(
+            lambda t: (
+                logger.warning("Vuln poller crashed: %s", t.exception())
+                if t.exception() and not t.cancelled()
+                else None
+            )
+        )
+
         yield
         if not backfill_task.done():
             backfill_task.cancel()
-        if metrics:
-            metrics.shutdown()
+        if not vuln_task.done():
+            vuln_task.cancel()
 
     app = FastAPI(title="Mira GitHub App", lifespan=lifespan)
 
@@ -93,7 +107,25 @@ def create_app(
         event = request.headers.get("X-GitHub-Event", "")
         payload: dict[str, Any] = await request.json()
         action = payload.get("action", "")
-        installation_id: int = payload.get("installation", {}).get("id", 0)
+
+        if (
+            event == "pull_request"
+            and action in _PR_MERGE_ACTIONS
+            and payload.get("pull_request", {}).get("merged")
+        ):
+            sender: str = payload.get("sender", {}).get("login", "")
+            if sender == f"{bot_name}[bot]":
+                return Response(
+                    content='{"status": "ignored"}',
+                    status_code=200,
+                    media_type="application/json",
+                )
+            background_tasks.add_task(handle_pr_merged, payload, app_auth, bot_name)
+            return Response(
+                content='{"status": "processing"}',
+                status_code=200,
+                media_type="application/json",
+            )
 
         if event == "pull_request" and action in _PR_ACTIONS:
             sender: str = payload.get("sender", {}).get("login", "")
@@ -123,13 +155,7 @@ def create_app(
                     media_type="application/json",
                 )
 
-            if metrics:
-                metrics.track(
-                    "webhook_received",
-                    installation_id=installation_id,
-                    properties={"event_type": event, "action": action, "status": "processing"},
-                )
-            background_tasks.add_task(handle_pull_request, payload, app_auth, bot_name, metrics)
+            background_tasks.add_task(handle_pull_request, payload, app_auth, bot_name)
             return Response(
                 content='{"status": "processing"}',
                 status_code=200,
@@ -139,11 +165,16 @@ def create_app(
         if event == "issue_comment" and action == "created":
             comment_body: str = payload.get("comment", {}).get("body", "")
             comment_user: str = payload.get("comment", {}).get("user", {}).get("login", "")
+            comment_user_type: str = payload.get("comment", {}).get("user", {}).get("type", "")
             is_pr = "pull_request" in payload.get("issue", {})
 
-            # Ignore comments authored by this bot to prevent self-triggering loops
-            if comment_user == f"{bot_name}[bot]":
-                logger.debug("Ignoring comment from self (%s)", comment_user)
+            # Ignore ANY bot-authored comment. This prevents self-triggering
+            # loops where our own PR walkthrough contains "@{bot_name}" in a
+            # footer hint and the webhook mistakes it for a user mention. The
+            # exact-login check below remains as a secondary safeguard in case
+            # `user.type` is absent on some event payloads.
+            if comment_user_type == "Bot" or comment_user == f"{bot_name}[bot]":
+                logger.debug("Ignoring comment from bot (%s)", comment_user)
                 return Response(
                     content='{"status": "ignored"}',
                     status_code=200,
@@ -158,23 +189,12 @@ def create_app(
                 cmd_word = cmd_match.group(1).lower() if cmd_match else ""
 
                 if cmd_word in _PAUSE_KEYWORDS | _RESUME_KEYWORDS:
-                    if metrics:
-                        metrics.track(
-                            "webhook_received",
-                            installation_id=installation_id,
-                            properties={
-                                "event_type": event,
-                                "action": action,
-                                "status": "processing",
-                            },
-                        )
                     background_tasks.add_task(
                         handle_pause_resume,
                         payload,
                         app_auth,
                         bot_name,
                         cmd_word,
-                        metrics,
                     )
                     return Response(
                         content='{"status": "processing"}',
@@ -182,13 +202,7 @@ def create_app(
                         media_type="application/json",
                     )
 
-                if metrics:
-                    metrics.track(
-                        "webhook_received",
-                        installation_id=installation_id,
-                        properties={"event_type": event, "action": action, "status": "processing"},
-                    )
-                background_tasks.add_task(handle_comment, payload, app_auth, bot_name, metrics)
+                background_tasks.add_task(handle_comment, payload, app_auth, bot_name)
                 return Response(
                     content='{"status": "processing"}',
                     status_code=200,
@@ -198,9 +212,10 @@ def create_app(
         if event == "pull_request_review_comment" and action == "created":
             rc_body: str = payload.get("comment", {}).get("body", "")
             rc_user: str = payload.get("comment", {}).get("user", {}).get("login", "")
+            rc_user_type: str = payload.get("comment", {}).get("user", {}).get("type", "")
 
-            if rc_user == f"{bot_name}[bot]":
-                logger.debug("Ignoring review comment from self (%s)", rc_user)
+            if rc_user_type == "Bot" or rc_user == f"{bot_name}[bot]":
+                logger.debug("Ignoring review comment from bot (%s)", rc_user)
                 return Response(
                     content='{"status": "ignored"}',
                     status_code=200,
@@ -208,15 +223,7 @@ def create_app(
                 )
 
             if f"@{bot_name}" in rc_body:
-                if metrics:
-                    metrics.track(
-                        "webhook_received",
-                        installation_id=installation_id,
-                        properties={"event_type": event, "action": action, "status": "processing"},
-                    )
-                background_tasks.add_task(
-                    handle_thread_reject, payload, app_auth, bot_name, metrics
-                )
+                background_tasks.add_task(handle_thread_reject, payload, app_auth, bot_name)
                 return Response(
                     content='{"status": "processing"}',
                     status_code=200,
@@ -225,7 +232,15 @@ def create_app(
 
         # Indexing events: installation, repos added, push to default branch
         if event == "installation" and action == "created":
-            background_tasks.add_task(handle_installation, payload, app_auth, bot_name, metrics)
+            background_tasks.add_task(handle_installation, payload, app_auth, bot_name)
+            return Response(
+                content='{"status": "processing"}',
+                status_code=200,
+                media_type="application/json",
+            )
+
+        if event == "installation" and action == "deleted":
+            background_tasks.add_task(handle_installation_deleted, payload, app_auth, bot_name)
             return Response(
                 content='{"status": "processing"}',
                 status_code=200,
@@ -233,7 +248,15 @@ def create_app(
             )
 
         if event == "installation_repositories" and action == "added":
-            background_tasks.add_task(handle_repos_added, payload, app_auth, bot_name, metrics)
+            background_tasks.add_task(handle_repos_added, payload, app_auth, bot_name)
+            return Response(
+                content='{"status": "processing"}',
+                status_code=200,
+                media_type="application/json",
+            )
+
+        if event == "installation_repositories" and action == "removed":
+            background_tasks.add_task(handle_repos_removed, payload, app_auth, bot_name)
             return Response(
                 content='{"status": "processing"}',
                 status_code=200,
@@ -244,19 +267,13 @@ def create_app(
             ref = payload.get("ref", "")
             default_branch = payload.get("repository", {}).get("default_branch", "main")
             if ref == f"refs/heads/{default_branch}":
-                background_tasks.add_task(handle_push_index, payload, app_auth, bot_name, metrics)
+                background_tasks.add_task(handle_push_index, payload, app_auth, bot_name)
                 return Response(
                     content='{"status": "processing"}',
                     status_code=200,
                     media_type="application/json",
                 )
 
-        if metrics:
-            metrics.track(
-                "webhook_received",
-                installation_id=installation_id,
-                properties={"event_type": event, "action": action, "status": "ignored"},
-            )
         return Response(
             content='{"status": "ignored"}',
             status_code=200,

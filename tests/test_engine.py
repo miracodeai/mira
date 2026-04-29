@@ -8,9 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mira.config import MiraConfig
-from mira.core.engine import ReviewEngine, _extract_sections
+from mira.core.engine import ReviewEngine, _clamp_confidence_to_findings, _extract_sections
 from mira.llm.provider import LLMProvider
-from mira.models import PRInfo, UnresolvedThread, WalkthroughResult
+from mira.models import (
+    PRInfo,
+    ReviewComment,
+    Severity,
+    UnresolvedThread,
+    WalkthroughConfidenceScore,
+    WalkthroughResult,
+)
 
 _WALKTHROUGH_LLM_RESPONSE = json.dumps(
     {
@@ -31,8 +38,11 @@ _WALKTHROUGH_LLM_RESPONSE = json.dumps(
 @pytest.fixture
 def mock_llm(sample_llm_response_text: str) -> LLMProvider:
     llm = MagicMock(spec=LLMProvider)
-    # First call is walkthrough, second is review
-    llm.complete = AsyncMock(side_effect=[_WALKTHROUGH_LLM_RESPONSE, sample_llm_response_text])
+    # Tool-calling methods used by engine
+    llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+    llm.review = AsyncMock(return_value=sample_llm_response_text)
+    # Legacy JSON-mode method used by verify_fixes, summarization
+    llm.complete = AsyncMock(return_value=sample_llm_response_text)
     llm.count_tokens = MagicMock(return_value=100)
     llm.usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
     return llm
@@ -68,8 +78,9 @@ class TestReviewEngine:
 
         assert result.reviewed_files > 0
         assert result.summary != ""
-        # 2 calls: walkthrough + review
-        assert mock_llm.complete.call_count == 2
+        # walkthrough + review via tool calling
+        mock_llm.walkthrough.assert_called_once()
+        mock_llm.review.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_review_pr(self, mock_llm: LLMProvider, mock_provider: AsyncMock):
@@ -84,15 +95,16 @@ class TestReviewEngine:
     @pytest.mark.asyncio
     async def test_no_post_when_no_comments(self, mock_provider: AsyncMock):
         llm = MagicMock(spec=LLMProvider)
-        llm.complete = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "comments": [],
-                    "summary": "All good!",
-                    "metadata": {"reviewed_files": 1},
-                }
-            )
+        no_comments = json.dumps(
+            {
+                "comments": [],
+                "summary": "All good!",
+                "metadata": {"reviewed_files": 1},
+            }
         )
+        llm.review = AsyncMock(return_value=no_comments)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.complete = AsyncMock(return_value=no_comments)
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -106,7 +118,7 @@ class TestReviewEngine:
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm)
         result = await engine.review_diff("")
         assert result.reviewed_files == 0
-        mock_llm.complete.assert_not_called()
+        mock_llm.review.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_review_pr_without_provider_raises(self, mock_llm: LLMProvider):
@@ -122,26 +134,27 @@ class TestReviewEngine:
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         # Return many low-confidence comments
-        llm.complete = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "comments": [
-                        {
-                            "path": "src/utils.py",
-                            "line": i,
-                            "severity": "nitpick",
-                            "category": "style",
-                            "title": f"Style issue {i}",
-                            "body": "Minor style concern",
-                            "confidence": 0.3,
-                        }
-                        for i in range(1, 11)
-                    ],
-                    "summary": "Many minor issues",
-                    "metadata": {"reviewed_files": 1},
-                }
-            )
+        low_confidence_response = json.dumps(
+            {
+                "comments": [
+                    {
+                        "path": "src/utils.py",
+                        "line": i,
+                        "severity": "nitpick",
+                        "category": "style",
+                        "title": f"Style issue {i}",
+                        "body": "Minor style concern",
+                        "confidence": 0.3,
+                    }
+                    for i in range(1, 11)
+                ],
+                "summary": "Many minor issues",
+                "metadata": {"reviewed_files": 1},
+            }
         )
+        llm.review = AsyncMock(return_value=low_confidence_response)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.complete = AsyncMock(return_value=low_confidence_response)
 
         config = MiraConfig()
         engine = ReviewEngine(config=config, llm=llm)
@@ -190,23 +203,23 @@ class TestReviewEngine:
             }
         )
 
-        walkthrough_response = json.dumps({"summary": "walkthrough", "file_changes": []})
+        review_call_count = 0
 
-        call_count = 0
-
-        async def _side_effect(messages, json_mode=True, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return walkthrough_response  # walkthrough call
-            if call_count == 2:
+        async def _review_side_effect(messages):
+            nonlocal review_call_count
+            review_call_count += 1
+            if review_call_count == 1:
                 return good_response  # first review chunk
             # Subsequent calls return garbage that will fail parsing
             return "NOT VALID JSON {{{"
 
         llm = MagicMock(spec=LLMProvider)
         llm.count_tokens = MagicMock(return_value=50)
-        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.walkthrough = AsyncMock(
+            return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
+        )
+        llm.review = AsyncMock(side_effect=_review_side_effect)
+        llm.complete = AsyncMock(return_value=good_response)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         # Force two chunks by setting a very low token limit
@@ -234,36 +247,41 @@ class TestReviewEngine:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_max_diff_size_truncates_at_file_boundary(self, mock_llm: LLMProvider):
-        """Truncation cuts at the last 'diff --git' boundary, not mid-hunk."""
-        file_a = (
-            "diff --git a/a.py b/a.py\n"
+    async def test_max_diff_size_skips_low_priority_files(self, mock_llm: LLMProvider):
+        """When the diff exceeds the size cap, low-priority files get skipped
+        (not silently truncated mid-hunk) and recorded in result.skipped_paths
+        so the walkthrough banner can surface them."""
+        # Build two files with substantial hunks so the per-hunk size matters.
+        # Use a low priority + high priority pair so we can verify priority
+        # determines who gets dropped.
+        big_hunk = "+" + "x" * 500 + "\n"
+        sensitive = (
+            "diff --git a/src/auth/jwt.py b/src/auth/jwt.py\n"
             "new file mode 100644\n"
-            "--- /dev/null\n"
-            "+++ b/a.py\n"
-            "@@ -0,0 +1,3 @@\n"
-            "+line1\n+line2\n+line3\n"
+            "--- /dev/null\n+++ b/src/auth/jwt.py\n"
+            "@@ -0,0 +1,1 @@\n" + big_hunk
         )
-        file_b = (
-            "diff --git a/b.py b/b.py\n"
+        readme = (
+            "diff --git a/README.md b/README.md\n"
             "new file mode 100644\n"
-            "--- /dev/null\n"
-            "+++ b/b.py\n"
-            "@@ -0,0 +1,3 @@\n"
-            "+line4\n+line5\n+line6\n"
+            "--- /dev/null\n+++ b/README.md\n"
+            "@@ -0,0 +1,1 @@\n" + big_hunk
         )
-        big_diff = file_a + file_b
+        big_diff = sensitive + readme
 
         config = MiraConfig()
-        # Set limit so file_a fits but file_a + file_b doesn't
-        config.review.max_diff_size = len(file_a) + 10
+        # Cap small enough that only one file fits.
+        config.review.max_diff_size = 600
         config.filter.confidence_threshold = 0.0
 
         engine = ReviewEngine(config=config, llm=mock_llm)
         result = await engine.review_diff(big_diff)
 
-        # Should only review the first file — second was truncated at boundary
+        # The auth file is sensitive → priority-ranked first → reviewed.
+        # The README is low-priority → skipped.
         assert result.reviewed_files == 1
+        assert "src/auth/jwt.py" in result.reviewed_paths
+        assert "README.md" in result.skipped_paths
 
     @pytest.mark.asyncio
     async def test_include_summary_false(self, mock_llm: LLMProvider, sample_diff_text: str):
@@ -301,6 +319,8 @@ class TestReviewEngine:
     async def test_walkthrough_disabled(self, sample_llm_response_text: str, sample_diff_text: str):
         """Walkthrough is skipped when disabled."""
         llm = MagicMock(spec=LLMProvider)
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
         llm.complete = AsyncMock(return_value=sample_llm_response_text)
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -311,25 +331,18 @@ class TestReviewEngine:
         engine = ReviewEngine(config=config, llm=llm)
         result = await engine.review_diff(sample_diff_text)
         assert result.walkthrough is None
-        # Only 1 call (review), no walkthrough call
-        assert llm.complete.call_count == 1
+        # No walkthrough call
+        llm.walkthrough.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_walkthrough_failure_continues(
         self, sample_llm_response_text: str, sample_diff_text: str
     ):
         """Walkthrough failure does not block the review."""
-        call_count = 0
-
-        async def _side_effect(messages, json_mode=True, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("LLM exploded")
-            return sample_llm_response_text
-
         llm = MagicMock(spec=LLMProvider)
-        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.walkthrough = AsyncMock(side_effect=RuntimeError("LLM exploded"))
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
+        llm.complete = AsyncMock(return_value=sample_llm_response_text)
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -345,47 +358,176 @@ class TestReviewEngine:
     async def test_walkthrough_posted_before_review(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
-        """Walkthrough comment is posted before inline review."""
+        """Walkthrough placeholder + update happen before inline review posts."""
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        mock_provider.post_comment.assert_called_once()
+        # Placeholder post + final walkthrough post (find_bot_comment mocked to None)
+        assert mock_provider.post_comment.call_count >= 1
         mock_provider.post_review.assert_called_once()
 
-        # Verify post_comment was called before post_review
-        comment_order = mock_provider.post_comment.call_args_list[0]
-        review_order = mock_provider.post_review.call_args_list[0]
-        assert comment_order is not None
-        assert review_order is not None
+    def _comment(self, severity: Severity) -> ReviewComment:
+        return ReviewComment(
+            path="x.py",
+            line=1,
+            end_line=None,
+            severity=severity,
+            category="other",
+            title="t",
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_clamp_blocker_forces_score_two(self):
+        wt = WalkthroughResult(
+            confidence_score=WalkthroughConfidenceScore(
+                score=5,
+                label="Safe",
+                reason="looks fine",
+            ),
+        )
+        _clamp_confidence_to_findings(wt, [self._comment(Severity.BLOCKER)])
+        assert wt.confidence_score.score == 2
+        assert wt.confidence_score.label == "Do not merge"
+        assert "1 blocker" in wt.confidence_score.reason
+
+    def test_clamp_many_warnings_forces_score_three(self):
+        wt = WalkthroughResult(
+            confidence_score=WalkthroughConfidenceScore(
+                score=5,
+                label="Safe",
+                reason="looks fine",
+            ),
+        )
+        _clamp_confidence_to_findings(
+            wt,
+            [self._comment(Severity.WARNING) for _ in range(3)],
+        )
+        assert wt.confidence_score.score == 3
+        assert wt.confidence_score.label == "Needs review"
+
+    def test_clamp_does_not_raise_score(self):
+        wt = WalkthroughResult(
+            confidence_score=WalkthroughConfidenceScore(
+                score=1,
+                label="Major concerns",
+                reason="existing",
+            ),
+        )
+        _clamp_confidence_to_findings(wt, [])
+        # No findings and LLM already scored low → leave as-is.
+        assert wt.confidence_score.score == 1
+        assert wt.confidence_score.label == "Major concerns"
+
+    def test_clamp_blocker_beats_warnings(self):
+        wt = WalkthroughResult(
+            confidence_score=WalkthroughConfidenceScore(
+                score=4,
+                label="Safe with fixes",
+                reason="r",
+            ),
+        )
+        comments = [
+            self._comment(Severity.BLOCKER),
+            self._comment(Severity.WARNING),
+            self._comment(Severity.WARNING),
+            self._comment(Severity.WARNING),
+        ]
+        _clamp_confidence_to_findings(wt, comments)
+        # Blocker rule wins — score should be 2, not 3.
+        assert wt.confidence_score.score == 2
+        assert "1 blocker" in wt.confidence_score.reason
+
+    def test_clamp_no_op_when_findings_match(self):
+        wt = WalkthroughResult(
+            confidence_score=WalkthroughConfidenceScore(
+                score=2,
+                label="Major concerns",
+                reason="original",
+            ),
+        )
+        _clamp_confidence_to_findings(wt, [self._comment(Severity.BLOCKER)])
+        # Already ≤ 2 → don't overwrite the LLM's more detailed reason.
+        assert wt.confidence_score.score == 2
+        assert wt.confidence_score.reason == "original"
+
+    def test_clamp_no_confidence_score_noop(self):
+        wt = WalkthroughResult(confidence_score=None)
+        # Should not crash.
+        _clamp_confidence_to_findings(wt, [self._comment(Severity.BLOCKER)])
+        assert wt.confidence_score is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_walkthrough_three_stages(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """End-to-end streaming flow: placeholder → in-progress walkthrough
+        → final walkthrough + inline review, in that order."""
+        # Simulate GitHub: first lookup returns None (no existing comment),
+        # subsequent lookups return the newly-created placeholder ID.
+        mock_provider.find_bot_comment = AsyncMock(side_effect=[None, 7, 7, 7, 7])
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # 1. One placeholder post.
+        mock_provider.post_comment.assert_called_once()
+        placeholder_body = mock_provider.post_comment.call_args[0][1]
+        assert "Reviewing this PR" in placeholder_body
+        assert "<!-- mira-walkthrough -->" in placeholder_body
+
+        # 2. In-progress walkthrough update (the one triggered by the callback)
+        #    and 3. final walkthrough update with stats.
+        update_bodies = [c[0][2] for c in mock_provider.update_comment.call_args_list]
+        assert len(update_bodies) >= 2
+
+        # One of the updates must have "Code review in progress" (in-progress mode)
+        in_progress_update = next(
+            (b for b in update_bodies if "Code review in progress" in b),
+            None,
+        )
+        assert in_progress_update is not None, "expected an in-progress walkthrough update"
+        # The final update must contain stats (review comments count).
+        final_update = update_bodies[-1]
+        assert "Code review in progress" not in final_update
+        assert "PR walkthrough summary" in final_update
+
+        # 4. Inline comments post fires once, at the end.
+        mock_provider.post_review.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_walkthrough_upserts_existing_comment(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
-        """Existing walkthrough comment is updated instead of creating a new one."""
+        """Existing walkthrough comment is edited in place for both the
+        placeholder and the final walkthrough — no new comment created."""
         mock_provider.find_bot_comment = AsyncMock(return_value=42)
 
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        mock_provider.find_bot_comment.assert_called_once()
-        mock_provider.update_comment.assert_called_once()
-        assert mock_provider.update_comment.call_args[0][1] == 42
+        # Placeholder update + final walkthrough update = 2 edits on comment 42
+        assert mock_provider.update_comment.call_count >= 2
+        for call in mock_provider.update_comment.call_args_list:
+            assert call[0][1] == 42
         mock_provider.post_comment.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_walkthrough_creates_when_no_existing(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
-        """When no existing walkthrough comment is found, a new one is created."""
-        mock_provider.find_bot_comment = AsyncMock(return_value=None)
+        """When no walkthrough comment exists, the placeholder creates one and
+        the final walkthrough updates it in place."""
+        # Simulate realistic behaviour: initial lookup returns None, a subsequent
+        # lookup (after placeholder post) finds the newly-created comment by ID.
+        mock_provider.find_bot_comment = AsyncMock(side_effect=[None, 99, 99])
 
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        mock_provider.find_bot_comment.assert_called_once()
+        # Exactly one new comment (the placeholder); rest are updates.
         mock_provider.post_comment.assert_called_once()
-        mock_provider.update_comment.assert_not_called()
+        assert mock_provider.update_comment.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_walkthrough_upsert_failure_does_not_block_review(
@@ -405,14 +547,16 @@ class TestReviewEngine:
     async def test_walkthrough_posted_with_summary(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
-        """Walkthrough markdown is posted and includes the summary."""
+        """Final walkthrough markdown contains the summary."""
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        # The walkthrough was posted — grab the markdown that was passed
-        mock_provider.post_comment.assert_called_once()
-        posted_markdown = mock_provider.post_comment.call_args[0][1]
-        assert "## Mira PR Walkthrough" in posted_markdown
+        # Collect every comment body sent to GitHub, across posts and updates.
+        bodies = [c[0][1] for c in mock_provider.post_comment.call_args_list]
+        bodies.extend(c[0][2] for c in mock_provider.update_comment.call_args_list)
+        combined = "\n".join(bodies)
+        assert "## Mira PR Walkthrough" in combined
+        assert "PR walkthrough summary." in combined
 
     @pytest.mark.asyncio
     async def test_walkthrough_omits_review_stats_when_no_comments(self, mock_provider: AsyncMock):
@@ -425,17 +569,20 @@ class TestReviewEngine:
             }
         )
         llm = MagicMock(spec=LLMProvider)
-        llm.complete = AsyncMock(side_effect=[_WALKTHROUGH_LLM_RESPONSE, no_comments_response])
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.review = AsyncMock(return_value=no_comments_response)
+        llm.complete = AsyncMock(return_value=no_comments_response)
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        # Walkthrough was posted but without review stats
-        mock_provider.post_comment.assert_called_once()
-        posted_markdown = mock_provider.post_comment.call_args[0][1]
-        assert "### Review Status" not in posted_markdown
+        # Walkthrough was posted (placeholder + final) but without review stats
+        bodies = [c[0][1] for c in mock_provider.post_comment.call_args_list]
+        bodies.extend(c[0][2] for c in mock_provider.update_comment.call_args_list)
+        combined = "\n".join(bodies)
+        assert "### Review Status" not in combined
 
     @pytest.mark.asyncio
     async def test_no_brute_force_resolve_of_outdated_threads(
@@ -448,9 +595,9 @@ class TestReviewEngine:
         mock_provider.resolve_outdated_review_threads.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_prior_chunk_comments_passed_as_context(self, sample_diff_text: str):
-        """Comments from chunk 1 are passed as existing_comments to chunk 2."""
-        chunk1_response = json.dumps(
+    async def test_parallel_chunks_share_base_existing(self, sample_diff_text: str):
+        """All parallel chunks receive the same base existing_comments (no cross-chunk injection)."""
+        chunk_response = json.dumps(
             {
                 "comments": [
                     {
@@ -463,32 +610,16 @@ class TestReviewEngine:
                         "confidence": 0.95,
                     }
                 ],
-                "summary": "Chunk 1 issues.",
+                "summary": "Issues found.",
                 "metadata": {"reviewed_files": 1},
             }
         )
-        chunk2_response = json.dumps(
-            {
-                "comments": [],
-                "summary": "Chunk 2 clean.",
-                "metadata": {"reviewed_files": 1},
-            }
-        )
-
-        call_count = 0
-
-        async def _side_effect(messages, json_mode=True, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return _WALKTHROUGH_LLM_RESPONSE
-            if call_count == 2:
-                return chunk1_response
-            return chunk2_response
 
         llm = MagicMock(spec=LLMProvider)
         llm.count_tokens = MagicMock(return_value=50)
-        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.review = AsyncMock(return_value=chunk_response)
+        llm.complete = AsyncMock(return_value=chunk_response)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         config = MiraConfig()
@@ -505,23 +636,17 @@ class TestReviewEngine:
         ) as mock_build:
             await engine.review_diff(sample_diff_text)
 
-            # Need at least 2 review chunks (calls 2+ after walkthrough)
+            # Need at least 2 review chunks
             assert mock_build.call_count >= 2, (
                 f"Expected >=2 chunk calls, got {mock_build.call_count}"
             )
 
-            # First chunk: no prior comments (existing_comments should be None)
-            _, first_kwargs = mock_build.call_args_list[0]
-            assert first_kwargs.get("existing_comments") is None
-
-            # Second chunk: should include comments generated by chunk 1
-            _, second_kwargs = mock_build.call_args_list[1]
-            existing = second_kwargs.get("existing_comments")
-            assert existing is not None, "Chunk 2 should receive prior chunk comments"
-            assert len(existing) == 1, "Expected exactly 1 prior chunk comment"
-            # The pending thread should reference the chunk 1 comment
-            assert any("src/utils.py" in t.path for t in existing)
-            assert any("Shell injection" in t.body for t in existing)
+            # All chunks should get the same existing_comments (None — no real threads)
+            for i, call in enumerate(mock_build.call_args_list):
+                _, kwargs = call
+                assert kwargs.get("existing_comments") is None, (
+                    f"Chunk {i + 1} should not receive synthetic cross-chunk comments"
+                )
 
 
 class TestDryRun:
@@ -570,18 +695,11 @@ class TestDryRun:
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-        call_count = 0
-
-        async def _side_effect(messages, json_mode=True, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return verify_response
-            if call_count == 2:
-                return json.dumps({"summary": "walkthrough", "file_changes": []})
-            return sample_llm_response_text
-
-        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.complete = AsyncMock(return_value=verify_response)
+        llm.walkthrough = AsyncMock(
+            return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
+        )
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider, bot_name="mira", dry_run=True
@@ -594,8 +712,8 @@ class TestDryRun:
         provider.get_unresolved_bot_threads.assert_awaited_once()
         provider.get_file_content.assert_awaited()
 
-        # LLM should be called (verify-fixes + walkthrough + review)
-        assert llm.complete.call_count >= 2
+        # LLM should be called (verify-fixes via complete, walkthrough + review)
+        assert llm.complete.call_count >= 1
 
         # Write operations should NOT be called
         provider.resolve_threads.assert_not_called()
@@ -692,18 +810,11 @@ class TestThreadResolution:
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-        call_count = 0
-
-        async def _side_effect(messages, json_mode=True, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return verify_response  # thread verification
-            if call_count == 2:
-                return json.dumps({"summary": "walkthrough", "file_changes": []})
-            return sample_llm_response_text
-
-        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.complete = AsyncMock(return_value=verify_response)
+        llm.walkthrough = AsyncMock(
+            return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
+        )
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
@@ -732,18 +843,11 @@ class TestThreadResolution:
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-        call_count = 0
-
-        async def _side_effect(messages, json_mode=True, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return verify_response
-            if call_count == 2:
-                return json.dumps({"summary": "walkthrough", "file_changes": []})
-            return sample_llm_response_text
-
-        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.complete = AsyncMock(return_value=verify_response)
+        llm.walkthrough = AsyncMock(
+            return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
+        )
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
@@ -774,18 +878,11 @@ class TestThreadResolution:
         llm.count_tokens = MagicMock(return_value=100)
         llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-        call_count = 0
-
-        async def _side_effect(messages, json_mode=True, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return verify_response
-            if call_count == 2:
-                return json.dumps({"summary": "walkthrough", "file_changes": []})
-            return sample_llm_response_text
-
-        llm.complete = AsyncMock(side_effect=_side_effect)
+        llm.complete = AsyncMock(return_value=verify_response)
+        llm.walkthrough = AsyncMock(
+            return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
+        )
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"

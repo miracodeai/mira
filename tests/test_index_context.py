@@ -89,42 +89,49 @@ def populated_store(store):
 
 
 class TestBuildCodeContext:
-    def test_includes_changed_file_summaries(self, populated_store):
-        ctx = build_code_context(["src/auth/service.py"], populated_store)
+    @pytest.mark.asyncio
+    async def test_includes_changed_file_summaries(self, populated_store):
+        ctx = await build_code_context(["src/auth/service.py"], populated_store)
         assert "src/auth/service.py" in ctx
         assert "Handles user authentication" in ctx
         assert "authenticate" in ctx
 
-    def test_includes_directory_summaries(self, populated_store):
-        ctx = build_code_context(["src/auth/service.py"], populated_store)
+    @pytest.mark.asyncio
+    async def test_includes_directory_summaries(self, populated_store):
+        ctx = await build_code_context(["src/auth/service.py"], populated_store)
         assert "Repository Structure" in ctx
         assert "Authentication middleware" in ctx
 
-    def test_includes_related_files(self, populated_store):
-        ctx = build_code_context(["src/auth/service.py"], populated_store)
+    @pytest.mark.asyncio
+    async def test_includes_related_files(self, populated_store):
+        ctx = await build_code_context(["src/auth/service.py"], populated_store)
         assert "Related Files" in ctx
         assert "src/db/models.py" in ctx
 
-    def test_includes_blast_radius(self, populated_store):
-        ctx = build_code_context(["src/auth/service.py"], populated_store)
+    @pytest.mark.asyncio
+    async def test_includes_blast_radius(self, populated_store):
+        ctx = await build_code_context(["src/auth/service.py"], populated_store)
         assert "Blast Radius" in ctx
         assert "src/api/routes.py" in ctx
         assert "handle_request" in ctx
 
-    def test_empty_index_returns_header_only(self, store):
-        ctx = build_code_context(["nonexistent.py"], store)
+    @pytest.mark.asyncio
+    async def test_empty_index_returns_header_only(self, store):
+        ctx = await build_code_context(["nonexistent.py"], store)
         assert "Codebase Context" in ctx
         # Should not crash, just have minimal content
         assert "Changed Files" not in ctx
 
-    def test_respects_token_budget(self, populated_store):
+    @pytest.mark.asyncio
+    async def test_respects_token_budget(self, populated_store):
         # Very small budget should truncate
-        ctx = build_code_context(["src/auth/service.py"], populated_store, token_budget=50)
+        ctx = await build_code_context(["src/auth/service.py"], populated_store, token_budget=50)
         assert "truncated" in ctx
 
-    def test_no_self_reference_in_related(self, populated_store):
+    @pytest.mark.asyncio
+    async def test_no_self_reference_in_related(self, populated_store):
         """Changed files should not appear in the 'related files' section."""
-        ctx = build_code_context(["src/auth/service.py", "src/db/models.py"], populated_store)
+        ctx = await build_code_context(["src/auth/service.py", "src/db/models.py"], populated_store)
         # models.py is imported by service.py but since it's also changed,
         # it shouldn't be in "Related Files"
         lines = ctx.split("\n")

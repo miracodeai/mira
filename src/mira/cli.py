@@ -228,18 +228,6 @@ def review(
     help="Webhook secret from GitHub App settings",
 )
 @click.option("--bot-name", envvar="MIRA_BOT_NAME", default="miracodeai", help="Bot @mention name")
-@click.option(
-    "--posthog-api-key",
-    envvar="POSTHOG_API_KEY",
-    default=None,
-    help="PostHog API key for anonymous usage metrics (disabled if not set)",
-)
-@click.option(
-    "--posthog-host",
-    envvar="POSTHOG_HOST",
-    default=None,
-    help="PostHog host URL",
-)
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 def serve(
     host: str,
@@ -248,8 +236,6 @@ def serve(
     private_key: str,
     webhook_secret: str,
     bot_name: str,
-    posthog_api_key: str | None,
-    posthog_host: str | None,
     verbose: bool,
 ) -> None:
     """Run the Mira GitHub App webhook server."""
@@ -257,7 +243,6 @@ def serve(
         import uvicorn
 
         from mira.github_app.auth import GitHubAppAuth
-        from mira.github_app.metrics import Metrics
         from mira.github_app.webhooks import create_app
     except ImportError as exc:
         raise click.ClickException(
@@ -280,9 +265,10 @@ def serve(
             raise click.ClickException(f"Private key file not found: {key_path}") from None
 
     app_auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-    metrics = Metrics(api_key=posthog_api_key, host=posthog_host)
     app = create_app(
-        app_auth=app_auth, webhook_secret=webhook_secret, bot_name=bot_name, metrics=metrics
+        app_auth=app_auth,
+        webhook_secret=webhook_secret,
+        bot_name=bot_name,
     )
 
     click.echo(f"Starting Mira webhook server on {host}:{port}")

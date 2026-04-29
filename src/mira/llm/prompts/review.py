@@ -30,6 +30,9 @@ def build_review_prompt(
     pr_description: str = "",
     existing_comments: list[UnresolvedThread] | None = None,
     code_context: str = "",
+    learned_rules: list[str] | None = None,
+    custom_rules: list[dict[str, str]] | None = None,
+    file_history: dict | None = None,
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -49,6 +52,26 @@ def build_review_prompt(
             for c in existing_comments
         ]
 
+    # Decision archaeology — flatten history dict into a list of (path, entries)
+    history_for_template = None
+    if file_history:
+        history_for_template = [
+            {
+                "path": path,
+                "commits": [
+                    {
+                        "sha": e.sha,
+                        "message": e.message,
+                        "author": e.author,
+                        "date": e.date,
+                    }
+                    for e in entries
+                ],
+            }
+            for path, entries in file_history.items()
+            if entries
+        ]
+
     system_content = template.render(
         pr_title=pr_title,
         pr_description=pr_description,
@@ -59,6 +82,9 @@ def build_review_prompt(
         focus_only_on_problems=config.review.focus_only_on_problems,
         existing_comments=cleaned_comments,
         has_code_context=bool(code_context),
+        learned_rules=learned_rules,
+        custom_rules=custom_rules,
+        file_history=history_for_template,
     )
 
     # Build user message with optional code context before diffs

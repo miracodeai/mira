@@ -1,0 +1,37 @@
+diff --git a/fake_repo/api_routes.py b/fake_repo/api_routes.py
+index 1234567..abcdef0 100644
+--- a/fake_repo/api_routes.py
++++ b/fake_repo/api_routes.py
+@@ -34,6 +34,14 @@ async def get_order(request: Any, order_id: int) -> dict:
+     return {"status": 200, "order": {"id": order.id, "status": order.status.value}}
+
+
++@require_auth
++async def cancel_order(request: Any, order_id: int) -> dict:
++    """Cancel an existing order."""
++    order = Order(id=order_id, user_id=request.user.id)
++    order.status = OrderStatus.CANCELLED
++    return {"status": 200, "order_id": order.id, "status": "cancelled"}
++
++
+ async def list_products(request: Any) -> dict:
+     """List all available products. No auth required."""
+     products = [
+diff --git a/fake_repo/validators.py b/fake_repo/validators.py
+index 1234567..abcdef0 100644
+--- a/fake_repo/validators.py
++++ b/fake_repo/validators.py
+@@ -38,3 +38,13 @@ def validate_payment(data: dict) -> list[str]:
+     if amount <= 0:
+         errors.append("amount must be positive")
+     return errors
++
++
++def validate_cancel(data: dict) -> list[str]:
++    """Validate order cancellation data."""
++    errors = []
++    if not data:
++        errors.append("Cancellation data is required")
++    if "order_id" not in data:
++        errors.append("order_id is required")
++    return errors

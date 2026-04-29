@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 import httpx
@@ -15,6 +16,13 @@ logger = logging.getLogger(__name__)
 # Tokens last 60 min; refresh when less than 5 min remaining.
 _TOKEN_TTL = 55 * 60  # 55 minutes
 _TOKEN_MIN_REMAINING = 5 * 60  # 5 minutes
+
+# GitHub Enterprise Server support — override via MIRA_GITHUB_API_URL
+# (e.g. "https://github.acme-corp.com/api/v3").
+_GITHUB_API_URL = os.environ.get(
+    "MIRA_GITHUB_API_URL",
+    "https://api.github.com",
+).rstrip("/")
 
 
 class GitHubAppAuth:
@@ -44,7 +52,7 @@ class GitHubAppAuth:
                 return token
 
         app_jwt = self._generate_jwt()
-        url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
+        url = f"{_GITHUB_API_URL}/app/installations/{installation_id}/access_tokens"
         headers = {
             "Authorization": f"Bearer {app_jwt}",
             "Accept": "application/vnd.github+json",
@@ -72,7 +80,7 @@ class GitHubAppAuth:
             "Accept": "application/vnd.github+json",
         }
         installations: list[dict[str, object]] = []
-        url: str | None = "https://api.github.com/app/installations?per_page=100"
+        url: str | None = f"{_GITHUB_API_URL}/app/installations?per_page=100"
 
         async with httpx.AsyncClient() as client:
             while url:
@@ -98,7 +106,7 @@ class GitHubAppAuth:
             "Accept": "application/vnd.github+json",
         }
         repos: list[dict[str, object]] = []
-        url: str | None = "https://api.github.com/installation/repositories?per_page=100"
+        url: str | None = f"{_GITHUB_API_URL}/installation/repositories?per_page=100"
 
         async with httpx.AsyncClient() as client:
             while url:

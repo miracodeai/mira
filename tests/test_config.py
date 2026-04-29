@@ -13,7 +13,7 @@ from mira.exceptions import ConfigError
 class TestLoadConfig:
     def test_default_config(self):
         config = load_config()
-        assert config.llm.model == "openai/gpt-4o"
+        assert config.llm.model == "anthropic/claude-sonnet-4-6"
         assert config.filter.confidence_threshold == 0.7
         assert config.filter.max_comments == 5
         assert config.review.focus_only_on_problems is False

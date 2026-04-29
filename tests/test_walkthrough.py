@@ -104,13 +104,10 @@ class TestBuildWalkthroughPrompt:
             config=config,
         )
         system = messages[0]["content"]
-        assert "sequence diagram" in system.lower() or "sequence_diagram" in system
-        # Prompt must instruct the LLM to use actual code components, not generic actors
-        assert "code-level component interactions" in system
-        # Verify the prohibition is explicit — template renders bold markdown
+        assert "sequence_diagram" in system or "sequence diagram" in system.lower()
+        # Template must instruct the LLM to use graph LR and avoid sequence diagrams
+        assert "graph LR" in system
         assert "**Do NOT**" in system
-        assert "**Do NOT** use abstract actors" in system
-        assert "Developer" in system
         assert "null" in system  # instruction to omit when no interactions
 
     def test_hunk_headers_extracted(self):
@@ -291,9 +288,10 @@ class TestWalkthroughToMarkdown:
             ),
         )
         md = result.to_markdown()
-        assert "**4/5**" in md
-        assert "SAFE WITH MINOR FIXES" in md
+        assert "Confidence: 4/5" in md
+        assert "Safe with minor fixes" in md
         assert "Looks good overall." in md
+        assert "<details>" in md
 
     def test_no_confidence_score_no_section(self):
         result = WalkthroughResult(summary="No score.")

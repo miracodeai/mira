@@ -29,10 +29,19 @@ Respond in JSON with this structure (no markdown fences):
             {"path": "src/utils/helpers.py", "symbol": "helper"}
           ]
         }
+      ],
+      "external_refs": [
+        {
+          "kind": "terraform_module|docker_image|api_endpoint|go_import|git_url|npm_package|pip_package",
+          "target": "the URL, module path, image name, or package name",
+          "description": "brief context of how it is used"
+        }
       ]
     }
   ]
 }
+
+5. External references: If the file references resources outside the repo (Terraform modules, Docker images, API endpoints, Go imports from other repos, git URLs, npm/pip packages), list them as `external_refs`. Omit this field or use an empty array if there are none.
 
 Be concise — these summaries will be used as context for code reviews, not as documentation. Only include exported/public symbols. Resolve relative imports to repo-relative paths.
 
