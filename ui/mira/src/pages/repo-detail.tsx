@@ -51,14 +51,6 @@ export function RepoDetailPage() {
     () => api.getRepo(owner!, repo!),
     [owner, repo],
   )
-  const { data: deps } = useAsync(
-    () => api.getDependencies(owner!, repo!),
-    [owner, repo],
-  )
-  const { data: extRefs } = useAsync(
-    () => api.getExternalRefs(owner!, repo!),
-    [owner, repo],
-  )
   const { data: packages } = useAsync(
     () => api.getPackages(owner!, repo!),
     [owner, repo],
@@ -529,23 +521,6 @@ function BlastRadiusList({ owner, repo }: { owner: string; repo: string }) {
       </p>
     )
   }
-
-  // Build data for the interactive graph
-  const coreFiles = (data?.internal ?? []).slice(0, 4).map((e) => ({
-    path: e.path,
-    symbols: e.affected_symbols,
-  }))
-
-  const dependentFiles = (data?.internal ?? []).slice(4, 10).map((e) => ({
-    path: e.path,
-    summary: e.summary,
-    symbols: e.affected_symbols,
-  }))
-
-  const crossRepoList = (data?.cross_repo ?? []).map((e) => ({
-    repo: e.repo,
-    refCount: e.files.length,
-  }))
 
   return (
     <div className="space-y-6">

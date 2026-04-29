@@ -338,8 +338,11 @@ export const api = {
         reviews: number
         comments: number
         blockers: number
+        warnings: number
+        suggestions: number
         lines_changed: number
         tokens_used: number
+        categories: Record<string, number>
       }[]
     >(`/api/stats/timeseries?period=${period}`),
 

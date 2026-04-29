@@ -1,9 +1,8 @@
-import { AlertTriangle, Loader2, Package, Search } from "lucide-react"
+import { AlertTriangle, Loader2, Search } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 import { Link } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -13,7 +12,6 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api, type PackageSearchHit } from "@/lib/api"
-import { useAsync } from "@/lib/hooks"
 
 const KIND_LABELS: Record<string, string> = {
   npm: "npm",

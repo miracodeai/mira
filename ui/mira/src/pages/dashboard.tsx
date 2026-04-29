@@ -5,11 +5,8 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Label,
   Line,
   LineChart,
-  Pie,
-  PieChart,
   XAxis,
   YAxis,
 } from "recharts"
@@ -470,58 +467,6 @@ function SeverityStackedBar({ data }: { data: TSPoint[] }) {
         <Bar dataKey="warnings" stackId="severity" fill="var(--color-warnings)" radius={[0, 0, 0, 0]} />
         <Bar dataKey="suggestions" stackId="severity" fill="var(--color-suggestions)" radius={[4, 4, 0, 0]} />
       </BarChart>
-    </ChartContainer>
-  )
-}
-
-// ── Severity donut (unused, kept for reference) ──
-
-const severityConfig = {
-  count: { label: "Issues" },
-  blockers: { label: "Blockers", color: "var(--chart-1)" },
-  warnings: { label: "Warnings", color: "var(--chart-4)" },
-  suggestions: { label: "Suggestions", color: "var(--chart-3)" },
-} satisfies ChartConfig
-
-function SeverityDonut({
-  blockers,
-  warnings,
-  suggestions,
-}: {
-  blockers: number
-  warnings: number
-  suggestions: number
-}) {
-  const total = blockers + warnings + suggestions
-  const data = [
-    { name: "blockers", count: blockers, fill: "var(--color-blockers)" },
-    { name: "warnings", count: warnings, fill: "var(--color-warnings)" },
-    { name: "suggestions", count: suggestions, fill: "var(--color-suggestions)" },
-  ].filter((d) => d.count > 0)
-
-  return (
-    <ChartContainer config={severityConfig} className="mx-auto aspect-square h-[250px]">
-      <PieChart>
-        <ChartTooltip cursor={false} content={<ChartTooltipContent hideLabel />} />
-        <Pie data={data} dataKey="count" nameKey="name" innerRadius={60}>
-          <Label
-            content={({ viewBox }) => {
-              if (viewBox && "cx" in viewBox && "cy" in viewBox) {
-                return (
-                  <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
-                    <tspan x={viewBox.cx} y={viewBox.cy} className="fill-foreground text-3xl font-bold">
-                      {total}
-                    </tspan>
-                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 24} className="fill-muted-foreground text-sm">
-                      issues
-                    </tspan>
-                  </text>
-                )
-              }
-            }}
-          />
-        </Pie>
-      </PieChart>
     </ChartContainer>
   )
 }

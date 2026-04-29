@@ -2,7 +2,6 @@ import { BookOpen, Globe, Pencil, Plus, Power, Trash2 } from "lucide-react"
 import { useEffect, useState } from "react"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
