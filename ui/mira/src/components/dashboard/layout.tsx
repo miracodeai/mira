@@ -1,4 +1,4 @@
-import { BookOpen, Brain, Database, GitFork, LayoutDashboard, LogOut, Moon, Package, Settings, Sun, Users } from "lucide-react"
+import { BookOpen, Brain, Database, GitFork, LayoutDashboard, LogOut, Moon, Package, Settings, ShieldAlert, Sun, Users } from "lucide-react"
 import { NavLink, Outlet, useLocation } from "react-router"
 
 import { useTheme } from "@/components/theme-provider"
@@ -34,9 +34,10 @@ const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/repos", icon: Database, label: "Repositories" },
   { to: "/packages", icon: Package, label: "Packages" },
+  { to: "/vulnerabilities", icon: ShieldAlert, label: "Vulnerabilities" },
   { to: "/relationships", icon: GitFork, label: "Relationships" },
   { to: "/rules", icon: BookOpen, label: "Rules" },
-  { to: "/learned-rules", icon: Brain, label: "Learned" },
+  { to: "/learnings", icon: Brain, label: "Learnings" },
   { to: "/users", icon: Users, label: "Users", adminOnly: true },
   { to: "/settings", icon: Settings, label: "Settings", adminOnly: true },
 ]
@@ -44,9 +45,10 @@ const navItems = [
 const PAGE_LABELS: Record<string, string> = {
   repos: "Repositories",
   packages: "Packages",
+  vulnerabilities: "Vulnerabilities",
   relationships: "Relationships",
   rules: "Rules",
-  "learned-rules": "Learned",
+  learnings: "Learnings",
   settings: "Settings",
   users: "Users",
 }
@@ -190,7 +192,7 @@ function ThemeToggle() {
     const newTheme = isDark ? "light" : "dark"
     setTheme(newTheme)
     // Save to user profile in DB
-    const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8100"
+    const API_BASE = import.meta.env.VITE_API_URL || ""
     fetch(`${API_BASE}/api/auth/theme`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

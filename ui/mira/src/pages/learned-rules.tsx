@@ -49,10 +49,10 @@ export function LearnedRulesPage() {
   return (
     <div className="space-y-6 p-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Learned Rules</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Learnings</h1>
         <p className="text-sm text-muted-foreground">
-          What Mira has figured out from PR feedback and merged-PR signals. These
-          rules inject into every review automatically — no configuration needed.
+          What Mira has learned from your team's PR feedback. These inject into
+          every review automatically — no configuration needed.
         </p>
       </div>
 
@@ -60,7 +60,7 @@ export function LearnedRulesPage() {
         <Card>
           <CardContent className="space-y-3 py-12 text-center">
             <Brain className="mx-auto h-8 w-8 text-muted-foreground" />
-            <p className="text-sm font-medium">No rules learned yet</p>
+            <p className="text-sm font-medium">No learnings yet</p>
             <p className="mx-auto max-w-md text-sm text-muted-foreground">
               Mira learns from <code className="font-mono">@mira-bot reject</code>{" "}
               dismissals and from human review comments on merged PRs. Reach

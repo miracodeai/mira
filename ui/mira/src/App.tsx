@@ -17,8 +17,9 @@ import { SettingsPage } from "@/pages/settings"
 import { SetupPage } from "@/pages/setup"
 import { RulesPage } from "@/pages/rules"
 import { UsersPage } from "@/pages/users"
+import { VulnerabilitiesPage } from "@/pages/vulnerabilities"
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8100"
+const API_BASE = import.meta.env.VITE_API_URL || ""
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -188,7 +189,8 @@ export function App() {
           <Route path="packages" element={<PackagesPage />} />
           <Route path="relationships" element={<RelationshipsPage />} />
           <Route path="rules" element={<RulesPage />} />
-          <Route path="learned-rules" element={<LearnedRulesPage />} />
+          <Route path="learnings" element={<LearnedRulesPage />} />
+          <Route path="vulnerabilities" element={<VulnerabilitiesPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

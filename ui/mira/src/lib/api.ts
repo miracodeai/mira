@@ -1,4 +1,6 @@
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8100"
+// Empty default → same-origin requests (production single-container).
+// In dev, set VITE_API_URL=http://localhost:8100 in ui/mira/.env.local.
+const API_BASE = import.meta.env.VITE_API_URL || ""
 
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { credentials: "include" })

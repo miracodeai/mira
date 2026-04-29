@@ -222,13 +222,14 @@ class LLMProvider:
         messages: list[dict[str, str]],
         json_mode: bool,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """Make a single LLM call with retries via OpenRouter."""
         body: dict = {
             "model": _strip_model_prefix(model),
             "messages": messages,
             "temperature": temperature if temperature is not None else self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self.config.max_tokens,
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
@@ -331,16 +332,21 @@ class LLMProvider:
         messages: list[dict[str, str]],
         json_mode: bool = True,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """Complete a prompt using JSON mode, with fallback model support.
 
         Args:
             temperature: Override the default temperature for this call.
                          Use ``0.0`` for deterministic tasks like verification.
+            max_tokens: Override the default output token cap for this call.
+                        Indexing summarization needs ~16k to avoid truncation
+                        on large batches; the default 4096 cuts JSON off.
         """
         try:
             return await self._call_llm(
-                self.config.model, messages, json_mode, temperature=temperature
+                self.config.model, messages, json_mode,
+                temperature=temperature, max_tokens=max_tokens,
             )
         except Exception as primary_err:
             if self.config.fallback_model:
@@ -352,7 +358,8 @@ class LLMProvider:
                 )
                 try:
                     return await self._call_llm(
-                        self.config.fallback_model, messages, json_mode, temperature=temperature
+                        self.config.fallback_model, messages, json_mode,
+                        temperature=temperature, max_tokens=max_tokens,
                     )
                 except Exception as fallback_err:
                     raise LLMError(

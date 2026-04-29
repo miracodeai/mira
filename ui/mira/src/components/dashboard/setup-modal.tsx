@@ -77,10 +77,15 @@ export function SetupModal({
   }
 
   const handleSkip = () => {
-    // Mark these repos as skipped (index_mode = none) so the popup won't show again
-    Promise.all(
-      repos.map((r) => api.completeSetup([{ owner: r.owner, repo: r.repo, enabled: false }], "full"))
-    ).finally(() => onComplete())
+    // Mark all repos as skipped in a single request — multiple parallel calls
+    // would race against the backend indexer, which reads the whole repos
+    // table after each call.
+    api
+      .completeSetup(
+        repos.map((r) => ({ owner: r.owner, repo: r.repo, enabled: false })),
+        "full",
+      )
+      .finally(() => onComplete())
   }
 
   const orgName = repos.length > 0 ? repos[0].owner : "your organization"

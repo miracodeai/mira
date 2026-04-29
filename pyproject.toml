@@ -48,6 +48,10 @@ serve = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.28",
     "PyJWT[crypto]>=2.8",
+    # Postgres driver — used when DATABASE_URL is set. Optional at runtime
+    # (SQLite is the default), but bundled so the Docker image works with
+    # either backend out of the box.
+    "psycopg[binary]>=3.1",
 ]
 
 [project.scripts]

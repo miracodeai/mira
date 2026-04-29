@@ -1,33 +1,25 @@
-"""Model resolution — reads from DB settings first, falls back to config."""
+"""Model resolution — reads from DB settings first, falls back to config.
+
+Model lists, pricing, and capabilities all come from
+``src/mira/llm/models.json`` via ``mira.llm.registry``. Add or remove a
+model there; this file picks it up automatically.
+"""
 
 from __future__ import annotations
 
 from mira.config import LLMConfig
+from mira.llm import registry
 
-# Model pricing per 1M tokens (USD), from OpenRouter
-# (input, output)
+# ── Backwards-compatible accessors ──
+# Older imports of MODEL_PRICING / INDEXING_MODELS / REVIEW_MODELS still
+# work; they now derive from the registry.
+
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "anthropic/claude-haiku-4-5": (1.00, 5.00),
-    "anthropic/claude-sonnet-4-6": (3.00, 15.00),
-    "anthropic/claude-opus-4-6": (15.00, 75.00),
-    "openai/gpt-4o-mini": (0.15, 0.60),
-    "openai/gpt-4o": (2.50, 10.00),
+    model_id: registry.pricing(model_id) for model_id in registry.all_models()
 }
 
-# Available model choices for the dropdown
-INDEXING_MODELS = [
-    {"value": "anthropic/claude-haiku-4-5", "label": "Claude Haiku 4.5", "recommended": True},
-    {"value": "openai/gpt-4o-mini", "label": "GPT-4o mini"},
-    {"value": "anthropic/claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
-    {"value": "openai/gpt-4o", "label": "GPT-4o"},
-]
-
-REVIEW_MODELS = [
-    {"value": "anthropic/claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "recommended": True},
-    {"value": "openai/gpt-4o", "label": "GPT-4o"},
-    {"value": "anthropic/claude-opus-4-6", "label": "Claude Opus 4.6"},
-    {"value": "anthropic/claude-haiku-4-5", "label": "Claude Haiku 4.5"},
-]
+INDEXING_MODELS = registry.models_for_purpose("indexing")
+REVIEW_MODELS = registry.models_for_purpose("review")
 
 
 def estimate_indexing_cost(file_count: int, model: str) -> dict:

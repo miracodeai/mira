@@ -378,6 +378,21 @@ def get_models() -> ModelsResponse:
 
 @router.put("/api/settings/models")
 def set_models(body: ModelsUpdate) -> dict:
+    from mira.llm.registry import is_supported
+
+    # Reject unsupported or wrong-purpose models. Without this, an admin can
+    # silently configure a model that's broken (no JSON mode, missing from
+    # the registry, miscategorized for the role).
+    if not is_supported(body.indexing_model, purpose="indexing"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{body.indexing_model!r} is not a supported indexing model.",
+        )
+    if not is_supported(body.review_model, purpose="review"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{body.review_model!r} is not a supported review model.",
+        )
     _app_db.set_setting("indexing_model", body.indexing_model)
     _app_db.set_setting("review_model", body.review_model)
     _app_db.mark_setup_complete()
@@ -557,24 +572,28 @@ class SetupRequest(BaseModel):
 @router.post("/api/setup/complete")
 async def complete_setup(body: SetupRequest) -> dict:
     """Save setup choices and start indexing selected repos."""
+    enabled_count = 0
     for r in body.repos:
         owner, repo = r["owner"], r["repo"]
         enabled = r.get("enabled", True)
         mode = body.index_mode if enabled else "none"
         _app_db.set_repo_index_mode(owner, repo, mode)
-        # Immediately flip enabled repos to "indexing" so they don't re-appear as pending
         if enabled:
             _app_db.set_repo_status(owner, repo, "indexing")
+            enabled_count += 1
 
     _app_db.mark_setup_complete()
 
-    # Start indexing in background
-    import asyncio
+    # Only fire the background indexer if this request actually enabled repos.
+    # Otherwise (Skip for now / all-disabled), don't start anything — the
+    # indexer reads ALL repos from the DB and would race with sibling requests
+    # that haven't yet set their repos to mode='none'.
+    if enabled_count > 0:
+        import asyncio
 
-    asyncio.create_task(_run_initial_indexing(body.index_mode))
+        asyncio.create_task(_run_initial_indexing(body.index_mode))
 
-    enabled_count = sum(1 for r in body.repos if r.get("enabled", True))
-    return {"status": "indexing", "repos": enabled_count}
+    return {"status": "indexing" if enabled_count else "skipped", "repos": enabled_count}
 
 
 async def _run_initial_indexing(default_mode: str) -> None:
@@ -938,20 +957,32 @@ class PackageModel(BaseModel):
 
 @router.get("/api/repos/{owner}/{repo}/packages", response_model=list[PackageModel])
 def get_packages(owner: str, repo: str) -> list[PackageModel]:
-    """List declared dependencies parsed from manifest files (package.json,
-    requirements.txt, pyproject.toml, go.mod, Dockerfile)."""
+    """List dependencies parsed from manifest and lockfile files.
+
+    When the same package appears in both a manifest (e.g. `pyproject.toml`
+    declaring `>=1.30`) and a lockfile (e.g. `uv.lock` resolving to
+    `1.99.5`), the lockfile entry wins — its concrete version is what's
+    actually installed.
+    """
+    from mira.index.manifests import _is_lockfile_path
+
     with _open_store(owner, repo) as store:
         rows = store.list_manifest_packages()
-        return [
-            PackageModel(
-                name=r.name,
-                kind=r.kind,
-                version=r.version,
-                file_path=r.file_path,
-                is_dev=r.is_dev,
-            )
-            for r in rows
-        ]
+
+    # Dedupe by (kind, name), preferring lockfile rows.
+    by_key: dict[tuple[str, str], PackageModel] = {}
+    for r in rows:
+        model = PackageModel(
+            name=r.name, kind=r.kind, version=r.version,
+            file_path=r.file_path, is_dev=r.is_dev,
+        )
+        key = (r.kind, r.name)
+        existing = by_key.get(key)
+        if existing is None or (
+            _is_lockfile_path(r.file_path) and not _is_lockfile_path(existing.file_path)
+        ):
+            by_key[key] = model
+    return sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
 
 
 class PackageSearchHit(BaseModel):
@@ -1036,16 +1067,17 @@ class OrgVulnerabilityModel(VulnerabilityModel):
 
 @router.get("/api/vulnerabilities", response_model=list[OrgVulnerabilityModel])
 def list_org_vulnerabilities(limit: int = 1000) -> list[OrgVulnerabilityModel]:
-    """List every open vulnerability across the org. Postgres-only."""
+    """List every open vulnerability across the org."""
     db_url = os.environ.get("DATABASE_URL", "")
-    if not (db_url.startswith("postgresql://") or db_url.startswith("postgres://")):
-        raise HTTPException(
-            status_code=501,
-            detail="Org-wide vulnerability listing requires a Postgres-backed index store.",
-        )
-    from mira.index.pg_store import list_vulnerabilities_org_wide
+    capped = max(1, min(limit, 5000))
+    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        from mira.index.pg_store import list_vulnerabilities_org_wide
 
-    rows = list_vulnerabilities_org_wide(db_url, limit=max(1, min(limit, 5000)))
+        rows = list_vulnerabilities_org_wide(db_url, limit=capped)
+    else:
+        from mira.index.store import list_vulnerabilities_org_wide_sqlite
+
+        rows = list_vulnerabilities_org_wide_sqlite(limit=capped)
     return [
         OrgVulnerabilityModel(
             owner=r["owner"],
@@ -1076,21 +1108,19 @@ def search_packages(
     valuable for security incident response ("which repos use lodash@4.17.20
     after this CVE?") and upgrade audits."""
     db_url = os.environ.get("DATABASE_URL", "")
-    if not (db_url.startswith("postgresql://") or db_url.startswith("postgres://")):
-        raise HTTPException(
-            status_code=501,
-            detail="Org-wide package search requires a Postgres-backed index store.",
-        )
-    from mira.index.pg_store import search_packages_org_wide
+    capped_limit = max(1, min(limit, 2000))
+    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        from mira.index.pg_store import search_packages_org_wide
 
-    rows = search_packages_org_wide(
-        db_url,
-        name=name,
-        version=version,
-        kind=kind,
-        is_dev=is_dev,
-        limit=max(1, min(limit, 2000)),
-    )
+        rows = search_packages_org_wide(
+            db_url, name=name, version=version, kind=kind, is_dev=is_dev, limit=capped_limit,
+        )
+    else:
+        from mira.index.store import search_packages_org_wide_sqlite
+
+        rows = search_packages_org_wide_sqlite(
+            name=name, version=version, kind=kind, is_dev=is_dev, limit=capped_limit,
+        )
     return [PackageSearchHit(**r) for r in rows]
 
 
@@ -1256,16 +1286,17 @@ def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
 
 @router.get("/api/learned-rules", response_model=list[OrgLearnedRuleModel])
 def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
-    """Active learned rules across every repo in the org. Postgres-only."""
+    """Active learned rules across every repo in the org."""
     db_url = os.environ.get("DATABASE_URL", "")
-    if not (db_url.startswith("postgresql://") or db_url.startswith("postgres://")):
-        raise HTTPException(
-            status_code=501,
-            detail="Org-wide learned rules require a Postgres-backed index store.",
-        )
-    from mira.index.pg_store import list_learned_rules_org_wide
+    capped = max(1, min(limit, 2000))
+    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        from mira.index.pg_store import list_learned_rules_org_wide
 
-    rows = list_learned_rules_org_wide(db_url, limit=max(1, min(limit, 2000)))
+        rows = list_learned_rules_org_wide(db_url, limit=capped)
+    else:
+        from mira.index.store import list_learned_rules_org_wide_sqlite
+
+        rows = list_learned_rules_org_wide_sqlite(limit=capped)
     return [
         OrgLearnedRuleModel(
             owner=r["owner"],
@@ -1699,9 +1730,14 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
         count = 0
         store = None
         try:
+            from mira.dashboard.models_config import llm_config_for
+
             tracker.start(full_name)
             config = load_config()
-            llm = LLMProvider(config.llm)
+            # Use the configured indexing model (typically Haiku) — without
+            # this swap we'd silently fall back to the review model (Sonnet),
+            # ~3× slower and ~3× more expensive per token.
+            llm = LLMProvider(llm_config_for("indexing", config.llm))
             store = IndexStore.open(owner, repo)
             if full:
                 # Wipe existing index

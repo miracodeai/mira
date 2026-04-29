@@ -71,8 +71,16 @@ async def test_index_repo_raises_on_cancel(tmp_path, monkeypatch):
     async def fake_tree(*a, **kw):
         return ["a.py", "b.py", "c.py", "d.py"]
 
+    # Larger than the trivial-file threshold so each file routes through the
+    # LLM batch path (where the cancel check fires). A trivial file would
+    # bypass the loop and skip the cancellation point.
+    _content_pad = "# pad line\n" * 80
+
     async def fake_fetch(owner, repo, path, token, ref, semaphore):
-        return f"# contents of {path}\n"
+        return f"# contents of {path}\n{_content_pad}"
+
+    async def fake_tarball(owner, repo, token, ref="main"):
+        return {p: f"# contents of {p}\n{_content_pad}" for p in ["a.py", "b.py", "c.py", "d.py"]}
 
     async def fake_summarize_batch(batch, llm, sem):
         return [
@@ -86,6 +94,7 @@ async def test_index_repo_raises_on_cancel(tmp_path, monkeypatch):
     monkeypatch.setattr(idx_mod, "_fetch_default_branch", fake_branch)
     monkeypatch.setattr(idx_mod, "_fetch_repo_tree", fake_tree)
     monkeypatch.setattr(idx_mod, "_fetch_file_content", fake_fetch)
+    monkeypatch.setattr(idx_mod, "_fetch_repo_tarball", fake_tarball)
     monkeypatch.setattr(idx_mod, "_summarize_batch", fake_summarize_batch)
     monkeypatch.setattr(idx_mod, "_summarize_directories", fake_summarize_dirs)
     # Force batch size of 1 so we can cancel between files deterministically.

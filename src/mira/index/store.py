@@ -1110,6 +1110,29 @@ class IndexStore:
         self._conn.commit()
         return len(vulns)
 
+    def prune_stale_vulnerabilities(
+        self, active_keys: set[tuple[str, str, str]]
+    ) -> int:
+        """Delete vulnerability rows whose (name, ecosystem, version) tuple
+        is no longer in this repo's dependency set.
+
+        Called by the OSV poller before each scan so stale advisories from
+        previous package versions (e.g. `litellm 1.30` after `uv.lock`
+        resolves to `1.81.10`) don't linger.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT package_name, ecosystem, package_version FROM vulnerabilities"
+        ).fetchall()
+        stale = [(n, e, v) for n, e, v in rows if (n, e, v) not in active_keys]
+        if not stale:
+            return 0
+        self._conn.executemany(
+            "DELETE FROM vulnerabilities WHERE package_name=? AND ecosystem=? AND package_version=?",
+            stale,
+        )
+        self._conn.commit()
+        return len(stale)
+
     def list_vulnerabilities(self) -> list[VulnerabilityRow]:
         rows = self._conn.execute(
             "SELECT id, package_name, ecosystem, package_version, cve_id, "
@@ -1142,3 +1165,147 @@ class IndexStore:
             "SELECT severity, COUNT(*) FROM vulnerabilities GROUP BY severity"
         ).fetchall()
         return {r[0]: r[1] for r in rows}
+
+# ── Org-wide aggregation over per-repo SQLite stores ──────────────
+#
+# These mirror the Postgres helpers in pg_store.py for self-host setups
+# where each repo is a separate SQLite file under MIRA_INDEX_DIR.
+
+def _iter_repo_dbs(index_dir: str) -> list[tuple[str, str, str]]:
+    """Yield (owner, repo, db_path) for each repo SQLite file under index_dir."""
+    out: list[tuple[str, str, str]] = []
+    if not os.path.isdir(index_dir):
+        return out
+    for owner in sorted(os.listdir(index_dir)):
+        owner_dir = os.path.join(index_dir, owner)
+        if not os.path.isdir(owner_dir) or owner.startswith("_") or owner.startswith("."):
+            continue
+        for fname in sorted(os.listdir(owner_dir)):
+            if not fname.endswith(".db"):
+                continue
+            repo = fname[:-3]
+            out.append((owner, repo, os.path.join(owner_dir, fname)))
+    return out
+
+
+def list_packages_org_wide_sqlite() -> list[dict]:
+    """SQLite equivalent of pg_store.list_packages_org_wide."""
+    index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
+    out: list[dict] = []
+    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT kind, name, version, file_path FROM package_manifests "
+                    "WHERE kind IN ('npm', 'pip', 'go', 'rust') AND version != ''"
+                ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+        for kind, name, version, file_path in rows:
+            out.append({
+                "owner": owner, "repo": repo, "kind": kind, "name": name,
+                "version": version, "file_path": file_path,
+            })
+    return out
+
+
+def search_packages_org_wide_sqlite(
+    name: str | None = None,
+    version: str | None = None,
+    kind: str | None = None,
+    is_dev: bool | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """SQLite equivalent of pg_store.search_packages_org_wide."""
+    index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
+    name_l = name.lower() if name else None
+    version_l = version.lower() if version else None
+
+    rows: list[dict] = []
+    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.execute(
+                    "SELECT name, kind, version, file_path, is_dev FROM package_manifests"
+                )
+                for r_name, r_kind, r_version, r_file, r_dev in cur.fetchall():
+                    if name_l and name_l not in r_name.lower():
+                        continue
+                    if version_l and version_l not in r_version.lower():
+                        continue
+                    if kind and r_kind != kind:
+                        continue
+                    if is_dev is not None and bool(r_dev) != is_dev:
+                        continue
+                    rows.append({
+                        "owner": owner, "repo": repo, "name": r_name, "kind": r_kind,
+                        "version": r_version, "file_path": r_file, "is_dev": bool(r_dev),
+                    })
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+
+    rows.sort(key=lambda r: (r["name"].lower(), r["owner"], r["repo"]))
+    return rows[:limit]
+
+
+def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
+    """SQLite equivalent of pg_store.list_vulnerabilities_org_wide."""
+    index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
+    severity_order = {"critical": 0, "high": 1, "moderate": 2, "low": 3}
+    rows: list[dict] = []
+    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.execute(
+                    "SELECT package_name, ecosystem, package_version, cve_id, summary, "
+                    "severity, advisory_url, fixed_in, last_seen_at FROM vulnerabilities"
+                )
+                for r in cur.fetchall():
+                    rows.append({
+                        "owner": owner, "repo": repo, "package_name": r[0],
+                        "ecosystem": r[1], "package_version": r[2], "cve_id": r[3],
+                        "summary": r[4], "severity": r[5], "advisory_url": r[6],
+                        "fixed_in": r[7], "last_seen_at": r[8],
+                    })
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+
+    rows.sort(key=lambda r: (severity_order.get(r["severity"], 4), r["package_name"].lower()))
+    return rows[:limit]
+
+
+
+def list_learned_rules_org_wide_sqlite(limit: int = 500) -> list[dict]:
+    """SQLite equivalent of pg_store.list_learned_rules_org_wide."""
+    index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
+    rows: list[dict] = []
+    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.execute(
+                    "SELECT rule_text, source_signal, category, path_pattern, "
+                    "sample_count, updated_at FROM learned_rules WHERE active = 1 "
+                    "ORDER BY updated_at DESC"
+                )
+                for r in cur.fetchall():
+                    rows.append({
+                        "owner": owner, "repo": repo, "rule_text": r[0],
+                        "source_signal": r[1], "category": r[2], "path_pattern": r[3],
+                        "sample_count": r[4], "updated_at": r[5],
+                    })
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+    rows.sort(key=lambda r: -(r["updated_at"] or 0.0))
+    return rows[:limit]

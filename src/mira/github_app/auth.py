@@ -25,12 +25,20 @@ _GITHUB_API_URL = os.environ.get(
 ).rstrip("/")
 
 
+def _resolve_private_key(value: str) -> str:
+    """Accept either raw PEM text or `@path/to/key.pem` and return PEM text."""
+    if value.startswith("@"):
+        with open(value[1:]) as f:
+            return f.read()
+    return value
+
+
 class GitHubAppAuth:
     """Handles GitHub App JWT generation and installation token caching."""
 
     def __init__(self, app_id: str, private_key: str) -> None:
         self._app_id = app_id
-        self._private_key = private_key
+        self._private_key = _resolve_private_key(private_key)
         self._token_cache: dict[int, tuple[str, float]] = {}
 
     def _generate_jwt(self) -> str:

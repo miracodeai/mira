@@ -276,18 +276,23 @@ def list_vulnerabilities_org_wide(url: str, limit: int = 1000) -> list[dict]:
 
 
 def list_packages_org_wide(url: str) -> list[dict]:
-    """List every (owner, repo, ecosystem, name, version) tuple across the
-    whole org. Used by the OSV poller to know what to query."""
+    """List every (owner, repo, ecosystem, name, version, file_path) tuple
+    across the whole org. Used by the OSV poller to know what to query;
+    file_path lets the poller prefer lockfile rows over manifest rows."""
     conn = _get_conn(url)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT owner, repo, kind, name, version "
+            "SELECT DISTINCT owner, repo, kind, name, version, file_path "
             "FROM package_manifests "
             "WHERE kind IN ('npm', 'pip', 'go', 'rust') AND version <> ''"
         )
         rows = cur.fetchall()
     return [
-        {"owner": r[0], "repo": r[1], "kind": r[2], "name": r[3], "version": r[4]} for r in rows
+        {
+            "owner": r[0], "repo": r[1], "kind": r[2], "name": r[3],
+            "version": r[4], "file_path": r[5],
+        }
+        for r in rows
     ]
 
 
@@ -1252,6 +1257,33 @@ class PgIndexStore:
                 )
         self._conn.commit()
         return len(vulns)
+
+    def prune_stale_vulnerabilities(
+        self, active_keys: set[tuple[str, str, str]]
+    ) -> int:
+        """Delete vulnerability rows whose (name, ecosystem, version) tuple
+        is no longer in this repo's dependency set.
+
+        Called by the OSV poller before each scan so that, e.g., when a
+        manifest constraint (`>=1.30`) is replaced by a lockfile resolution
+        (`1.81.10`), the stale `1.30` advisories don't linger in the UI.
+        """
+        rows = self._fetchall(
+            "SELECT DISTINCT package_name, ecosystem, package_version "
+            "FROM vulnerabilities WHERE owner=%s AND repo=%s",
+            (self._owner, self._repo),
+        )
+        stale = [(n, e, v) for n, e, v in rows if (n, e, v) not in active_keys]
+        if not stale:
+            return 0
+        with self._conn.cursor() as cur:
+            cur.executemany(
+                "DELETE FROM vulnerabilities WHERE owner=%s AND repo=%s "
+                "AND package_name=%s AND ecosystem=%s AND package_version=%s",
+                [(self._owner, self._repo, *k) for k in stale],
+            )
+        self._conn.commit()
+        return len(stale)
 
     def list_vulnerabilities(self):  # type: ignore[no-untyped-def]
         from mira.index.store import VulnerabilityRow

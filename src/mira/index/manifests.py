@@ -293,15 +293,124 @@ def parse_dockerfile(content: str, file_path: str) -> list[ParsedPackage]:
     return out
 
 
+# ── Lockfile parsers ──
+#
+# Lockfiles record the *resolved* version of every transitive dependency,
+# unlike manifests which only record the constraint declared by the human.
+# Resolved versions are what OSV.dev should match against to know if the
+# code is actually vulnerable — `^4.17.20` plus the lockfile resolving to
+# `4.17.21` (patched) is a very different security posture than just
+# trusting the constraint.
+
+
+def parse_uv_lock(content: str, file_path: str) -> list[ParsedPackage]:
+    """Parse a `uv.lock` (TOML) file. Records resolved versions for pip.
+
+    Schema:
+      [[package]]
+      name = "..."
+      version = "..."
+    """
+    if tomllib is None:
+        return []
+    try:
+        data = tomllib.loads(content)
+    except Exception as exc:
+        logger.debug("Skipping %s (invalid TOML): %s", file_path, exc)
+        return []
+    out: list[ParsedPackage] = []
+    for pkg in data.get("package") or []:
+        if not isinstance(pkg, dict):
+            continue
+        name = pkg.get("name")
+        version = pkg.get("version")
+        if isinstance(name, str) and isinstance(version, str) and name:
+            out.append(
+                ParsedPackage(name=name, kind="pip", version=version, file_path=file_path)
+            )
+    return out
+
+
+def parse_poetry_lock(content: str, file_path: str) -> list[ParsedPackage]:
+    """Parse a `poetry.lock` (TOML) file. Same shape as uv.lock."""
+    return parse_uv_lock(content, file_path)
+
+
+def parse_package_lock_json(content: str, file_path: str) -> list[ParsedPackage]:
+    """Parse a `package-lock.json` (npm v2/v3 lockfile).
+
+    Modern npm lockfiles use a flat ``packages`` map keyed by relative path
+    (e.g. ``"node_modules/lodash"``). Each entry has a concrete ``version``.
+    The root entry has key ``""`` and we skip it (it's the project itself).
+    """
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.debug("Skipping %s (invalid JSON): %s", file_path, exc)
+        return []
+
+    out: list[ParsedPackage] = []
+    packages = data.get("packages")
+    if isinstance(packages, dict):
+        for path, info in packages.items():
+            if not path or not isinstance(info, dict):
+                continue
+            # path is "node_modules/x" or "node_modules/x/node_modules/y"
+            # — the package name is the last segment, accounting for scopes.
+            parts = path.split("node_modules/")
+            tail = parts[-1] if parts else ""
+            if not tail:
+                continue
+            # Scoped packages: "@scope/name"
+            if tail.startswith("@") and "/" in tail:
+                segs = tail.split("/", 2)
+                name = "/".join(segs[:2])
+            else:
+                name = tail.split("/", 1)[0]
+            version = info.get("version")
+            if not isinstance(version, str) or not version:
+                continue
+            is_dev = bool(info.get("dev"))
+            out.append(
+                ParsedPackage(
+                    name=name, kind="npm", version=version, file_path=file_path, is_dev=is_dev,
+                )
+            )
+        return out
+
+    # Legacy npm v1 lockfile uses nested "dependencies" tree.
+    deps = data.get("dependencies")
+    if isinstance(deps, dict):
+        for name, info in deps.items():
+            if not isinstance(info, dict):
+                continue
+            version = info.get("version")
+            if isinstance(version, str) and version:
+                out.append(
+                    ParsedPackage(name=name, kind="npm", version=version, file_path=file_path)
+                )
+    return out
+
+
 # ── Dispatch ──
 
 _PARSERS: list[tuple[re.Pattern[str], object]] = [
+    # Lockfiles first — when both a manifest and a lockfile exist, the
+    # lockfile entry's resolved version is what we want for vuln matching.
+    (re.compile(r"(^|/)uv\.lock$"), parse_uv_lock),
+    (re.compile(r"(^|/)poetry\.lock$"), parse_poetry_lock),
+    (re.compile(r"(^|/)package-lock\.json$"), parse_package_lock_json),
     (re.compile(r"(^|/)package\.json$"), parse_package_json),
     (re.compile(r"(^|/)requirements[^/]*\.txt$"), parse_requirements_txt),
     (re.compile(r"(^|/)pyproject\.toml$"), parse_pyproject_toml),
     (re.compile(r"(^|/)go\.mod$"), parse_go_mod),
     (re.compile(r"(^|/)(Dockerfile|[^/]+\.Dockerfile)$"), parse_dockerfile),
 ]
+
+
+def _is_lockfile_path(path: str) -> bool:
+    """Heuristic — does this path look like a lockfile (resolved versions)?"""
+    return bool(re.search(r"(^|/)(uv|poetry)\.lock$|(^|/)package-lock\.json$", path))
 
 
 def is_manifest(path: str) -> bool:

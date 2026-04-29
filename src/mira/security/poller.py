@@ -14,11 +14,36 @@ import os
 from collections import defaultdict
 from collections.abc import Iterable
 
+from mira.index.manifests import _is_lockfile_path
 from mira.security.osv import (
     PackageQuery,
     osv_ecosystem,
     query_batch,
 )
+
+
+def _prefer_resolved(rows: list[dict]) -> list[dict]:
+    """Dedupe by (owner, repo, ecosystem, name) preferring lockfile entries.
+
+    Manifests record version *constraints* like ``>=1.30`` — sending those
+    to OSV produces false positives because OSV interprets them as concrete
+    versions and matches against everything in that range. Lockfiles record
+    the *resolved* version, which is what we actually want to scan against.
+    """
+    by_key: dict[tuple[str, str, str, str], dict] = {}
+    for r in rows:
+        key = (r["owner"], r["repo"], r["kind"], r["name"])
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = r
+            continue
+        # Prefer the row coming from a lockfile path. If both or neither are
+        # lockfile rows, keep the first one.
+        if _is_lockfile_path(r.get("file_path", "")) and not _is_lockfile_path(
+            existing.get("file_path", "")
+        ):
+            by_key[key] = r
+    return list(by_key.values())
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +71,11 @@ async def poll_org_wide() -> dict[str, int]:
         logger.debug("Vuln poller: no packages to scan")
         return {}
 
+    # Per (owner, repo, ecosystem, name), prefer the lockfile entry (resolved
+    # version) over the manifest entry (constraint like ">=1.30") so OSV
+    # gets accurate concrete versions to match against.
+    rows = _prefer_resolved(rows)
+
     # Build OSV queries — dedupe by (ecosystem, name, version) so we don't
     # hit the API multiple times for the same tuple appearing in many repos.
     unique_packages: dict[tuple[str, str, str], list[tuple[str, str]]] = defaultdict(list)
@@ -57,6 +87,23 @@ async def poll_org_wide() -> dict[str, int]:
 
     if not unique_packages:
         return {}
+
+    # Build the set of (name, ecosystem, version) tuples each repo currently
+    # depends on, so stale rows from previous package versions can be GC'd.
+    active_per_repo: dict[tuple[str, str], set[tuple[str, str, str]]] = defaultdict(set)
+    for key, repos in unique_packages.items():
+        kind, name, version = key
+        eco = osv_ecosystem(kind)
+        if not eco:
+            continue
+        for owner, repo in repos:
+            active_per_repo[(owner, repo)].add((name, eco, version))
+
+    for (owner, repo), active in active_per_repo.items():
+        try:
+            PgIndexStore(owner, repo, db_url).prune_stale_vulnerabilities(active)
+        except Exception as exc:
+            logger.warning("Failed to prune stale vulns for %s/%s: %s", owner, repo, exc)
 
     queries = [PackageQuery(ecosystem=k[0], name=k[1], version=k[2]) for k in unique_packages]
 
@@ -127,25 +174,42 @@ async def poll_repo(owner: str, repo: str) -> dict[str, int]:
     if not pkgs:
         return {}
 
+    # Prefer the lockfile entry over the manifest entry for the same package
+    # (see _prefer_resolved comment for why).
+    deduped = _prefer_resolved(
+        [
+            {
+                "owner": owner, "repo": repo, "kind": p.kind, "name": p.name,
+                "version": p.version, "file_path": p.file_path,
+            }
+            for p in pkgs
+        ]
+    )
+
     queries = [
-        PackageQuery(ecosystem=p.kind, name=p.name, version=p.version)
-        for p in pkgs
-        if osv_ecosystem(p.kind)
+        PackageQuery(ecosystem=r["kind"], name=r["name"], version=r["version"])
+        for r in deduped
+        if osv_ecosystem(r["kind"])
     ]
     if not queries:
         return {}
 
+    # GC vulnerability rows whose (name, ecosystem, version) is no longer in
+    # this repo's dep set — covers the manifest→lockfile transition.
+    active = {
+        (r["name"], osv_ecosystem(r["kind"]) or "", r["version"])
+        for r in deduped
+        if osv_ecosystem(r["kind"])
+    }
+    store.prune_stale_vulnerabilities(active)
+
     results = await query_batch(queries)
 
     severity_counts: dict[str, int] = defaultdict(int)
-    seen_keys: set[tuple[str, str, str]] = set()
-    for p in pkgs:
-        if not osv_ecosystem(p.kind):
+    for r in deduped:
+        if not osv_ecosystem(r["kind"]):
             continue
-        key = (p.kind, p.name, p.version)
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
+        key = (r["kind"], r["name"], r["version"])
         vulns = results.get(key, [])
         vuln_dicts = [
             {
@@ -158,7 +222,7 @@ async def poll_repo(owner: str, repo: str) -> dict[str, int]:
             for v in vulns
             if v.cve_id
         ]
-        store.replace_vulnerabilities_for_package(p.name, p.kind, p.version, vuln_dicts)
+        store.replace_vulnerabilities_for_package(r["name"], r["kind"], r["version"], vuln_dicts)
         for v in vuln_dicts:
             severity_counts[v["severity"]] += 1
 

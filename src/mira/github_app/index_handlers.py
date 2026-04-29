@@ -310,6 +310,31 @@ def _index_is_populated(owner: str, repo: str) -> bool:
         return False
 
 
+def _reconcile_repo_statuses() -> None:
+    """Heal any 'indexing' rows left over from a crashed/restarted indexing job.
+
+    If the actual IndexStore has files for a repo whose row says 'indexing',
+    promote the row to 'ready' with the real file count. If the store is
+    empty, demote to 'pending' so the user can retry from the dashboard.
+    """
+    app_db = _get_app_db()
+    for r in app_db.list_repos():
+        if r.status != "indexing":
+            continue
+        try:
+            store = IndexStore.open(r.owner, r.repo)
+            count = len(store.all_paths())
+            store.close()
+        except Exception:
+            count = 0
+        if count > 0:
+            app_db.set_repo_status(r.owner, r.repo, "ready", files_indexed=count)
+            logger.info("Reconciled %s/%s: indexing → ready (%d files)", r.owner, r.repo, count)
+        else:
+            app_db.set_repo_status(r.owner, r.repo, "pending")
+            logger.info("Reconciled %s/%s: indexing → pending (no files)", r.owner, r.repo)
+
+
 async def backfill_missing_indexes(
     app_auth: GitHubAppAuth,
 ) -> None:
@@ -319,6 +344,10 @@ async def backfill_missing_indexes(
     Indexing is user-initiated via the setup page.
     """
     try:
+        # Reconcile any stale 'indexing' rows left over from a previous run
+        # that crashed or was restarted mid-flight.
+        _reconcile_repo_statuses()
+
         installations = await app_auth.list_installations()
         logger.info("Startup: found %d installation(s)", len(installations))
 

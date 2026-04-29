@@ -531,7 +531,7 @@ function SecurityAlertsCard({
             </CardTitle>
           </div>
           <a
-            href="/packages"
+            href="/vulnerabilities"
             className="text-xs font-medium text-muted-foreground underline-offset-2 hover:underline"
           >
             View all →

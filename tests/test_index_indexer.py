@@ -174,6 +174,10 @@ class TestIndexRepo:
             )
         )
 
+        # Content needs to exceed the trivial-file threshold so it routes
+        # through the LLM path rather than the no-summary fast path.
+        big_content = "# main entry point\n" + "print('hello')\n" * 100
+
         with (
             patch(
                 "mira.index.indexer._fetch_repo_tree",
@@ -181,7 +185,11 @@ class TestIndexRepo:
             ),
             patch(
                 "mira.index.indexer._fetch_file_content",
-                return_value="print('hello')",
+                return_value=big_content,
+            ),
+            patch(
+                "mira.index.indexer._fetch_repo_tarball",
+                return_value={"src/main.py": big_content, "README.md": big_content},
             ),
         ):
             count = await index_repo(

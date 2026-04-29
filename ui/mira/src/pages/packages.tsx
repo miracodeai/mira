@@ -1,5 +1,5 @@
 import { AlertTriangle, Loader2, Search } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
@@ -11,6 +11,14 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 import { api, type PackageSearchHit } from "@/lib/api"
 
 const KIND_LABELS: Record<string, string> = {
@@ -39,13 +47,11 @@ export function PackagesPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
 
-  // Debounced auto-search — fires 400ms after the user stops typing.
+  // Debounced auto-search — fires 400ms after the user stops typing. With
+  // no filters set it loads the full list so the page isn't blank on first
+  // visit.
   useEffect(() => {
-    if (!name.trim() && !version.trim() && !kind && devFilter === "all") {
-      setHits([])
-      setError("")
-      return
-    }
+    const hasFilter = name.trim() || version.trim() || kind || devFilter !== "all"
     const t = setTimeout(async () => {
       setLoading(true)
       setError("")
@@ -66,33 +72,9 @@ export function PackagesPage() {
       } finally {
         setLoading(false)
       }
-    }, 400)
+    }, hasFilter ? 400 : 0)
     return () => clearTimeout(t)
   }, [name, version, kind, devFilter])
-
-  // Group hits by package (name + version) so the caller can see at a glance
-  // "which repos use lodash@4.17.20".
-  const grouped = useMemo(() => {
-    const map = new Map<
-      string,
-      { name: string; kind: string; version: string; hits: PackageSearchHit[] }
-    >()
-    for (const h of hits) {
-      const key = `${h.kind}:${h.name}:${h.version}`
-      const entry = map.get(key)
-      if (entry) {
-        entry.hits.push(h)
-      } else {
-        map.set(key, {
-          name: h.name,
-          kind: h.kind,
-          version: h.version,
-          hits: [h],
-        })
-      }
-    }
-    return [...map.values()].sort((a, b) => b.hits.length - a.hits.length)
-  }, [hits])
 
   return (
     <div className="space-y-6 p-6">
@@ -207,74 +189,76 @@ export function PackagesPage() {
                 )}
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="px-0 pb-0">
               {error && (
-                <div className="mb-4 flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
+                <div className="mx-6 mb-4 flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
                   <span>{error}</span>
                 </div>
               )}
               {!loading && hits.length === 0 && !error ? (
-                <p className="py-4 text-sm text-muted-foreground">
+                <p className="px-6 py-4 text-sm text-muted-foreground">
                   {name || version || kind || devFilter !== "all"
                     ? "No packages matched your search."
-                    : "Enter a package name or version to begin."}
+                    : "No packages indexed yet. Index a repo to populate this page."}
                 </p>
               ) : (
-                <div className="space-y-6">
-                  {grouped.map((g) => (
-                    <div key={`${g.kind}-${g.name}-${g.version}`} className="space-y-2">
-                      <div className="flex items-center gap-2">
-                        <Badge
-                          variant="outline"
-                          className={`text-[10px] ${KIND_COLORS[g.kind] ?? "text-muted-foreground"}`}
-                        >
-                          {KIND_LABELS[g.kind] ?? g.kind}
-                        </Badge>
-                        <span className="font-mono text-sm font-medium">
-                          {g.name}
-                        </span>
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {g.version || "—"}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          · {g.hits.length} repo{g.hits.length !== 1 ? "s" : ""}
-                        </span>
-                      </div>
-                      <div className="overflow-hidden rounded-lg border">
-                        <table className="w-full text-sm">
-                          <tbody>
-                            {g.hits.map((h, i) => (
-                              <tr
-                                key={`${h.owner}-${h.repo}-${h.file_path}-${i}`}
-                                className="border-t first:border-t-0"
-                              >
-                                <td className="px-4 py-2">
-                                  <Link
-                                    to={`/repos/${h.owner}/${h.repo}`}
-                                    className="font-medium hover:underline"
-                                  >
-                                    {h.owner}/{h.repo}
-                                  </Link>
-                                </td>
-                                <td className="px-4 py-2 font-mono text-xs text-muted-foreground">
-                                  {h.file_path}
-                                </td>
-                                <td className="w-16 px-4 py-2 text-right">
-                                  {h.is_dev && (
-                                    <span className="text-[10px] tracking-wide text-muted-foreground">
-                                      dev
-                                    </span>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-[90px] pl-6">Ecosystem</TableHead>
+                      <TableHead>Package</TableHead>
+                      <TableHead className="w-[140px]">Version</TableHead>
+                      <TableHead>Repo</TableHead>
+                      <TableHead className="hidden lg:table-cell">Manifest</TableHead>
+                      <TableHead className="w-[60px] pr-6 text-right">Type</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {hits.map((h, i) => (
+                      <TableRow
+                        key={`${h.owner}-${h.repo}-${h.file_path}-${h.name}-${i}`}
+                      >
+                        <TableCell className="pl-6">
+                          <Badge
+                            variant="outline"
+                            className={`text-[10px] ${KIND_COLORS[h.kind] ?? "text-muted-foreground"}`}
+                          >
+                            {KIND_LABELS[h.kind] ?? h.kind}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">
+                          {h.name}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          {h.version || "—"}
+                        </TableCell>
+                        <TableCell>
+                          <Link
+                            to={`/repos/${h.owner}/${h.repo}`}
+                            className="text-sm hover:underline"
+                          >
+                            {h.owner}/{h.repo}
+                          </Link>
+                        </TableCell>
+                        <TableCell className="hidden font-mono text-xs text-muted-foreground lg:table-cell">
+                          {h.file_path}
+                        </TableCell>
+                        <TableCell className="pr-6 text-right">
+                          {h.is_dev ? (
+                            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                              dev
+                            </span>
+                          ) : (
+                            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/60">
+                              prod
+                            </span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               )}
             </CardContent>
           </Card>

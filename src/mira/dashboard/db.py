@@ -614,7 +614,8 @@ class AppDatabase:
         assert self._pg_conn is not None
         with self._pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, error, installation_id "
+                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
+                "error, installation_id, created_at, updated_at "
                 "FROM repos ORDER BY owner, repo"
             )
             return [
@@ -627,6 +628,8 @@ class AppDatabase:
                     file_count_estimate=r[5],
                     error=r[6],
                     installation_id=r[7],
+                    created_at=r[8].timestamp() if r[8] else 0.0,
+                    updated_at=r[9].timestamp() if r[9] else 0.0,
                 )
                 for r in cur.fetchall()
             ]
@@ -656,12 +659,15 @@ class AppDatabase:
         assert self._pg_conn is not None
         with self._pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, error, installation_id "
+                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
+                "error, installation_id, created_at, updated_at "
                 "FROM repos WHERE owner=%s AND repo=%s",
                 (owner, repo),
             )
             row = cur.fetchone()
             if row:
+                # Postgres returns timestamptz as datetime; downstream code
+                # expects epoch float. Coerce here.
                 return RepoRecord(
                     owner=row[0],
                     repo=row[1],
@@ -671,6 +677,8 @@ class AppDatabase:
                     file_count_estimate=row[5],
                     error=row[6],
                     installation_id=row[7],
+                    created_at=row[8].timestamp() if row[8] else 0.0,
+                    updated_at=row[9].timestamp() if row[9] else 0.0,
                 )
             return None
 
