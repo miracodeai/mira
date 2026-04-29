@@ -1,0 +1,41 @@
+name: Evals
+
+# LLM-backed quality evals — review accuracy, learning synthesis,
+# relationship inference. Each run hits a real model so it costs money
+# (~$0.50-2 per run) and isn't deterministic. We trigger only on release
+# tags (so v0.x.0 is green-lit before going public) and on manual
+# workflow_dispatch (so you can investigate a suspected regression
+# without waiting for the next tag).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    # The `production` environment must be configured in GitHub repo settings
+    # with required reviewers. The OPENROUTER_API_KEY secret is scoped to
+    # this environment so a compromised PR or action can't read it without
+    # an explicit human approval click.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra serve
+
+      - name: Run eval suite
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: uv run pytest tests/evals/ -v -m eval

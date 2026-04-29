@@ -67,4 +67,39 @@ If you're operating Mira in production, we recommend:
 5. Run Mira behind TLS. The Docker image does not terminate TLS itself.
 6. If running with `DATABASE_URL=postgres://…`, ensure the connection requires TLS (`?sslmode=require`).
 
+### Supply chain hardening (project-side)
+
+We treat compromise of our own release pipeline as a P0 — comparable
+incidents have shipped malicious code to thousands of downstream users when
+a maintainer's credentials or CI tokens were stolen. The protections below
+are what we maintain on this repository:
+
+1. **Hardware 2FA (FIDO2)** required on every account with write access.
+   SMS / TOTP-only accounts are not allowed; both can be phished.
+2. **Branch protection** on `main`: PR required, ≥1 review, status checks
+   must pass, no force-push, no deletion.
+3. **Default-deny GitHub Actions tokens**. Every workflow declares
+   `permissions: contents: read` at the top and only widens per-job where
+   actually needed. A malicious dependency in CI can't push commits.
+4. **Outside-collaborator workflow approval**. PRs from users who aren't
+   repo collaborators require a maintainer to click "Approve and run"
+   before any workflow executes — secrets stay unreachable until then.
+5. **Eval secrets gated by environment approval**. The
+   `OPENROUTER_API_KEY` lives in the `production` GitHub environment
+   with required reviewers, so even an authorised workflow run can't
+   reach the key without an explicit approval click.
+6. **Dependabot enabled** for `github-actions`, `pip`, and `npm` — weekly
+   PRs proposing pinned-SHA updates of our action references and
+   dependency bumps.
+7. **Signed release tags** (`git tag -s v0.1.0`). An attacker who steals
+   a session can't push a fake release tag without the signing key.
+8. **Trusted Publishers** for any future PyPI publication — no long-lived
+   API token to steal; OIDC-bound to this repo.
+9. **Container signing via cosign** (sigstore keyless) on Docker image
+   releases. Verify with
+   `cosign verify ghcr.io/miracodeai/mira:vX.Y.Z`.
+
+If you spot a hardening gap, please report it via the channels at the top
+of this document.
+
 For security inquiries, please contact us at **support@miracode.ai**.
