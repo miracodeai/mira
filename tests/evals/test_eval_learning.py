@@ -15,13 +15,13 @@ Skipped when LLM API keys are not available. Run with:
 from __future__ import annotations
 
 import os
+
+# Re-use scenario fixtures from the play harness so both stay in sync.
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
-
-# Re-use scenario fixtures from the play harness so both stay in sync.
-import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
