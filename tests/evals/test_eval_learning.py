@@ -104,9 +104,9 @@ class TestSynthesis:
 
         # Either the reject-pattern rule (mentions "defensive") OR the LLM rule
         # (mentions "null"/"None"/"defensive") should be present.
-        assert any(
-            kw in rule_texts for kw in ("defensive", "null", "none check", "guard")
-        ), f"learned rules don't mention the team's reject pattern: {rule_texts!r}"
+        assert any(kw in rule_texts for kw in ("defensive", "null", "none check", "guard")), (
+            f"learned rules don't mention the team's reject pattern: {rule_texts!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_test_coverage_synthesizes_positive_rule(self, isolated_index):
@@ -125,9 +125,9 @@ class TestSynthesis:
         rule_texts = " ".join(r.rule_text.lower() for r in store.list_active_learned_rules())
         store.close()
 
-        assert any(
-            kw in rule_texts for kw in ("test", "coverage", "unit test")
-        ), f"learned rules don't mention test coverage: {rule_texts!r}"
+        assert any(kw in rule_texts for kw in ("test", "coverage", "unit test")), (
+            f"learned rules don't mention test coverage: {rule_texts!r}"
+        )
 
 
 # ── review-time evals ───────────────────────────────────────────────
@@ -156,9 +156,9 @@ class TestRulesInfluenceReview:
             if c.category in {"defensive", "reliability"}
             or any(kw in c.title.lower() for kw in ("null check", "none check", "defensive"))
         ]
-        assert (
-            len(defensive) == 0
-        ), f"rule failed to suppress defensive comments: {[c.title for c in defensive]}"
+        assert len(defensive) == 0, (
+            f"rule failed to suppress defensive comments: {[c.title for c in defensive]}"
+        )
 
     @pytest.mark.asyncio
     async def test_test_coverage_rule_surfaces_test_comment(self, isolated_index):

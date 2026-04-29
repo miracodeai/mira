@@ -32,15 +32,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev --extra serve
 
-      - name: Lint
-        run: uv run ruff check src/ tests/
+      # Run the same pre-commit hooks contributors run locally. Single source
+      # of truth — if a hook is added/removed/version-bumped in
+      # `.pre-commit-config.yaml`, CI picks it up automatically and we don't
+      # have to also edit this workflow.
+      - name: Pre-commit hooks (lint, format, file hygiene)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
 
-      - name: Format check
-        run: uv run ruff format --check src/ tests/
-
-      - name: Type check (advisory — non-blocking until codebase is fully typed)
+      - name: Type check (advisory — manual stage in pre-commit, non-blocking here)
         continue-on-error: true
-        run: uv run mypy src/mira/ --ignore-missing-imports
+        run: uv run pre-commit run --all-files --hook-stage manual mypy
 
       - name: Test
         run: uv run pytest tests/ -v --ignore=tests/evals --ignore=tests/test_integration.py

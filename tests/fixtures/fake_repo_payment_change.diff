@@ -26,4 +26,3 @@ index 1234567..abcdef0 100644
 +        hashlib.sha256,
 +    ).hexdigest()
 +    return signature == expected
-

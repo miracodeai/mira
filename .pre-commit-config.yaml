@@ -11,7 +11,11 @@ repos:
         args: [--maxkb=500]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    # Keep this in sync with the `ruff` floor in pyproject.toml `[dev]`.
+    # If contributors run a newer local ruff than pre-commit pins, the same
+    # source can lint/format differently in two places — exactly the kind
+    # of drift CI parity is meant to prevent.
+    rev: v0.15.0
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]

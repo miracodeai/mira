@@ -40,7 +40,6 @@ from mira.index.store import IndexStore  # noqa: E402
 from mira.llm.provider import LLMProvider  # noqa: E402
 from mira.models import PRInfo  # noqa: E402
 
-
 # ── Scenarios ──────────────────────────────────────────────────────
 
 
@@ -73,8 +72,18 @@ SCENARIOS: dict[str, Scenario] = {
             "No tests for the error path. Add one.",
         ],
         bot_history=[
-            {"category": "style", "severity": "suggestion", "title": "Use double quotes", "signal": "rejected"},
-            {"category": "style", "severity": "suggestion", "title": "Trailing whitespace", "signal": "rejected"},
+            {
+                "category": "style",
+                "severity": "suggestion",
+                "title": "Use double quotes",
+                "signal": "rejected",
+            },
+            {
+                "category": "style",
+                "severity": "suggestion",
+                "title": "Trailing whitespace",
+                "signal": "rejected",
+            },
         ],
         target_diff=(
             "diff --git a/src/payments.py b/src/payments.py\n"
@@ -106,13 +115,48 @@ SCENARIOS: dict[str, Scenario] = {
             "Same as before — we don't validate non-public function arguments.",
         ],
         bot_history=[
-            {"category": "defensive", "severity": "warning", "title": "Add null check for user", "signal": "rejected"},
-            {"category": "defensive", "severity": "warning", "title": "Validate input is not None", "signal": "rejected"},
-            {"category": "defensive", "severity": "warning", "title": "Guard against missing key", "signal": "rejected"},
-            {"category": "defensive", "severity": "warning", "title": "Add null check for response", "signal": "rejected"},
-            {"category": "defensive", "severity": "warning", "title": "Check for None before access", "signal": "rejected"},
-            {"category": "bug", "severity": "blocker", "title": "SQL injection in get_user", "signal": "accepted"},
-            {"category": "bug", "severity": "blocker", "title": "Unbounded loop in poll_jobs", "signal": "accepted"},
+            {
+                "category": "defensive",
+                "severity": "warning",
+                "title": "Add null check for user",
+                "signal": "rejected",
+            },
+            {
+                "category": "defensive",
+                "severity": "warning",
+                "title": "Validate input is not None",
+                "signal": "rejected",
+            },
+            {
+                "category": "defensive",
+                "severity": "warning",
+                "title": "Guard against missing key",
+                "signal": "rejected",
+            },
+            {
+                "category": "defensive",
+                "severity": "warning",
+                "title": "Add null check for response",
+                "signal": "rejected",
+            },
+            {
+                "category": "defensive",
+                "severity": "warning",
+                "title": "Check for None before access",
+                "signal": "rejected",
+            },
+            {
+                "category": "bug",
+                "severity": "blocker",
+                "title": "SQL injection in get_user",
+                "signal": "accepted",
+            },
+            {
+                "category": "bug",
+                "severity": "blocker",
+                "title": "Unbounded loop in poll_jobs",
+                "signal": "accepted",
+            },
         ],
         target_diff=(
             "diff --git a/src/api.py b/src/api.py\n"
@@ -182,8 +226,7 @@ def _print_header(text: str) -> None:
 
 async def run(scenario: Scenario, *, owner: str = "play", repo: str = "demo") -> int:
     if not any(
-        os.environ.get(k)
-        for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        os.environ.get(k) for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
     ):
         print("ERROR: set OPENROUTER_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY.")
         return 2
@@ -200,8 +243,10 @@ async def run(scenario: Scenario, *, owner: str = "play", repo: str = "demo") ->
     store = IndexStore.open(owner, repo)
     _seed_feedback(store, scenario)
     seeded = len(scenario.human_comments) + len(scenario.bot_history)
-    print(f"  Seeded {seeded} feedback events ({len(scenario.human_comments)} human, "
-          f"{len(scenario.bot_history)} bot accept/reject)")
+    print(
+        f"  Seeded {seeded} feedback events ({len(scenario.human_comments)} human, "
+        f"{len(scenario.bot_history)} bot accept/reject)"
+    )
 
     # 2. Synthesise — accept/reject ratios first
     _print_header("Step 1 — synthesize_rules (accept/reject)")
@@ -259,13 +304,21 @@ async def run(scenario: Scenario, *, owner: str = "play", repo: str = "demo") ->
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenario", default="test-coverage", choices=sorted(SCENARIOS.keys()),
-                        help="Built-in scenario to run.")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--scenario",
+        default="test-coverage",
+        choices=sorted(SCENARIOS.keys()),
+        help="Built-in scenario to run.",
+    )
     parser.add_argument("--scenario-file", help="Path to a custom YAML scenario.")
     args = parser.parse_args()
 
-    scenario = _load_scenario_file(args.scenario_file) if args.scenario_file else SCENARIOS[args.scenario]
+    scenario = (
+        _load_scenario_file(args.scenario_file) if args.scenario_file else SCENARIOS[args.scenario]
+    )
     rc = asyncio.run(run(scenario))
     sys.exit(rc)
 
