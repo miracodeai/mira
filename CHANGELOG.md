@@ -4,7 +4,9 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] — 2026-04-29
+
+Initial public release.
 
 ### Changed
 
@@ -46,4 +48,4 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
-[Unreleased]: https://github.com/miracodeai/mira/commits/main
+[0.1.0]: https://github.com/miracodeai/mira/releases/tag/v0.1.0

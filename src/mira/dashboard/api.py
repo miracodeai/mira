@@ -9,7 +9,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi import Response as FastAPIResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -22,23 +22,35 @@ from mira.index.store import IndexStore
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Mira Dashboard API", version="0.1.0")
-
 # Database + auth
 _db_url = os.environ.get("DATABASE_URL", "")
 _admin_password = os.environ.get("ADMIN_PASSWORD", "admin")
 _app_db = AppDatabase(_db_url, admin_password=_admin_password)
 
-# CORS must be added AFTER auth so it runs BEFORE auth (Starlette reverses order)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.add_middleware(AuthMiddleware, db=_app_db)
-app.include_router(create_auth_router(_app_db))
+# All dashboard routes register on this router. `register_dashboard()` wires
+# router + middleware into any FastAPI app, so the routes can run inside the
+# unified webhook+UI server (production) or the standalone app below (dev).
+router = APIRouter()
+
+
+def register_dashboard(app: FastAPI) -> None:
+    """Wire dashboard routes + middleware into a FastAPI app."""
+    # CORS must be added AFTER auth so it runs BEFORE auth (Starlette reverses order)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://localhost:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(AuthMiddleware, db=_app_db)
+    app.include_router(create_auth_router(_app_db))
+    app.include_router(router)
+
+
+# Standalone app — initialized at module load, but routes are registered at
+# the bottom of this file, *after* all @router decorators have run.
+app = FastAPI(title="Mira Dashboard API", version="0.1.0")
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
@@ -250,7 +262,7 @@ class IndexStatusModel(BaseModel):
     error: str
 
 
-@app.get("/api/indexing/status", response_model=list[IndexStatusModel])
+@router.get("/api/indexing/status", response_model=list[IndexStatusModel])
 def get_indexing_status() -> list[IndexStatusModel]:
     """Get current indexing status for all repos."""
     from mira.index.status import tracker
@@ -269,7 +281,7 @@ def get_indexing_status() -> list[IndexStatusModel]:
     ]
 
 
-@app.get("/api/repos", response_model=list[RepoListItem])
+@router.get("/api/repos", response_model=list[RepoListItem])
 def list_repos() -> list[RepoListItem]:
     """List all repos from the registry."""
     repos = _app_db.list_repos()
@@ -299,7 +311,7 @@ class CostEstimate(BaseModel):
     file_count: int
 
 
-@app.get("/api/indexing/estimate", response_model=CostEstimate)
+@router.get("/api/indexing/estimate", response_model=CostEstimate)
 def estimate_cost() -> CostEstimate:
     """Estimate the cost of indexing all pending repos with the current model."""
     from mira.config import load_config
@@ -342,7 +354,7 @@ class ModelsUpdate(BaseModel):
     review_model: str
 
 
-@app.get("/api/settings/models", response_model=ModelsResponse)
+@router.get("/api/settings/models", response_model=ModelsResponse)
 def get_models() -> ModelsResponse:
     from mira.config import load_config
     from mira.dashboard.models_config import (
@@ -364,7 +376,7 @@ def get_models() -> ModelsResponse:
     )
 
 
-@app.put("/api/settings/models")
+@router.put("/api/settings/models")
 def set_models(body: ModelsUpdate) -> dict:
     _app_db.set_setting("indexing_model", body.indexing_model)
     _app_db.set_setting("review_model", body.review_model)
@@ -372,7 +384,7 @@ def set_models(body: ModelsUpdate) -> dict:
     return {"ok": True}
 
 
-@app.get("/api/events")
+@router.get("/api/events")
 async def events_stream(request: Request) -> StreamingResponse:
     """Server-Sent Events stream for real-time dashboard updates."""
     from mira.dashboard.events import bus, format_sse
@@ -410,7 +422,7 @@ class PendingUninstallModel(BaseModel):
     owner: str
 
 
-@app.get("/api/uninstalls/pending", response_model=list[PendingUninstallModel])
+@router.get("/api/uninstalls/pending", response_model=list[PendingUninstallModel])
 def list_pending_uninstalls() -> list[PendingUninstallModel]:
     return [
         PendingUninstallModel(installation_id=iid, owner=owner)
@@ -418,14 +430,14 @@ def list_pending_uninstalls() -> list[PendingUninstallModel]:
     ]
 
 
-@app.post("/api/uninstalls/{installation_id}/keep")
+@router.post("/api/uninstalls/{installation_id}/keep")
 def keep_uninstall_data(installation_id: int) -> dict:
     """User chose to keep data after uninstall — just dismiss the popup."""
     _app_db.remove_pending_uninstall(installation_id)
     return {"ok": True}
 
 
-@app.post("/api/uninstalls/{installation_id}/delete")
+@router.post("/api/uninstalls/{installation_id}/delete")
 def delete_uninstall_data(installation_id: int) -> dict:
     """User chose to delete all data for this installation."""
     removed = _app_db.delete_repos_by_installation(installation_id)
@@ -433,7 +445,7 @@ def delete_uninstall_data(installation_id: int) -> dict:
     return {"ok": True, "removed": removed}
 
 
-@app.post("/api/repos/sync")
+@router.post("/api/repos/sync")
 async def sync_repos() -> dict:
     """Reconcile the repos table with actual GitHub App installations.
 
@@ -499,7 +511,7 @@ async def sync_repos() -> dict:
     }
 
 
-@app.get("/api/setup/status")
+@router.get("/api/setup/status")
 async def get_setup_status() -> dict:
     """Check if initial setup has been completed. Auto-syncs repos from GitHub if none registered."""
     repo_count = len(_app_db.list_repos())
@@ -542,7 +554,7 @@ class SetupRequest(BaseModel):
     index_mode: str  # "full" or "light"
 
 
-@app.post("/api/setup/complete")
+@router.post("/api/setup/complete")
 async def complete_setup(body: SetupRequest) -> dict:
     """Save setup choices and start indexing selected repos."""
     for r in body.repos:
@@ -626,7 +638,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
             logger.exception("Failed to index %s", full_name)
 
 
-@app.get("/api/repos/{owner}/{repo}", response_model=RepoDetail)
+@router.get("/api/repos/{owner}/{repo}", response_model=RepoDetail)
 def get_repo_detail(owner: str, repo: str) -> RepoDetail:
     """Get details for a specific repo."""
     with _open_store(owner, repo) as store:
@@ -677,7 +689,7 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
         )
 
 
-@app.get("/api/repos/{owner}/{repo}/files", response_model=list[FileModel])
+@router.get("/api/repos/{owner}/{repo}/files", response_model=list[FileModel])
 def list_files(owner: str, repo: str) -> list[FileModel]:
     """List all indexed files with summaries."""
     with _open_store(owner, repo) as store:
@@ -704,7 +716,7 @@ def list_files(owner: str, repo: str) -> list[FileModel]:
         return result
 
 
-@app.get("/api/repos/{owner}/{repo}/dependencies", response_model=DependencyGraph)
+@router.get("/api/repos/{owner}/{repo}/dependencies", response_model=DependencyGraph)
 def get_dependencies(owner: str, repo: str) -> DependencyGraph:
     """Get the dependency graph for a repo."""
     with _open_store(owner, repo) as store:
@@ -746,7 +758,7 @@ class BlastRadiusResponse(BaseModel):
     cross_repo: list[CrossRepoBlastEntry]  # other repos that depend on this one
 
 
-@app.get("/api/repos/{owner}/{repo}/blast-radius.svg")
+@router.get("/api/repos/{owner}/{repo}/blast-radius.svg")
 def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
     """Render blast radius as an SVG image."""
     from mira.dashboard.blast_svg import generate_blast_svg
@@ -802,7 +814,7 @@ def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
     )
 
 
-@app.get("/api/repos/{owner}/{repo}/blast-radius", response_model=BlastRadiusResponse)
+@router.get("/api/repos/{owner}/{repo}/blast-radius", response_model=BlastRadiusResponse)
 def get_blast_radius(owner: str, repo: str, changed_paths: str = "") -> BlastRadiusResponse:
     """Get the blast radius for a set of changed files.
 
@@ -898,7 +910,7 @@ def get_blast_radius(owner: str, repo: str, changed_paths: str = "") -> BlastRad
     return BlastRadiusResponse(internal=internal, cross_repo=cross_repo)
 
 
-@app.get("/api/repos/{owner}/{repo}/external-refs", response_model=list[ExternalRefModel])
+@router.get("/api/repos/{owner}/{repo}/external-refs", response_model=list[ExternalRefModel])
 def get_external_refs(owner: str, repo: str) -> list[ExternalRefModel]:
     """Get all external references for a repo."""
     with _open_store(owner, repo) as store:
@@ -924,7 +936,7 @@ class PackageModel(BaseModel):
     is_dev: bool = False
 
 
-@app.get("/api/repos/{owner}/{repo}/packages", response_model=list[PackageModel])
+@router.get("/api/repos/{owner}/{repo}/packages", response_model=list[PackageModel])
 def get_packages(owner: str, repo: str) -> list[PackageModel]:
     """List declared dependencies parsed from manifest files (package.json,
     requirements.txt, pyproject.toml, go.mod, Dockerfile)."""
@@ -964,7 +976,7 @@ class VulnerabilityModel(BaseModel):
     last_seen_at: float = 0.0
 
 
-@app.get(
+@router.get(
     "/api/repos/{owner}/{repo}/vulnerabilities",
     response_model=list[VulnerabilityModel],
 )
@@ -997,7 +1009,7 @@ class VulnerabilitySummary(BaseModel):
     unknown: int = 0
 
 
-@app.get("/api/vulnerabilities/summary", response_model=VulnerabilitySummary)
+@router.get("/api/vulnerabilities/summary", response_model=VulnerabilitySummary)
 def get_vulnerabilities_summary() -> VulnerabilitySummary:
     """Org-wide vulnerability count by severity, for the dashboard widget."""
     db_url = os.environ.get("DATABASE_URL", "")
@@ -1022,7 +1034,7 @@ class OrgVulnerabilityModel(VulnerabilityModel):
     repo: str
 
 
-@app.get("/api/vulnerabilities", response_model=list[OrgVulnerabilityModel])
+@router.get("/api/vulnerabilities", response_model=list[OrgVulnerabilityModel])
 def list_org_vulnerabilities(limit: int = 1000) -> list[OrgVulnerabilityModel]:
     """List every open vulnerability across the org. Postgres-only."""
     db_url = os.environ.get("DATABASE_URL", "")
@@ -1052,7 +1064,7 @@ def list_org_vulnerabilities(limit: int = 1000) -> list[OrgVulnerabilityModel]:
     ]
 
 
-@app.get("/api/packages/search", response_model=list[PackageSearchHit])
+@router.get("/api/packages/search", response_model=list[PackageSearchHit])
 def search_packages(
     name: str | None = None,
     version: str | None = None,
@@ -1082,7 +1094,7 @@ def search_packages(
     return [PackageSearchHit(**r) for r in rows]
 
 
-@app.get("/api/relationships", response_model=RelationshipsResponse)
+@router.get("/api/relationships", response_model=RelationshipsResponse)
 def get_relationships() -> RelationshipsResponse:
     """Get all cross-repo edges and groups."""
     with _open_relationships() as rs:
@@ -1111,7 +1123,7 @@ def get_relationships() -> RelationshipsResponse:
         )
 
 
-@app.get("/api/relationships/{owner}/{repo}", response_model=list[RelatedRepoModel])
+@router.get("/api/relationships/{owner}/{repo}", response_model=list[RelatedRepoModel])
 def get_related_repos(owner: str, repo: str) -> list[RelatedRepoModel]:
     """Get repos related to a specific repo."""
     with _open_relationships() as rs:
@@ -1134,7 +1146,7 @@ def get_related_repos(owner: str, repo: str) -> list[RelatedRepoModel]:
 # ── Review context endpoints ──
 
 
-@app.get("/api/repos/{owner}/{repo}/context", response_model=list[ReviewContextModel])
+@router.get("/api/repos/{owner}/{repo}/context", response_model=list[ReviewContextModel])
 def list_context(owner: str, repo: str) -> list[ReviewContextModel]:
     with _open_store(owner, repo) as store:
         entries = store.list_review_context()
@@ -1150,7 +1162,7 @@ def list_context(owner: str, repo: str) -> list[ReviewContextModel]:
         ]
 
 
-@app.post("/api/repos/{owner}/{repo}/context", response_model=ReviewContextModel)
+@router.post("/api/repos/{owner}/{repo}/context", response_model=ReviewContextModel)
 def create_context(owner: str, repo: str, body: ReviewContextCreate) -> ReviewContextModel:
     with _open_store(owner, repo) as store:
         e = store.upsert_review_context(title=body.title, content=body.content)
@@ -1163,7 +1175,7 @@ def create_context(owner: str, repo: str, body: ReviewContextCreate) -> ReviewCo
         )
 
 
-@app.put("/api/repos/{owner}/{repo}/context/{context_id}", response_model=ReviewContextModel)
+@router.put("/api/repos/{owner}/{repo}/context/{context_id}", response_model=ReviewContextModel)
 def update_context(
     owner: str, repo: str, context_id: int, body: ReviewContextCreate
 ) -> ReviewContextModel:
@@ -1183,7 +1195,7 @@ def update_context(
         )
 
 
-@app.delete("/api/repos/{owner}/{repo}/context/{context_id}")
+@router.delete("/api/repos/{owner}/{repo}/context/{context_id}")
 def delete_context(owner: str, repo: str, context_id: int) -> dict:
     with _open_store(owner, repo) as store:
         store.delete_review_context(context_id)
@@ -1221,7 +1233,7 @@ class OrgLearnedRuleModel(LearnedRuleModel):
     repo: str
 
 
-@app.get(
+@router.get(
     "/api/repos/{owner}/{repo}/learned-rules",
     response_model=list[LearnedRuleModel],
 )
@@ -1242,7 +1254,7 @@ def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
         ]
 
 
-@app.get("/api/learned-rules", response_model=list[OrgLearnedRuleModel])
+@router.get("/api/learned-rules", response_model=list[OrgLearnedRuleModel])
 def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
     """Active learned rules across every repo in the org. Postgres-only."""
     db_url = os.environ.get("DATABASE_URL", "")
@@ -1269,7 +1281,7 @@ def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
     ]
 
 
-@app.get("/api/repos/{owner}/{repo}/rules", response_model=list[RuleModel])
+@router.get("/api/repos/{owner}/{repo}/rules", response_model=list[RuleModel])
 def list_repo_rules(owner: str, repo: str) -> list[RuleModel]:
     with _open_store(owner, repo) as store:
         entries = store.list_review_context()
@@ -1286,7 +1298,7 @@ def list_repo_rules(owner: str, repo: str) -> list[RuleModel]:
         ]
 
 
-@app.post("/api/repos/{owner}/{repo}/rules", response_model=RuleModel)
+@router.post("/api/repos/{owner}/{repo}/rules", response_model=RuleModel)
 def create_repo_rule(owner: str, repo: str, body: RuleCreate) -> RuleModel:
     with _open_store(owner, repo) as store:
         e = store.upsert_review_context(title=body.title, content=body.content)
@@ -1300,7 +1312,7 @@ def create_repo_rule(owner: str, repo: str, body: RuleCreate) -> RuleModel:
         )
 
 
-@app.put("/api/repos/{owner}/{repo}/rules/{rule_id}", response_model=RuleModel)
+@router.put("/api/repos/{owner}/{repo}/rules/{rule_id}", response_model=RuleModel)
 def update_repo_rule(owner: str, repo: str, rule_id: int, body: RuleCreate) -> RuleModel:
     with _open_store(owner, repo) as store:
         existing = store.get_review_context(rule_id)
@@ -1317,7 +1329,7 @@ def update_repo_rule(owner: str, repo: str, rule_id: int, body: RuleCreate) -> R
         )
 
 
-@app.delete("/api/repos/{owner}/{repo}/rules/{rule_id}")
+@router.delete("/api/repos/{owner}/{repo}/rules/{rule_id}")
 def delete_repo_rule(owner: str, repo: str, rule_id: int) -> dict:
     with _open_store(owner, repo) as store:
         store.delete_review_context(rule_id)
@@ -1327,7 +1339,7 @@ def delete_repo_rule(owner: str, repo: str, rule_id: int) -> dict:
 # ── Global rules endpoints ──
 
 
-@app.get("/api/rules/global", response_model=list[RuleModel])
+@router.get("/api/rules/global", response_model=list[RuleModel])
 def list_global_rules() -> list[RuleModel]:
     rules = _app_db.list_global_rules()
     return [
@@ -1343,7 +1355,7 @@ def list_global_rules() -> list[RuleModel]:
     ]
 
 
-@app.post("/api/rules/global", response_model=RuleModel)
+@router.post("/api/rules/global", response_model=RuleModel)
 def create_global_rule(body: RuleCreate) -> RuleModel:
     r = _app_db.upsert_global_rule(title=body.title, content=body.content)
     return RuleModel(
@@ -1356,7 +1368,7 @@ def create_global_rule(body: RuleCreate) -> RuleModel:
     )
 
 
-@app.put("/api/rules/global/{rule_id}", response_model=RuleModel)
+@router.put("/api/rules/global/{rule_id}", response_model=RuleModel)
 def update_global_rule(rule_id: int, body: RuleCreate) -> RuleModel:
     existing = _app_db.get_global_rule(rule_id)
     if not existing:
@@ -1372,13 +1384,13 @@ def update_global_rule(rule_id: int, body: RuleCreate) -> RuleModel:
     )
 
 
-@app.delete("/api/rules/global/{rule_id}")
+@router.delete("/api/rules/global/{rule_id}")
 def delete_global_rule(rule_id: int) -> dict:
     _app_db.delete_global_rule(rule_id)
     return {"ok": True}
 
 
-@app.patch("/api/rules/global/{rule_id}/toggle", response_model=RuleModel)
+@router.patch("/api/rules/global/{rule_id}/toggle", response_model=RuleModel)
 def toggle_global_rule(rule_id: int) -> RuleModel:
     r = _app_db.toggle_global_rule(rule_id)
     if not r:
@@ -1396,7 +1408,7 @@ def toggle_global_rule(rule_id: int) -> RuleModel:
 # ── Relationship override endpoints ──
 
 
-@app.get("/api/relationships/overrides", response_model=list[OverrideModel])
+@router.get("/api/relationships/overrides", response_model=list[OverrideModel])
 def list_overrides() -> list[OverrideModel]:
     with _open_relationships() as rs:
         return [
@@ -1410,7 +1422,7 @@ def list_overrides() -> list[OverrideModel]:
         ]
 
 
-@app.post("/api/relationships/overrides", response_model=OverrideModel)
+@router.post("/api/relationships/overrides", response_model=OverrideModel)
 def set_override(body: OverrideRequest) -> OverrideModel:
     if body.status not in ("confirmed", "denied"):
         raise HTTPException(status_code=400, detail="Status must be 'confirmed' or 'denied'")
@@ -1424,7 +1436,7 @@ def set_override(body: OverrideRequest) -> OverrideModel:
         )
 
 
-@app.delete("/api/relationships/overrides")
+@router.delete("/api/relationships/overrides")
 def delete_override(source_repo: str, target_repo: str) -> dict:
     with _open_relationships() as rs:
         rs.delete_override(source_repo, target_repo)
@@ -1434,7 +1446,7 @@ def delete_override(source_repo: str, target_repo: str) -> dict:
 # ── Custom edge endpoints ──
 
 
-@app.get("/api/relationships/custom", response_model=list[CustomEdgeModel])
+@router.get("/api/relationships/custom", response_model=list[CustomEdgeModel])
 def list_custom_edges() -> list[CustomEdgeModel]:
     with _open_relationships() as rs:
         return [
@@ -1449,7 +1461,7 @@ def list_custom_edges() -> list[CustomEdgeModel]:
         ]
 
 
-@app.post("/api/relationships/custom", response_model=CustomEdgeModel)
+@router.post("/api/relationships/custom", response_model=CustomEdgeModel)
 def add_custom_edge(body: CustomEdgeRequest) -> CustomEdgeModel:
     with _open_relationships() as rs:
         e = rs.add_custom_edge(body.source_repo, body.target_repo, body.reason)
@@ -1462,7 +1474,7 @@ def add_custom_edge(body: CustomEdgeRequest) -> CustomEdgeModel:
         )
 
 
-@app.delete("/api/relationships/custom/{edge_id}")
+@router.delete("/api/relationships/custom/{edge_id}")
 def delete_custom_edge(edge_id: int) -> dict:
     with _open_relationships() as rs:
         rs.delete_custom_edge(edge_id)
@@ -1484,7 +1496,7 @@ def _period_to_since(period: str) -> float | None:
     return None
 
 
-@app.get("/api/stats", response_model=OrgStatsModel)
+@router.get("/api/stats", response_model=OrgStatsModel)
 def get_org_stats(period: str = "") -> OrgStatsModel:
     """Aggregate stats across all repos, optionally filtered by period."""
     since = _period_to_since(period) if period else None
@@ -1568,7 +1580,7 @@ class TimeSeriesPoint(BaseModel):
     categories: dict[str, int] = {}
 
 
-@app.get("/api/stats/timeseries", response_model=list[TimeSeriesPoint])
+@router.get("/api/stats/timeseries", response_model=list[TimeSeriesPoint])
 def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
     """Aggregate review metrics over time. Period: day, week, month."""
     all_events: list[dict] = []
@@ -1637,7 +1649,7 @@ def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
     return [TimeSeriesPoint(date=k, **v) for k, v in sorted(buckets.items())]
 
 
-@app.post("/api/repos/{owner}/{repo}/index")
+@router.post("/api/repos/{owner}/{repo}/index")
 async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
     """Trigger indexing for a repo. full=true wipes and re-indexes everything."""
     from mira.index.status import tracker
@@ -1725,7 +1737,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
     return {"status": "indexing", "full": full}
 
 
-@app.delete("/api/repos/{owner}/{repo}/index")
+@router.delete("/api/repos/{owner}/{repo}/index")
 async def cancel_index(owner: str, repo: str) -> dict:
     """Request cancellation of an in-progress indexing job.
 
@@ -1742,7 +1754,7 @@ async def cancel_index(owner: str, repo: str) -> dict:
     return {"status": "not_indexing"}
 
 
-@app.get("/api/repos/{owner}/{repo}/reviews", response_model=list[ReviewEventModel])
+@router.get("/api/repos/{owner}/{repo}/reviews", response_model=list[ReviewEventModel])
 def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventModel]:
     """List recent review events for a repo."""
     with _open_store(owner, repo) as store:
@@ -1766,3 +1778,8 @@ def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventMode
             )
             for e in events
         ]
+
+
+# Wire dashboard routes + middleware onto the standalone app, after all
+# @router.<verb>(...) decorators above have populated `router`.
+register_dashboard(app)

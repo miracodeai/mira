@@ -6,12 +6,16 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from mira.github_app.auth import GitHubAppAuth
 from mira.github_app.handlers import (
@@ -279,5 +283,53 @@ def create_app(
             status_code=200,
             media_type="application/json",
         )
+
+    # ── Dashboard API + UI ───────────────────────────────────────
+    # Register all `/api/*` dashboard routes onto this same app, so a single
+    # process serves webhooks, REST API, and the bundled UI.
+    from mira.dashboard.api import register_dashboard
+
+    register_dashboard(app)
+
+    # Serve the built UI as static files with SPA fallback. The Dockerfile
+    # builds the React app into `ui/mira/dist/` and copies it next to the
+    # backend at /app/ui_dist; locally, fall back to ui/mira/dist relative to
+    # the repo root. If neither exists, the API still works — only the UI
+    # routes will 404.
+    ui_dist_env = os.environ.get("MIRA_UI_DIST")
+    candidates: list[Path] = []
+    if ui_dist_env:
+        candidates.append(Path(ui_dist_env))
+    candidates.extend(
+        [
+            Path("/app/ui_dist"),
+            Path(__file__).resolve().parents[3] / "ui" / "mira" / "dist",
+        ]
+    )
+    ui_dist = next((p for p in candidates if p.is_dir()), None)
+
+    if ui_dist is not None:
+        # Mount static assets at /assets so the UI's bundled JS/CSS are served.
+        assets_dir = ui_dist / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+        index_html = ui_dist / "index.html"
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str) -> Response:
+            # Reserve API/webhook namespaces — return 404 instead of swallowing
+            # them with the SPA shell. Webhook + dashboard routes are
+            # registered above and take precedence by route ordering, but a
+            # bad path like /api/nonexistent should 404 cleanly.
+            if (
+                full_path.startswith("api/")
+                or full_path in {"webhook", "health"}
+            ):
+                raise HTTPException(status_code=404)
+            file_path = ui_dist / full_path
+            if file_path.is_file():
+                return FileResponse(file_path)
+            return FileResponse(index_html)
 
     return app
