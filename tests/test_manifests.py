@@ -243,15 +243,17 @@ version = "1.0.0"
 
 class TestPackageLockJson:
     def test_npm_v3_packages_map(self):
-        content = json.dumps({
-            "lockfileVersion": 3,
-            "packages": {
-                "": {"name": "my-app", "version": "1.0.0"},
-                "node_modules/lodash": {"version": "4.17.21"},
-                "node_modules/react": {"version": "18.2.0"},
-                "node_modules/@types/node": {"version": "20.0.0", "dev": True},
-            },
-        })
+        content = json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "my-app", "version": "1.0.0"},
+                    "node_modules/lodash": {"version": "4.17.21"},
+                    "node_modules/react": {"version": "18.2.0"},
+                    "node_modules/@types/node": {"version": "20.0.0", "dev": True},
+                },
+            }
+        )
         pkgs = parse_package_lock_json(content, "package-lock.json")
         by_name = {p.name: p for p in pkgs}
         assert by_name["lodash"].version == "4.17.21"
@@ -262,13 +264,15 @@ class TestPackageLockJson:
         assert "my-app" not in by_name
 
     def test_npm_v1_legacy_dependencies(self):
-        content = json.dumps({
-            "lockfileVersion": 1,
-            "dependencies": {
-                "lodash": {"version": "4.17.21"},
-                "react": {"version": "18.2.0"},
-            },
-        })
+        content = json.dumps(
+            {
+                "lockfileVersion": 1,
+                "dependencies": {
+                    "lodash": {"version": "4.17.21"},
+                    "react": {"version": "18.2.0"},
+                },
+            }
+        )
         pkgs = parse_package_lock_json(content, "package-lock.json")
         names = {p.name for p in pkgs}
         assert names == {"lodash", "react"}
@@ -299,9 +303,24 @@ class TestPreferResolved:
 
     def test_lockfile_wins_over_manifest(self):
         from mira.security.poller import _prefer_resolved
+
         rows = [
-            {"owner": "o", "repo": "r", "kind": "pip", "name": "litellm", "version": "1.30", "file_path": "pyproject.toml"},
-            {"owner": "o", "repo": "r", "kind": "pip", "name": "litellm", "version": "1.99.5", "file_path": "uv.lock"},
+            {
+                "owner": "o",
+                "repo": "r",
+                "kind": "pip",
+                "name": "litellm",
+                "version": "1.30",
+                "file_path": "pyproject.toml",
+            },
+            {
+                "owner": "o",
+                "repo": "r",
+                "kind": "pip",
+                "name": "litellm",
+                "version": "1.99.5",
+                "file_path": "uv.lock",
+            },
         ]
         result = _prefer_resolved(rows)
         assert len(result) == 1
@@ -310,17 +329,40 @@ class TestPreferResolved:
 
     def test_no_lockfile_falls_back_to_manifest(self):
         from mira.security.poller import _prefer_resolved
+
         rows = [
-            {"owner": "o", "repo": "r", "kind": "pip", "name": "click", "version": ">=8.1", "file_path": "pyproject.toml"},
+            {
+                "owner": "o",
+                "repo": "r",
+                "kind": "pip",
+                "name": "click",
+                "version": ">=8.1",
+                "file_path": "pyproject.toml",
+            },
         ]
         result = _prefer_resolved(rows)
         assert result[0]["version"] == ">=8.1"
 
     def test_different_repos_kept_separate(self):
         from mira.security.poller import _prefer_resolved
+
         rows = [
-            {"owner": "o", "repo": "r1", "kind": "pip", "name": "x", "version": "1.0", "file_path": "uv.lock"},
-            {"owner": "o", "repo": "r2", "kind": "pip", "name": "x", "version": "2.0", "file_path": "uv.lock"},
+            {
+                "owner": "o",
+                "repo": "r1",
+                "kind": "pip",
+                "name": "x",
+                "version": "1.0",
+                "file_path": "uv.lock",
+            },
+            {
+                "owner": "o",
+                "repo": "r2",
+                "kind": "pip",
+                "name": "x",
+                "version": "2.0",
+                "file_path": "uv.lock",
+            },
         ]
         result = _prefer_resolved(rows)
         assert len(result) == 2

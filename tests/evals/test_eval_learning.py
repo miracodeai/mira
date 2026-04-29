@@ -151,14 +151,14 @@ class TestRulesInfluenceReview:
         result = await engine.review_diff(scenario.target_diff)
 
         defensive = [
-            c for c in result.comments
+            c
+            for c in result.comments
             if c.category in {"defensive", "reliability"}
             or any(kw in c.title.lower() for kw in ("null check", "none check", "defensive"))
         ]
-        assert len(defensive) == 0, (
-            f"rule failed to suppress defensive comments: "
-            f"{[c.title for c in defensive]}"
-        )
+        assert (
+            len(defensive) == 0
+        ), f"rule failed to suppress defensive comments: {[c.title for c in defensive]}"
 
     @pytest.mark.asyncio
     async def test_test_coverage_rule_surfaces_test_comment(self, isolated_index):

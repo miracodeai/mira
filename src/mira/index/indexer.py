@@ -169,13 +169,33 @@ def _content_hash(content: str) -> str:
 
 
 _EXT_LANG = {
-    ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
-    ".jsx": "javascript", ".go": "go", ".rs": "rust", ".java": "java",
-    ".rb": "ruby", ".php": "php", ".cpp": "cpp", ".c": "c", ".h": "c",
-    ".hpp": "cpp", ".cs": "csharp", ".kt": "kotlin", ".swift": "swift",
-    ".scala": "scala", ".sh": "shell", ".bash": "shell", ".yaml": "yaml",
-    ".yml": "yaml", ".toml": "toml", ".json": "json", ".sql": "sql",
-    ".graphql": "graphql", ".proto": "protobuf",
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".jsx": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".rb": "ruby",
+    ".php": "php",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".scala": "scala",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".json": "json",
+    ".sql": "sql",
+    ".graphql": "graphql",
+    ".proto": "protobuf",
 }
 
 
@@ -282,7 +302,10 @@ async def _fetch_repo_tarball(
             resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
                 logger.warning(
-                    "Tarball fetch failed for %s/%s: %d", owner, repo, resp.status_code,
+                    "Tarball fetch failed for %s/%s: %d",
+                    owner,
+                    repo,
+                    resp.status_code,
                 )
                 return None
             blob = resp.content
@@ -438,7 +461,10 @@ async def _summarize_batch(
 
             cap = min(max_output_tokens(llm.config.model, default=16384), 32768)
             raw = await llm.complete(
-                messages, json_mode=True, temperature=0.0, max_tokens=cap,
+                messages,
+                json_mode=True,
+                temperature=0.0,
+                max_tokens=cap,
             )
         except Exception as exc:
             logger.warning("LLM summarization failed for batch of %d files: %s", len(files), exc)
@@ -574,9 +600,7 @@ async def index_repo(
     # completions.
     llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)
     batches = _build_batches(file_pairs)
-    tasks = [
-        asyncio.create_task(_summarize_batch(batch, llm, llm_sem)) for batch in batches
-    ]
+    tasks = [asyncio.create_task(_summarize_batch(batch, llm, llm_sem)) for batch in batches]
 
     indexed_count = len(trivial_pairs)
     try:
@@ -587,7 +611,9 @@ async def index_repo(
                         t.cancel()
                 logger.info(
                     "Indexing cancelled for %s/%s after %d files",
-                    owner, repo, indexed_count,
+                    owner,
+                    repo,
+                    indexed_count,
                 )
                 raise IndexingCancelled(indexed_count)
             results = await fut
@@ -612,7 +638,13 @@ async def index_repo(
     # already have it so manifests don't trigger their own fetch loop.
     try:
         await _index_manifests(
-            owner, repo, token, branch, store, tree_paths, fetch_sem,
+            owner,
+            repo,
+            token,
+            branch,
+            store,
+            tree_paths,
+            fetch_sem,
             cached_contents=tarball,
         )
     except Exception as exc:
@@ -752,15 +784,11 @@ async def _summarize_directories(
         sections: list[str] = []
         for dir_path, file_count, summaries in chunk:
             display = dir_path or "(root)"
-            sections.append(
-                f"### {display} ({file_count} files)\n" + "\n".join(summaries)
-            )
+            sections.append(f"### {display} ({file_count} files)\n" + "\n".join(summaries))
         prompt = (
             "You are a code indexing assistant. For each directory below, "
             "generate a concise 1-2 sentence summary describing what it "
-            "contains and its purpose.\n\n"
-            + "\n\n".join(sections)
-            + "\n\nRespond with JSON: "
+            "contains and its purpose.\n\n" + "\n\n".join(sections) + "\n\nRespond with JSON: "
             '{"directories": [{"path": "<dir>", "summary": "..."}, ...]}. '
             'Use "(root)" as the path for the repo-root directory.'
         )
@@ -771,7 +799,10 @@ async def _summarize_directories(
         async with semaphore:
             try:
                 raw = await llm.complete(
-                    messages, json_mode=True, temperature=0.0, max_tokens=4096,
+                    messages,
+                    json_mode=True,
+                    temperature=0.0,
+                    max_tokens=4096,
                 )
                 data = json.loads(_strip_code_fences(raw))
             except Exception as exc:

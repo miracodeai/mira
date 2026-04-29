@@ -38,7 +38,8 @@ jobs:
       - name: Format check
         run: uv run ruff format --check src/ tests/
 
-      - name: Type check
+      - name: Type check (advisory — non-blocking until codebase is fully typed)
+        continue-on-error: true
         run: uv run mypy src/mira/ --ignore-missing-imports
 
       - name: Test

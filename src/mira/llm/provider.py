@@ -345,8 +345,11 @@ class LLMProvider:
         """
         try:
             return await self._call_llm(
-                self.config.model, messages, json_mode,
-                temperature=temperature, max_tokens=max_tokens,
+                self.config.model,
+                messages,
+                json_mode,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
         except Exception as primary_err:
             if self.config.fallback_model:
@@ -358,8 +361,11 @@ class LLMProvider:
                 )
                 try:
                     return await self._call_llm(
-                        self.config.fallback_model, messages, json_mode,
-                        temperature=temperature, max_tokens=max_tokens,
+                        self.config.fallback_model,
+                        messages,
+                        json_mode,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
                     )
                 except Exception as fallback_err:
                     raise LLMError(

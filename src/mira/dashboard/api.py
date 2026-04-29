@@ -973,8 +973,11 @@ def get_packages(owner: str, repo: str) -> list[PackageModel]:
     by_key: dict[tuple[str, str], PackageModel] = {}
     for r in rows:
         model = PackageModel(
-            name=r.name, kind=r.kind, version=r.version,
-            file_path=r.file_path, is_dev=r.is_dev,
+            name=r.name,
+            kind=r.kind,
+            version=r.version,
+            file_path=r.file_path,
+            is_dev=r.is_dev,
         )
         key = (r.kind, r.name)
         existing = by_key.get(key)
@@ -1113,13 +1116,22 @@ def search_packages(
         from mira.index.pg_store import search_packages_org_wide
 
         rows = search_packages_org_wide(
-            db_url, name=name, version=version, kind=kind, is_dev=is_dev, limit=capped_limit,
+            db_url,
+            name=name,
+            version=version,
+            kind=kind,
+            is_dev=is_dev,
+            limit=capped_limit,
         )
     else:
         from mira.index.store import search_packages_org_wide_sqlite
 
         rows = search_packages_org_wide_sqlite(
-            name=name, version=version, kind=kind, is_dev=is_dev, limit=capped_limit,
+            name=name,
+            version=version,
+            kind=kind,
+            is_dev=is_dev,
+            limit=capped_limit,
         )
     return [PackageSearchHit(**r) for r in rows]
 

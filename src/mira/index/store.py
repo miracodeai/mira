@@ -1110,9 +1110,7 @@ class IndexStore:
         self._conn.commit()
         return len(vulns)
 
-    def prune_stale_vulnerabilities(
-        self, active_keys: set[tuple[str, str, str]]
-    ) -> int:
+    def prune_stale_vulnerabilities(self, active_keys: set[tuple[str, str, str]]) -> int:
         """Delete vulnerability rows whose (name, ecosystem, version) tuple
         is no longer in this repo's dependency set.
 
@@ -1166,10 +1164,12 @@ class IndexStore:
         ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+
 # ── Org-wide aggregation over per-repo SQLite stores ──────────────
 #
 # These mirror the Postgres helpers in pg_store.py for self-host setups
 # where each repo is a separate SQLite file under MIRA_INDEX_DIR.
+
 
 def _iter_repo_dbs(index_dir: str) -> list[tuple[str, str, str]]:
     """Yield (owner, repo, db_path) for each repo SQLite file under index_dir."""
@@ -1205,10 +1205,16 @@ def list_packages_org_wide_sqlite() -> list[dict]:
         except sqlite3.Error:
             continue
         for kind, name, version, file_path in rows:
-            out.append({
-                "owner": owner, "repo": repo, "kind": kind, "name": name,
-                "version": version, "file_path": file_path,
-            })
+            out.append(
+                {
+                    "owner": owner,
+                    "repo": repo,
+                    "kind": kind,
+                    "name": name,
+                    "version": version,
+                    "file_path": file_path,
+                }
+            )
     return out
 
 
@@ -1241,10 +1247,17 @@ def search_packages_org_wide_sqlite(
                         continue
                     if is_dev is not None and bool(r_dev) != is_dev:
                         continue
-                    rows.append({
-                        "owner": owner, "repo": repo, "name": r_name, "kind": r_kind,
-                        "version": r_version, "file_path": r_file, "is_dev": bool(r_dev),
-                    })
+                    rows.append(
+                        {
+                            "owner": owner,
+                            "repo": repo,
+                            "name": r_name,
+                            "kind": r_kind,
+                            "version": r_version,
+                            "file_path": r_file,
+                            "is_dev": bool(r_dev),
+                        }
+                    )
             finally:
                 conn.close()
         except sqlite3.Error:
@@ -1268,12 +1281,21 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
                     "severity, advisory_url, fixed_in, last_seen_at FROM vulnerabilities"
                 )
                 for r in cur.fetchall():
-                    rows.append({
-                        "owner": owner, "repo": repo, "package_name": r[0],
-                        "ecosystem": r[1], "package_version": r[2], "cve_id": r[3],
-                        "summary": r[4], "severity": r[5], "advisory_url": r[6],
-                        "fixed_in": r[7], "last_seen_at": r[8],
-                    })
+                    rows.append(
+                        {
+                            "owner": owner,
+                            "repo": repo,
+                            "package_name": r[0],
+                            "ecosystem": r[1],
+                            "package_version": r[2],
+                            "cve_id": r[3],
+                            "summary": r[4],
+                            "severity": r[5],
+                            "advisory_url": r[6],
+                            "fixed_in": r[7],
+                            "last_seen_at": r[8],
+                        }
+                    )
             finally:
                 conn.close()
         except sqlite3.Error:
@@ -1281,7 +1303,6 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
 
     rows.sort(key=lambda r: (severity_order.get(r["severity"], 4), r["package_name"].lower()))
     return rows[:limit]
-
 
 
 def list_learned_rules_org_wide_sqlite(limit: int = 500) -> list[dict]:
@@ -1298,11 +1319,18 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500) -> list[dict]:
                     "ORDER BY updated_at DESC"
                 )
                 for r in cur.fetchall():
-                    rows.append({
-                        "owner": owner, "repo": repo, "rule_text": r[0],
-                        "source_signal": r[1], "category": r[2], "path_pattern": r[3],
-                        "sample_count": r[4], "updated_at": r[5],
-                    })
+                    rows.append(
+                        {
+                            "owner": owner,
+                            "repo": repo,
+                            "rule_text": r[0],
+                            "source_signal": r[1],
+                            "category": r[2],
+                            "path_pattern": r[3],
+                            "sample_count": r[4],
+                            "updated_at": r[5],
+                        }
+                    )
             finally:
                 conn.close()
         except sqlite3.Error:

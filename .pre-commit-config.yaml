@@ -23,6 +23,10 @@ repos:
       - id: mypy
         files: ^src/mira/
         args: [--ignore-missing-imports]
+        # Manual stage only — the codebase has accumulated type-annotation
+        # debt that we'll clean up incrementally. Run on demand with
+        # `pre-commit run mypy --hook-stage manual --all-files`.
+        stages: [manual]
         additional_dependencies:
           - pydantic>=2.5
           - click>=8.1

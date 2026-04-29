@@ -322,10 +322,7 @@ def create_app(
             # them with the SPA shell. Webhook + dashboard routes are
             # registered above and take precedence by route ordering, but a
             # bad path like /api/nonexistent should 404 cleanly.
-            if (
-                full_path.startswith("api/")
-                or full_path in {"webhook", "health"}
-            ):
+            if full_path.startswith("api/") or full_path in {"webhook", "health"}:
                 raise HTTPException(status_code=404)
             file_path = ui_dist / full_path
             if file_path.is_file():

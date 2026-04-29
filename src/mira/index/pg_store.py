@@ -289,8 +289,12 @@ def list_packages_org_wide(url: str) -> list[dict]:
         rows = cur.fetchall()
     return [
         {
-            "owner": r[0], "repo": r[1], "kind": r[2], "name": r[3],
-            "version": r[4], "file_path": r[5],
+            "owner": r[0],
+            "repo": r[1],
+            "kind": r[2],
+            "name": r[3],
+            "version": r[4],
+            "file_path": r[5],
         }
         for r in rows
     ]
@@ -1258,9 +1262,7 @@ class PgIndexStore:
         self._conn.commit()
         return len(vulns)
 
-    def prune_stale_vulnerabilities(
-        self, active_keys: set[tuple[str, str, str]]
-    ) -> int:
+    def prune_stale_vulnerabilities(self, active_keys: set[tuple[str, str, str]]) -> int:
         """Delete vulnerability rows whose (name, ecosystem, version) tuple
         is no longer in this repo's dependency set.
 

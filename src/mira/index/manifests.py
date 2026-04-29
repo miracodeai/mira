@@ -77,9 +77,7 @@ def parse_package_json(content: str, file_path: str) -> list[ParsedPackage]:
 #   -e git+https://github.com/foo/bar.git@main#egg=bar
 #   ./local-path  (ignored)
 _PIP_SPEC = re.compile(
-    r"^([A-Za-z0-9][A-Za-z0-9\-_.]*)\s*"
-    r"([=<>!~]=?|===)?"
-    r"\s*([^;#\s]*)",
+    r"^([A-Za-z0-9][A-Za-z0-9\-_.]*)\s*" r"([=<>!~]=?|===)?" r"\s*([^;#\s]*)",
 )
 
 
@@ -325,9 +323,7 @@ def parse_uv_lock(content: str, file_path: str) -> list[ParsedPackage]:
         name = pkg.get("name")
         version = pkg.get("version")
         if isinstance(name, str) and isinstance(version, str) and name:
-            out.append(
-                ParsedPackage(name=name, kind="pip", version=version, file_path=file_path)
-            )
+            out.append(ParsedPackage(name=name, kind="pip", version=version, file_path=file_path))
     return out
 
 
@@ -373,7 +369,11 @@ def parse_package_lock_json(content: str, file_path: str) -> list[ParsedPackage]
             is_dev = bool(info.get("dev"))
             out.append(
                 ParsedPackage(
-                    name=name, kind="npm", version=version, file_path=file_path, is_dev=is_dev,
+                    name=name,
+                    kind="npm",
+                    version=version,
+                    file_path=file_path,
+                    is_dev=is_dev,
                 )
             )
         return out

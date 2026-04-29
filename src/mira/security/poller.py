@@ -45,6 +45,7 @@ def _prefer_resolved(rows: list[dict]) -> list[dict]:
             by_key[key] = r
     return list(by_key.values())
 
+
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = int(os.environ.get("MIRA_VULN_POLL_INTERVAL", "3600"))
@@ -179,8 +180,12 @@ async def poll_repo(owner: str, repo: str) -> dict[str, int]:
     deduped = _prefer_resolved(
         [
             {
-                "owner": owner, "repo": repo, "kind": p.kind, "name": p.name,
-                "version": p.version, "file_path": p.file_path,
+                "owner": owner,
+                "repo": repo,
+                "kind": p.kind,
+                "name": p.name,
+                "version": p.version,
+                "file_path": p.file_path,
             }
             for p in pkgs
         ]
