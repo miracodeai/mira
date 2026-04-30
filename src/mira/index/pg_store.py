@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS files (
     language TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL DEFAULT '',
+    loc INTEGER NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     PRIMARY KEY (owner, repo, path)
 );
@@ -199,6 +200,10 @@ def _get_conn(url: str):
         if not _schema_initialized:
             with _pg_conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
+                # Lightweight migration for columns added post-schema.
+                cur.execute(
+                    "ALTER TABLE files ADD COLUMN IF NOT EXISTS loc INTEGER NOT NULL DEFAULT 0"
+                )
             _schema_initialized = True
         return _pg_conn
 
@@ -391,7 +396,7 @@ class PgIndexStore:
 
     def get_summary(self, path: str) -> FileSummary | None:
         row = self._fetchone(
-            "SELECT path, language, summary, content_hash, updated_at FROM files "
+            "SELECT path, language, summary, content_hash, loc, updated_at FROM files "
             "WHERE owner=%s AND repo=%s AND path=%s",
             (self._owner, self._repo, path),
         )
@@ -402,7 +407,8 @@ class PgIndexStore:
             language=row[1],
             summary=row[2],
             content_hash=row[3],
-            updated_at=row[4],
+            loc=row[4] or 0,
+            updated_at=row[5],
         )
         fs.symbols = self._load_symbols(path)
         fs.imports = self._load_imports(path)
@@ -429,11 +435,12 @@ class PgIndexStore:
         now = time.time()
         with self._conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO files (owner, repo, path, language, summary, content_hash, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "INSERT INTO files (owner, repo, path, language, summary, content_hash, "
+                "loc, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (owner, repo, path) DO UPDATE SET "
                 "language=EXCLUDED.language, summary=EXCLUDED.summary, "
-                "content_hash=EXCLUDED.content_hash, updated_at=EXCLUDED.updated_at",
+                "content_hash=EXCLUDED.content_hash, loc=EXCLUDED.loc, "
+                "updated_at=EXCLUDED.updated_at",
                 (
                     self._owner,
                     self._repo,
@@ -441,6 +448,7 @@ class PgIndexStore:
                     summary.language,
                     summary.summary,
                     summary.content_hash,
+                    summary.loc,
                     now,
                 ),
             )

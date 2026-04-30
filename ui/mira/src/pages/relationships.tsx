@@ -2,7 +2,6 @@ import { ArrowRight, Check, Plus, X } from "lucide-react"
 import { useState } from "react"
 import { Link } from "react-router"
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,8 +20,6 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { RelationshipGraph } from "@/components/dashboard/relationship-graph"
-import { Separator } from "@/components/ui/separator"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api } from "@/lib/api"
 import { useAsync } from "@/lib/hooks"
 
@@ -71,7 +68,8 @@ export function RelationshipsPage() {
           Cross-Repo Relationships
         </h1>
         <p className="text-sm text-muted-foreground">
-          Edges and groups detected across indexed repositories
+          How your repositories reference each other — useful for tracing the
+          impact of a change before merging.
         </p>
       </div>
 
@@ -81,257 +79,184 @@ export function RelationshipsPage() {
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       {displayData && (
-        <Tabs defaultValue="graph">
-          <TabsList>
-            <TabsTrigger value="graph">Graph</TabsTrigger>
-            <TabsTrigger value="groups">
-              Groups ({displayData.groups.length})
-            </TabsTrigger>
-            <TabsTrigger value="edges">
-              Edges ({displayData.edges.length})
-            </TabsTrigger>
-          </TabsList>
+        <>
+          {/* Graph — primary view */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle>Dependency Graph</CardTitle>
+              <CardDescription>
+                Each circle is a repo; lines show how they reference each
+                other. Drag to rearrange, click a repo to open it.
+                {displayData.groups.length > 0 && (
+                  <>
+                    {" "}
+                    Colour-coded clusters group repos that share heavy mutual
+                    references.
+                  </>
+                )}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <RelationshipGraph
+                data={displayData}
+                repoFileCounts={repoFileCounts}
+              />
+            </CardContent>
+          </Card>
 
-          {/* Graph */}
-          <TabsContent value="graph">
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle>Dependency Graph</CardTitle>
-                <CardDescription>
-                  Drag nodes to rearrange. Click a repo to view details.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <RelationshipGraph
-                  data={displayData}
-                  repoFileCounts={repoFileCounts}
-                />
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          {/* Groups */}
-          <TabsContent value="groups">
-            {displayData.groups.length > 0 ? (
-              <div className="grid gap-4 lg:grid-cols-2">
-                {displayData.groups.map((g) => (
-                  <Card key={g.name}>
-                    <CardHeader className="pb-2">
-                      <CardDescription>
-                        {g.repos.length} repositories
-                      </CardDescription>
-                      <CardTitle className="flex items-center justify-between">
-                        <span>{g.name}</span>
-                        <span className="text-sm font-normal text-muted-foreground">
-                          {Math.round(g.confidence * 100)}% confidence
-                        </span>
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-4">
-                        {g.repos.map((r) => {
-                          const [owner, repo] = r.split("/")
-                          const initials = repo
-                            .split("-")
-                            .map((w) => w[0])
-                            .join("")
-                            .toUpperCase()
-                            .slice(0, 2)
-                          return (
-                            <Link
-                              key={r}
-                              to={`/repos/${owner}/${repo}`}
-                              className="flex items-center"
-                            >
-                              <Avatar className="h-8 w-8">
-                                <AvatarFallback className="text-xs">
-                                  {initials}
-                                </AvatarFallback>
-                              </Avatar>
-                              <div className="ml-3 space-y-1">
-                                <p className="text-sm font-medium leading-none">
-                                  {repo}
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  {owner}
-                                </p>
-                              </div>
-                            </Link>
-                          )
-                        })}
-                      </div>
-                      <Separator className="my-4" />
-                      <div className="space-y-1">
-                        {g.evidence.map((ev, i) => (
-                          <p
-                            key={i}
-                            className="text-xs text-muted-foreground"
-                          >
-                            {ev}
-                          </p>
-                        ))}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            ) : (
-              <Card>
-                <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                  No repo groups detected yet.
-                </CardContent>
-              </Card>
-            )}
-          </TabsContent>
-
-          {/* Edges */}
-          <TabsContent value="edges">
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <CardTitle>Cross-Repo Edges</CardTitle>
-                    <CardDescription>
-                      Confirm, deny, or add relationships
-                    </CardDescription>
-                  </div>
-                  <Button
-                    size="sm"
-                    onClick={() => setShowAddEdge(!showAddEdge)}
-                  >
-                    <Plus className="mr-1 h-3 w-3" /> Add
-                  </Button>
+          {/* Connections table — replaces the old Edges tab */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Connections</CardTitle>
+                  <CardDescription>
+                    {displayData.edges.length === 0
+                      ? "No cross-repo references detected yet."
+                      : `${displayData.edges.length} reference${
+                          displayData.edges.length === 1 ? "" : "s"
+                        } across ${
+                          new Set(
+                            displayData.edges.flatMap((e) => [
+                              e.source_repo,
+                              e.target_repo,
+                            ]),
+                          ).size
+                        } repos. Approve, dismiss, or add your own.`}
+                  </CardDescription>
                 </div>
-              </CardHeader>
-              <CardContent>
-                {showAddEdge && (
-                  <div className="mb-6 space-y-3 rounded-lg border p-4">
-                    <div className="grid grid-cols-2 gap-3">
-                      <Select
-                        value={newEdge.source}
-                        onValueChange={(v) =>
-                          setNewEdge({ ...newEdge, source: v })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Source repo..." />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {allRepoNames.map((r) => (
+                <Button
+                  size="sm"
+                  onClick={() => setShowAddEdge(!showAddEdge)}
+                >
+                  <Plus className="mr-1 h-3 w-3" /> Add
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {showAddEdge && (
+                <div className="mb-6 space-y-3 rounded-lg border p-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <Select
+                      value={newEdge.source}
+                      onValueChange={(v) =>
+                        setNewEdge({ ...newEdge, source: v })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Source repo..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {allRepoNames.map((r) => (
+                          <SelectItem key={r} value={r}>
+                            {r}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select
+                      value={newEdge.target}
+                      onValueChange={(v) =>
+                        setNewEdge({ ...newEdge, target: v })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Target repo..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {allRepoNames
+                          .filter((r) => r !== newEdge.source)
+                          .map((r) => (
                             <SelectItem key={r} value={r}>
                               {r}
                             </SelectItem>
                           ))}
-                        </SelectContent>
-                      </Select>
-                      <Select
-                        value={newEdge.target}
-                        onValueChange={(v) =>
-                          setNewEdge({ ...newEdge, target: v })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Target repo..." />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {allRepoNames
-                            .filter((r) => r !== newEdge.source)
-                            .map((r) => (
-                              <SelectItem key={r} value={r}>
-                                {r}
-                              </SelectItem>
-                            ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <Input
-                      placeholder="Reason (e.g. shares database, calls internal API)"
-                      value={newEdge.reason}
-                      onChange={(e) =>
-                        setNewEdge({ ...newEdge, reason: e.target.value })
-                      }
-                    />
-                    <div className="flex gap-2">
-                      <Button
-                        size="sm"
-                        onClick={addCustomEdge}
-                        disabled={!newEdge.source || !newEdge.target}
-                      >
-                        Add
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setShowAddEdge(false)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
+                      </SelectContent>
+                    </Select>
                   </div>
-                )}
+                  <Input
+                    placeholder="Reason (e.g. shares database, calls internal API)"
+                    value={newEdge.reason}
+                    onChange={(e) =>
+                      setNewEdge({ ...newEdge, reason: e.target.value })
+                    }
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={addCustomEdge}
+                      disabled={!newEdge.source || !newEdge.target}
+                    >
+                      Add
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setShowAddEdge(false)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
 
-                {displayData.edges.length > 0 ? (
-                  <div className="space-y-4">
-                    {displayData.edges.map((e, i) => {
-                      const [sOwner, sRepo] = e.source_repo.split("/")
-                      const [tOwner, tRepo] = e.target_repo.split("/")
-                      return (
-                        <div key={i} className="flex items-center">
-                          <div className="min-w-0 flex-1">
-                            <Link
-                              to={`/repos/${sOwner}/${sRepo}`}
-                              className="text-sm font-medium leading-none hover:underline"
-                            >
-                              {e.source_repo}
-                            </Link>
-                          </div>
-                          <ArrowRight className="mx-3 h-4 w-4 shrink-0 text-muted-foreground" />
-                          <div className="min-w-0 flex-1">
-                            <Link
-                              to={`/repos/${tOwner}/${tRepo}`}
-                              className="text-sm font-medium leading-none hover:underline"
-                            >
-                              {e.target_repo}
-                            </Link>
-                          </div>
-                          <Badge variant="outline" className="ml-3 shrink-0">
-                            {e.kind}
-                          </Badge>
-                          <div className="ml-3 flex shrink-0 gap-1">
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                              onClick={() =>
-                                confirmEdge(e.source_repo, e.target_repo)
-                              }
-                            >
-                              <Check className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() =>
-                                denyEdge(e.source_repo, e.target_repo)
-                              }
-                            >
-                              <X className="h-4 w-4" />
-                            </Button>
-                          </div>
+              {displayData.edges.length > 0 && (
+                <div className="space-y-4">
+                  {displayData.edges.map((e, i) => {
+                    const [sOwner, sRepo] = e.source_repo.split("/")
+                    const [tOwner, tRepo] = e.target_repo.split("/")
+                    return (
+                      <div key={i} className="flex items-center">
+                        <div className="min-w-0 flex-1">
+                          <Link
+                            to={`/repos/${sOwner}/${sRepo}`}
+                            className="text-sm font-medium leading-none hover:underline"
+                          >
+                            {e.source_repo}
+                          </Link>
                         </div>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    No cross-repo edges detected.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
+                        <ArrowRight className="mx-3 h-4 w-4 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0 flex-1">
+                          <Link
+                            to={`/repos/${tOwner}/${tRepo}`}
+                            className="text-sm font-medium leading-none hover:underline"
+                          >
+                            {e.target_repo}
+                          </Link>
+                        </div>
+                        <Badge variant="outline" className="ml-3 shrink-0">
+                          {e.kind}
+                        </Badge>
+                        <div className="ml-3 flex shrink-0 gap-1">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            onClick={() =>
+                              confirmEdge(e.source_repo, e.target_repo)
+                            }
+                          >
+                            <Check className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() =>
+                              denyEdge(e.source_repo, e.target_repo)
+                            }
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </>
       )}
     </div>
   )

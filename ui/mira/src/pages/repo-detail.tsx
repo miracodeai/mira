@@ -335,8 +335,8 @@ export function RepoDetailPage() {
                         {f.summary}
                       </p>
                     </div>
-                    <div className="ml-4 text-sm text-muted-foreground">
-                      {f.symbols.length} symbols
+                    <div className="ml-4 whitespace-nowrap text-sm text-muted-foreground tabular-nums">
+                      {f.loc ?? 0} lines
                     </div>
                   </div>
                 ))}

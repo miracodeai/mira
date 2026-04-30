@@ -428,6 +428,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
         symbol_refs=symbol_refs,
         external_refs=external_refs,
         content_hash=_content_hash(content),
+        loc=content.count("\n") + (0 if content.endswith("\n") else 1) if content else 0,
     )
 
 
@@ -588,6 +589,7 @@ async def index_repo(
                 imports=[],
                 external_refs=[],
                 content_hash=_content_hash(content),
+                loc=content.count("\n") + (0 if content.endswith("\n") else 1) if content else 0,
             )
         )
 

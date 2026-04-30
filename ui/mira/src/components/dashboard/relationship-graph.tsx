@@ -442,7 +442,8 @@ export function RelationshipGraph({
           </button>
         ))}
         <span className="ml-auto text-xs text-zinc-500">
-          {nodes.length} repos, {edges.length} edges
+          {nodes.length} {nodes.length === 1 ? "repo" : "repos"} ·{" "}
+          {edges.length} {edges.length === 1 ? "connection" : "connections"}
         </span>
       </div>
 

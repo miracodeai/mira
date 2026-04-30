@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS files (
     language TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL DEFAULT '',
+    loc INTEGER NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0
 );
 
@@ -167,6 +168,7 @@ class FileSummary:
     symbol_refs: list[tuple[str, str, str]] = field(default_factory=list)
     external_refs: list[ExternalRef] = field(default_factory=list)
     content_hash: str = ""
+    loc: int = 0
     updated_at: float = 0.0
 
 
@@ -284,6 +286,10 @@ class IndexStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        # Lightweight migration for the loc column added post-schema.
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)").fetchall()}
+        if "loc" not in cols:
+            self._conn.execute("ALTER TABLE files ADD COLUMN loc INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
 
     @classmethod
@@ -311,7 +317,8 @@ class IndexStore:
     def get_summary(self, path: str) -> FileSummary | None:
         """Get the summary for a single file."""
         row = self._conn.execute(
-            "SELECT path, language, summary, content_hash, updated_at FROM files WHERE path = ?",
+            "SELECT path, language, summary, content_hash, loc, updated_at "
+            "FROM files WHERE path = ?",
             (path,),
         ).fetchone()
         if row is None:
@@ -321,7 +328,8 @@ class IndexStore:
             language=row[1],
             summary=row[2],
             content_hash=row[3],
-            updated_at=row[4],
+            loc=row[4] or 0,
+            updated_at=row[5],
         )
         fs.symbols = self._load_symbols(path)
         fs.imports = self._load_imports(path)
@@ -368,14 +376,22 @@ class IndexStore:
         """Insert or update a file summary and its related data."""
         now = time.time()
         self._conn.execute(
-            """INSERT INTO files (path, language, summary, content_hash, updated_at)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO files (path, language, summary, content_hash, loc, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(path) DO UPDATE SET
                  language=excluded.language,
                  summary=excluded.summary,
                  content_hash=excluded.content_hash,
+                 loc=excluded.loc,
                  updated_at=excluded.updated_at""",
-            (summary.path, summary.language, summary.summary, summary.content_hash, now),
+            (
+                summary.path,
+                summary.language,
+                summary.summary,
+                summary.content_hash,
+                summary.loc,
+                now,
+            ),
         )
         # Replace symbols
         self._conn.execute("DELETE FROM symbols WHERE file_path = ?", (summary.path,))

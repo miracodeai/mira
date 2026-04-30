@@ -110,6 +110,7 @@ class FileModel(BaseModel):
     summary: str
     symbols: list[SymbolModel] = []
     imports: list[str] = []
+    loc: int = 0
 
 
 class RepoDetail(BaseModel):
@@ -295,8 +296,8 @@ def list_repos() -> list[RepoListItem]:
             file_count_estimate=r.file_count_estimate,
             installation_id=r.installation_id,
             error=r.error,
-            last_indexed=datetime.fromtimestamp(r.updated_at, tz=UTC).isoformat()
-            if r.updated_at
+            last_indexed=datetime.fromtimestamp(r.last_indexed_at, tz=UTC).isoformat()
+            if r.last_indexed_at
             else None,
         )
         for r in repos
@@ -647,7 +648,11 @@ async def _run_initial_indexing(default_mode: str) -> None:
             )
             store.close()
             _app_db.set_repo_status(
-                repo_record.owner, repo_record.repo, "ready", files_indexed=count
+                repo_record.owner,
+                repo_record.repo,
+                "ready",
+                files_indexed=count,
+                bump_last_indexed=True,
             )
             tracker.complete(full_name, count)
             logger.info("Indexed %s: %d files", full_name, count)
@@ -683,6 +688,7 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
                         for s in fs.symbols
                     ],
                     imports=fs.imports,
+                    loc=fs.loc,
                 )
             )
             total_symbols += len(fs.symbols)
@@ -691,8 +697,8 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
 
         repo_record = _app_db.get_repo(owner, repo)
         last_indexed = (
-            datetime.fromtimestamp(repo_record.updated_at, tz=UTC).isoformat()
-            if repo_record and repo_record.updated_at
+            datetime.fromtimestamp(repo_record.last_indexed_at, tz=UTC).isoformat()
+            if repo_record and repo_record.last_indexed_at
             else None
         )
 
@@ -730,6 +736,7 @@ def list_files(owner: str, repo: str) -> list[FileModel]:
                         for s in fs.symbols
                     ],
                     imports=fs.imports,
+                    loc=fs.loc,
                 )
             )
         return result
@@ -1764,6 +1771,15 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
                 llm=llm,
                 full=full,
                 cancel_check=lambda: tracker.is_cancel_requested(full_name),
+            )
+            # Real indexing run finished — bump last_indexed_at so the
+            # dashboard's "Indexed N ago" reflects this completion.
+            _app_db.set_repo_status(
+                owner,
+                repo,
+                "ready",
+                files_indexed=count,
+                bump_last_indexed=True,
             )
             tracker.complete(full_name, count)
             logger.info(

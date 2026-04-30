@@ -37,6 +37,7 @@ export interface FileModel {
   summary: string
   symbols: SymbolModel[]
   imports: string[]
+  loc?: number
 }
 
 export interface RepoDetail {

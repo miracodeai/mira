@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS repos (
     installation_id INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0,
+    -- Distinct from updated_at: only set when a real indexing run finishes.
+    -- Container restarts and reconciliation passes touch updated_at without
+    -- last_indexed_at, so the dashboard's "Indexed N ago" reflects actual
+    -- indexing, not housekeeping.
+    last_indexed_at REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (owner, repo)
 );
 
@@ -108,6 +113,8 @@ CREATE TABLE IF NOT EXISTS repos (
     installation_id INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
+    -- Distinct from updated_at: only set when a real indexing run finishes.
+    last_indexed_at TIMESTAMPTZ,
     PRIMARY KEY (owner, repo)
 );
 
@@ -205,6 +212,7 @@ class RepoRecord:
     installation_id: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    last_indexed_at: float = 0.0  # 0.0 means never
 
 
 def _hash_password(password: str) -> str:
@@ -245,6 +253,13 @@ class AppDatabase:
         self._sqlite_conn.execute("PRAGMA journal_mode=WAL")
         self._sqlite_conn.execute("PRAGMA foreign_keys=ON")
         self._sqlite_conn.executescript(_SQLITE_SCHEMA)
+        # Lightweight migrations for columns added after the original schema.
+        # SQLite has no "IF NOT EXISTS" on ALTER, so we probe pragma_table_info.
+        cols = {r[1] for r in self._sqlite_conn.execute("PRAGMA table_info(repos)").fetchall()}
+        if "last_indexed_at" not in cols:
+            self._sqlite_conn.execute(
+                "ALTER TABLE repos ADD COLUMN last_indexed_at REAL NOT NULL DEFAULT 0"
+            )
         self._sqlite_conn.commit()
         logger.info("App database: SQLite at %s", db_path)
 
@@ -257,6 +272,10 @@ class AppDatabase:
             self._pg_conn.autocommit = True
             with self._pg_conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
+                # Lightweight migration for columns added after launch.
+                cur.execute(
+                    "ALTER TABLE repos ADD COLUMN IF NOT EXISTS last_indexed_at TIMESTAMPTZ"
+                )
             logger.info("App database: PostgreSQL")
         except ImportError:
             logger.warning(
@@ -457,23 +476,54 @@ class AppDatabase:
         )
 
     def set_repo_status(
-        self, owner: str, repo: str, status: str, files_indexed: int = 0, error: str = ""
+        self,
+        owner: str,
+        repo: str,
+        status: str,
+        files_indexed: int = 0,
+        error: str = "",
+        bump_last_indexed: bool = False,
     ) -> None:
+        """Update a repo's status row.
+
+        ``bump_last_indexed=True`` is reserved for callers that just
+        completed a real indexing run — it sets ``last_indexed_at=NOW()``,
+        which the dashboard surfaces as "Indexed N ago". Status-only
+        updates (reconciliation, in-progress flips, error states) leave
+        that timestamp untouched so the UI doesn't lie.
+        """
         now = time.time()
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
-            self._sqlite_conn.execute(
-                "UPDATE repos SET status=?, files_indexed=?, error=?, updated_at=? WHERE owner=? AND repo=?",
-                (status, files_indexed, error, now, owner, repo),
-            )
+            if bump_last_indexed:
+                self._sqlite_conn.execute(
+                    "UPDATE repos SET status=?, files_indexed=?, error=?, "
+                    "updated_at=?, last_indexed_at=? WHERE owner=? AND repo=?",
+                    (status, files_indexed, error, now, now, owner, repo),
+                )
+            else:
+                self._sqlite_conn.execute(
+                    "UPDATE repos SET status=?, files_indexed=?, error=?, "
+                    "updated_at=? WHERE owner=? AND repo=?",
+                    (status, files_indexed, error, now, owner, repo),
+                )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE repos SET status=%s, files_indexed=%s, error=%s, updated_at=NOW() WHERE owner=%s AND repo=%s",
-                    (status, files_indexed, error, owner, repo),
-                )
+                if bump_last_indexed:
+                    cur.execute(
+                        "UPDATE repos SET status=%s, files_indexed=%s, error=%s, "
+                        "updated_at=NOW(), last_indexed_at=NOW() "
+                        "WHERE owner=%s AND repo=%s",
+                        (status, files_indexed, error, owner, repo),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE repos SET status=%s, files_indexed=%s, error=%s, "
+                        "updated_at=NOW() WHERE owner=%s AND repo=%s",
+                        (status, files_indexed, error, owner, repo),
+                    )
 
     # ── Pending uninstalls ──
 
@@ -593,7 +643,8 @@ class AppDatabase:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             rows = self._sqlite_conn.execute(
-                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, error, installation_id, created_at, updated_at "
+                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
+                "error, installation_id, created_at, updated_at, last_indexed_at "
                 "FROM repos ORDER BY owner, repo"
             ).fetchall()
             return [
@@ -608,6 +659,7 @@ class AppDatabase:
                     installation_id=r[7],
                     created_at=r[8],
                     updated_at=r[9],
+                    last_indexed_at=r[10] or 0.0,
                 )
                 for r in rows
             ]
@@ -615,7 +667,7 @@ class AppDatabase:
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at "
+                "error, installation_id, created_at, updated_at, last_indexed_at "
                 "FROM repos ORDER BY owner, repo"
             )
             return [
@@ -630,6 +682,7 @@ class AppDatabase:
                     installation_id=r[7],
                     created_at=r[8].timestamp() if r[8] else 0.0,
                     updated_at=r[9].timestamp() if r[9] else 0.0,
+                    last_indexed_at=r[10].timestamp() if r[10] else 0.0,
                 )
                 for r in cur.fetchall()
             ]
@@ -638,7 +691,8 @@ class AppDatabase:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
-                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, error, installation_id, created_at, updated_at "
+                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
+                "error, installation_id, created_at, updated_at, last_indexed_at "
                 "FROM repos WHERE owner=? AND repo=?",
                 (owner, repo),
             ).fetchone()
@@ -654,13 +708,14 @@ class AppDatabase:
                     installation_id=row[7],
                     created_at=row[8],
                     updated_at=row[9],
+                    last_indexed_at=row[10] or 0.0,
                 )
             return None
         assert self._pg_conn is not None
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at "
+                "error, installation_id, created_at, updated_at, last_indexed_at "
                 "FROM repos WHERE owner=%s AND repo=%s",
                 (owner, repo),
             )
@@ -679,6 +734,7 @@ class AppDatabase:
                     installation_id=row[7],
                     created_at=row[8].timestamp() if row[8] else 0.0,
                     updated_at=row[9].timestamp() if row[9] else 0.0,
+                    last_indexed_at=row[10].timestamp() if row[10] else 0.0,
                 )
             return None
 

@@ -280,11 +280,16 @@ async def handle_push_index(
 
         store.close()
 
-        # Bump the repo's updated_at + files_indexed so the dashboard's
-        # "last indexed" timestamp reflects the push. Skip if nothing changed.
+        # Bump last_indexed_at on a real incremental indexing run.
         if count > 0:
             try:
-                app_db.set_repo_status(owner, repo_name, "ready", files_indexed=count)
+                app_db.set_repo_status(
+                    owner,
+                    repo_name,
+                    "ready",
+                    files_indexed=count,
+                    bump_last_indexed=True,
+                )
             except Exception as exc:
                 logger.warning("Failed to update repo status after push: %s", exc)
 
