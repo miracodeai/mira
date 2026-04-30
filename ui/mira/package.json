@@ -23,7 +23,7 @@
     "radix-ui": "^1.4.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-router": "^7.14.0",
+    "react-router": "^7.14.2",
     "recharts": "^3.8.0",
     "shadcn": "^4.1.2",
     "tailwind-merge": "^3.5.0",
