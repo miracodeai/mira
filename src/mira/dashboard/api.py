@@ -1116,7 +1116,14 @@ def search_packages(
 ) -> list[PackageSearchHit]:
     """Find every occurrence of a package/version across the org. Most
     valuable for security incident response ("which repos use lodash@4.17.20
-    after this CVE?") and upgrade audits."""
+    after this CVE?") and upgrade audits.
+
+    Dedupes by ``(owner, repo, kind, name)`` preferring lockfile rows over
+    manifest rows so the same package isn't shown twice (e.g. ``click 8.3.1``
+    from ``uv.lock`` plus ``click >=8.1`` from ``pyproject.toml``).
+    """
+    from mira.index.manifests import _is_lockfile_path
+
     db_url = os.environ.get("DATABASE_URL", "")
     capped_limit = max(1, min(limit, 2000))
     if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
@@ -1140,7 +1147,17 @@ def search_packages(
             is_dev=is_dev,
             limit=capped_limit,
         )
-    return [PackageSearchHit(**r) for r in rows]
+
+    deduped: dict[tuple[str, str, str, str], dict] = {}
+    for r in rows:
+        key = (r["owner"], r["repo"], r["kind"], r["name"])
+        existing = deduped.get(key)
+        if existing is None or (
+            _is_lockfile_path(r.get("file_path", ""))
+            and not _is_lockfile_path(existing.get("file_path", ""))
+        ):
+            deduped[key] = r
+    return [PackageSearchHit(**r) for r in deduped.values()]
 
 
 @router.get("/api/relationships", response_model=RelationshipsResponse)
