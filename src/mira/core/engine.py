@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -295,6 +296,18 @@ class ReviewEngine:
         # Final walkthrough update with real review stats. Tighten confidence
         # now that we know what the review found — the initial LLM score
         # predates the chunked review.
+        #
+        # Wait for the in-progress walkthrough update to finish before posting
+        # the final one. If we don't, the in-progress write can land after
+        # this final one (race lands reliably on PRs with zero comments where
+        # chunk review is faster than a GitHub API write), leaving the
+        # comment stuck on "Code review in progress…".
+        notify_task = getattr(self, "_walkthrough_notify_task", None)
+        if notify_task is not None:
+            # Already logged inside the task; just proceed to final post.
+            with contextlib.suppress(Exception):
+                await notify_task
+
         if result.walkthrough:
             _clamp_confidence_to_findings(result.walkthrough, result.comments)
             if self.dry_run:
@@ -594,6 +607,13 @@ class ReviewEngine:
         # chunks depend on it.
         walkthrough_task = _asyncio.create_task(_generate_walkthrough())
 
+        # The notify task is referenced on `self` so the caller (review_pr)
+        # can await it before its own final update — without this, a slow
+        # in-progress update can land *after* the final update on PRs with
+        # zero review comments (chunk review finishes faster than the
+        # callback's GitHub API write), leaving the comment stuck on
+        # "Code review in progress…".
+        self._walkthrough_notify_task = None
         if on_walkthrough_ready is not None:
 
             async def _notify_caller() -> None:
@@ -603,7 +623,7 @@ class ReviewEngine:
                 except Exception as exc:
                     logger.warning("on_walkthrough_ready callback failed: %s", exc)
 
-            _asyncio.create_task(_notify_caller())
+            self._walkthrough_notify_task = _asyncio.create_task(_notify_caller())
 
         # ── Fetch decision-archaeology history in parallel with code context.
         # The provider may not exist (CLI / dry-run); in that case we just skip.

@@ -50,7 +50,7 @@ We're a small open-source project and currently **do not offer a paid bug bounty
 Mira is **self-hosted only**. There is no Mira-managed cloud service.
 
 - **No data or telemetry leaves your infrastructure when you self-host.** We don't run any phone-home, usage tracking, or analytics service.
-- **Code never touches a Mira-controlled server.** Mira uses your own LLM provider (BYO-LLM via LiteLLM) — your code goes from your repo, through your LLM API key, and back to your Mira instance. We are not in the path.
+- **Code never touches a Mira-controlled server.** Mira uses your own LLM provider (BYO-LLM via OpenRouter, which itself fronts Anthropic, OpenAI, Google, and others) — your code goes from your repo, through your LLM API key, and back to your Mira instance. We are not in the path.
 - **Indexes are stored locally** in your SQLite file or your Postgres database. Mira has no central index store.
 - **Webhook signatures verified** with the per-installation `MIRA_WEBHOOK_SECRET` you configure on the GitHub App. Invalid signatures are rejected at the edge.
 - **GitHub App tokens cached in-process only**, with a 55-minute TTL, and never written to disk. Tokens for installations you've removed expire automatically.
