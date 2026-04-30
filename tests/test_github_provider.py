@@ -967,20 +967,51 @@ class TestGetThreadIdForComment:
         provider._github = MagicMock()
         return provider
 
+    def _pr_info(self) -> PRInfo:
+        return PRInfo(
+            title="",
+            description="",
+            base_branch="",
+            head_branch="",
+            url="https://github.com/o/r/pull/1",
+            number=1,
+            owner="o",
+            repo="r",
+        )
+
+    def _resp(self, threads: list[dict], has_next: bool = False, cursor: str | None = None) -> dict:
+        return {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                            "nodes": threads,
+                        }
+                    }
+                }
+            }
+        }
+
     @pytest.mark.asyncio
     async def test_returns_thread_id(self):
         """Returns thread ID when comment is found and thread is unresolved."""
         provider = self._make_provider()
-
-        graphql_resp = {
-            "data": {"node": {"pullRequestReviewThread": {"id": "PRRT_123", "isResolved": False}}}
-        }
+        graphql_resp = self._resp(
+            [
+                {
+                    "id": "PRRT_123",
+                    "isResolved": False,
+                    "comments": {"nodes": [{"id": "MDI0Ol_abc"}, {"id": "MDI0Ol_reply"}]},
+                }
+            ]
+        )
 
         async def _mock_post(self, url, **kwargs):
             return httpx.Response(200, json=graphql_resp, request=httpx.Request("POST", url))
 
         with patch.object(httpx.AsyncClient, "post", _mock_post):
-            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc", self._pr_info())
 
         assert result == "PRRT_123"
 
@@ -988,16 +1019,21 @@ class TestGetThreadIdForComment:
     async def test_returns_none_when_already_resolved(self):
         """Returns None when the thread is already resolved."""
         provider = self._make_provider()
-
-        graphql_resp = {
-            "data": {"node": {"pullRequestReviewThread": {"id": "PRRT_123", "isResolved": True}}}
-        }
+        graphql_resp = self._resp(
+            [
+                {
+                    "id": "PRRT_123",
+                    "isResolved": True,
+                    "comments": {"nodes": [{"id": "MDI0Ol_abc"}]},
+                }
+            ]
+        )
 
         async def _mock_post(self, url, **kwargs):
             return httpx.Response(200, json=graphql_resp, request=httpx.Request("POST", url))
 
         with patch.object(httpx.AsyncClient, "post", _mock_post):
-            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc", self._pr_info())
 
         assert result is None
 
@@ -1005,29 +1041,35 @@ class TestGetThreadIdForComment:
     async def test_returns_none_on_graphql_error(self):
         """Returns None when GraphQL returns an error."""
         provider = self._make_provider()
-
         error_resp = {"errors": [{"message": "Something went wrong"}]}
 
         async def _mock_post(self, url, **kwargs):
             return httpx.Response(200, json=error_resp, request=httpx.Request("POST", url))
 
         with patch.object(httpx.AsyncClient, "post", _mock_post):
-            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc", self._pr_info())
 
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_node_not_found(self):
-        """Returns None when the node is not found."""
+    async def test_returns_none_when_comment_not_in_any_thread(self):
+        """Returns None if no thread on the PR contains the comment."""
         provider = self._make_provider()
-
-        graphql_resp = {"data": {"node": None}}
+        graphql_resp = self._resp(
+            [
+                {
+                    "id": "PRRT_other",
+                    "isResolved": False,
+                    "comments": {"nodes": [{"id": "MDI0Ol_different"}]},
+                }
+            ]
+        )
 
         async def _mock_post(self, url, **kwargs):
             return httpx.Response(200, json=graphql_resp, request=httpx.Request("POST", url))
 
         with patch.object(httpx.AsyncClient, "post", _mock_post):
-            result = await provider.get_thread_id_for_comment("MDI0Ol_abc")
+            result = await provider.get_thread_id_for_comment("MDI0Ol_abc", self._pr_info())
 
         assert result is None
 

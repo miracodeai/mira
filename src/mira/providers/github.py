@@ -102,10 +102,19 @@ mutation($threadId: ID!) {
 """
 
 _COMMENT_THREAD_QUERY = """
-query($nodeId: ID!) {
-  node(id: $nodeId) {
-    ... on PullRequestReviewComment {
-      pullRequestReviewThread { id isResolved }
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          comments(first: 100) {
+            nodes { id }
+          }
+        }
+      }
     }
   }
 }
@@ -348,6 +357,28 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to update comment: {e}") from e
+
+    async def reply_to_review_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
+        """Post a reply to an existing review (line) comment, threading it.
+
+        Issue (PR-level) comments use ``post_comment``. Review comments are
+        line-anchored and threaded; replying needs the PR-comments-replies
+        REST endpoint, not ``create_comment``.
+        """
+
+        @_retry_transient
+        def _reply() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            pr = gh_repo.get_pull(pr_info.number)
+            # PyGithub exposes this as `create_review_comment_reply` on the PR.
+            pr.create_review_comment_reply(comment_id, body)
+
+        try:
+            await asyncio.to_thread(_reply)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to reply to review comment: {e}") from e
 
     @retry(
         stop=stop_after_attempt(3),
@@ -609,27 +640,52 @@ class GitHubProvider(BaseProvider):
             )
         return resolved
 
-    async def get_thread_id_for_comment(self, comment_node_id: str) -> str | None:
-        """Look up the review thread for a comment. Returns thread ID or None."""
-        try:
-            data = await self._graphql_request(_COMMENT_THREAD_QUERY, {"nodeId": comment_node_id})
-        except Exception:
-            logger.warning("Failed to look up thread for comment %s", comment_node_id)
-            return None
+    async def get_thread_id_for_comment(
+        self,
+        comment_node_id: str,
+        pr_info: PRInfo,
+    ) -> str | None:
+        """Look up the review thread containing ``comment_node_id``.
 
-        node = data.get("node")
-        if not node:
-            return None
+        GitHub's GraphQL schema doesn't expose ``pullRequestReviewThread``
+        directly on a ``PullRequestReviewComment``, so we paginate the PR's
+        ``reviewThreads`` connection and match by comment node ID. Returns
+        the thread's GraphQL ID (suitable for ``resolveReviewThread``), or
+        ``None`` if no matching thread is found or it's already resolved.
+        """
+        cursor: str | None = None
+        while True:
+            try:
+                data = await self._graphql_request(
+                    _COMMENT_THREAD_QUERY,
+                    {
+                        "owner": pr_info.owner,
+                        "repo": pr_info.repo,
+                        "number": pr_info.number,
+                        "cursor": cursor,
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to look up thread for comment %s: %s",
+                    comment_node_id,
+                    exc,
+                )
+                return None
 
-        thread = node.get("pullRequestReviewThread")
-        if not thread:
-            return None
+            connection = data["repository"]["pullRequest"]["reviewThreads"]
+            for thread in connection.get("nodes") or []:
+                comment_ids = {c["id"] for c in thread.get("comments", {}).get("nodes", [])}
+                if comment_node_id in comment_ids:
+                    if thread.get("isResolved"):
+                        return None
+                    thread_id: str = thread["id"]
+                    return thread_id
 
-        if thread.get("isResolved"):
-            return None
-
-        thread_id: str = thread["id"]
-        return thread_id
+            page = connection.get("pageInfo", {})
+            if not page.get("hasNextPage"):
+                return None
+            cursor = page.get("endCursor")
 
     async def get_all_bot_threads(
         self, pr_info: PRInfo, bot_login: str | None = None

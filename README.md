@@ -24,7 +24,7 @@ Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https
 Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
 
 **1. Create a GitHub App** at [github.com/settings/apps/new](https://github.com/settings/apps/new):
-- Webhook URL: `https://your-server.com/webhook`
+- Webhook URL: `https://your-server.com/github/webhook`
 - Permissions: Pull Requests (read+write), Contents (read), Issues (read+write)
 - Events: Pull requests, Issue comments
 - Generate a private key (.pem)
