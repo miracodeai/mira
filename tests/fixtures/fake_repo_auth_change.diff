@@ -1,0 +1,24 @@
+diff --git a/fake_repo/auth_service.py b/fake_repo/auth_service.py
+index 1234567..abcdef0 100644
+--- a/fake_repo/auth_service.py
++++ b/fake_repo/auth_service.py
+@@ -18,10 +18,15 @@ def authenticate(token: str) -> User:
+     payload = _decode_jwt(token)
+     if payload is None:
+         raise AuthenticationError("Invalid token")
+-    if payload.get("exp", 0) < time.time():
++    expiry = payload.get("exp", 0)
++    if expiry < time.time():
+         raise AuthenticationError("Token expired")
+     user_id = payload.get("user_id")
+     if user_id is None:
+         raise AuthenticationError("Missing user_id in token")
+-    # In production, this would query the database
+-    return User(id=user_id, email=payload.get("email", ""), password_hash="")
++    user = _lookup_user(user_id)
++    if not user.is_active:
++        raise AuthenticationError("User account is disabled")
++    return user
++
++def _lookup_user(user_id: int) -> User:
++    return User(id=user_id, email=f"user_{user_id}@example.com", password_hash="")

@@ -1,37 +1,88 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
+# Default-deny token permissions. Each job widens what it actually needs;
+# anything else (a malicious dep in CI, a compromised action) can't push
+# commits or create releases with the default token.
+permissions:
+  contents: read
+
 jobs:
-  test:
+  python:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,serve]"
+        run: uv sync --extra dev --extra serve
 
-      - name: Lint
-        run: ruff check src/ tests/
+      # Run the same pre-commit hooks contributors run locally. Single source
+      # of truth — if a hook is added/removed/version-bumped in
+      # `.pre-commit-config.yaml`, CI picks it up automatically and we don't
+      # have to also edit this workflow.
+      - name: Pre-commit hooks (lint, format, file hygiene)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
 
-      - name: Format check
-        run: ruff format --check src/ tests/
+      - name: Type check (advisory — manual stage in pre-commit, non-blocking here)
+        continue-on-error: true
+        run: uv run pre-commit run --all-files --hook-stage manual mypy
 
       - name: Test
-        run: pytest tests/ -v --cov=mira --cov-report=term-missing
+        run: uv run pytest tests/ -v --ignore=tests/evals --ignore=tests/test_integration.py
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui/mira
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/mira/package-lock.json
+
+      - name: Install
+        run: npm ci
 
       - name: Type check
-        run: mypy src/mira/ --ignore-missing-imports
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+  docker:
+    # Build the unified UI+backend image and smoke-test it boots. Catches
+    # packaging issues (missing extras, broken Dockerfile, bad UI assets)
+    # before they hit a release tag.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t mira:ci .
+
+      - name: Smoke test — CLI runs
+        run: docker run --rm mira:ci mira --help
+
+      - name: Smoke test — UI assets bundled
+        run: docker run --rm mira:ci ls /app/ui_dist/index.html

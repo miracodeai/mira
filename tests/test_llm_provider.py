@@ -1,8 +1,9 @@
-"""Tests for LLM provider wrapper."""
+"""Tests for LLM provider wrapper (OpenRouter via httpx)."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,16 +12,56 @@ from mira.config import LLMConfig
 from mira.exceptions import LLMError
 from mira.llm.provider import LLMProvider
 
+# Set a dummy API key for tests so _get_api_key() doesn't fail
+os.environ.setdefault("OPENROUTER_API_KEY", "test-key-for-unit-tests")
 
-def _make_completion_response(content: str = "response", usage: dict | None = None):
-    """Create a mock LiteLLM completion response."""
-    message = SimpleNamespace(content=content)
-    choice = SimpleNamespace(message=message)
-    resp = SimpleNamespace(choices=[choice])
+
+def _make_response_json(content: str = "response", usage: dict | None = None) -> dict:
+    """Create a mock OpenRouter API response dict."""
+    resp = {
+        "choices": [
+            {
+                "message": {
+                    "content": content,
+                },
+            }
+        ],
+    }
     if usage is not None:
-        resp.usage = SimpleNamespace(**usage)
-    else:
-        resp.usage = None
+        resp["usage"] = usage
+    return resp
+
+
+def _make_tool_response_json(arguments: str, usage: dict | None = None) -> dict:
+    """Create a mock OpenRouter API response with a tool call."""
+    resp = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "submit_review",
+                                "arguments": arguments,
+                            }
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    if usage is not None:
+        resp["usage"] = usage
+    return resp
+
+
+def _mock_httpx_response(data: dict, status_code: int = 200):
+    """Create a mock httpx.Response."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = data
+    resp.text = json.dumps(data)
     return resp
 
 
@@ -28,7 +69,7 @@ class TestLLMProviderInit:
     def test_default_config(self):
         config = LLMConfig()
         provider = LLMProvider(config)
-        assert provider.config.model == "openai/gpt-4o"
+        assert provider.config.model == "anthropic/claude-sonnet-4-6"
         assert provider.total_prompt_tokens == 0
         assert provider.total_completion_tokens == 0
 
@@ -39,12 +80,17 @@ class TestComplete:
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
 
-        mock_response = _make_completion_response(
-            "hello", {"prompt_tokens": 10, "completion_tokens": 5}
+        mock_resp = _mock_httpx_response(
+            _make_response_json("hello", {"prompt_tokens": 10, "completion_tokens": 5})
         )
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
             result = await provider.complete([{"role": "user", "content": "hi"}])
 
         assert result == "hello"
@@ -56,39 +102,55 @@ class TestComplete:
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
 
-        mock_response = _make_completion_response("{}")
+        mock_resp = _mock_httpx_response(_make_response_json("{}"))
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
             await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
 
-            call_kwargs = mock_litellm.acompletion.call_args[1]
-            assert call_kwargs["response_format"] == {"type": "json_object"}
+            call_kwargs = mock_client.post.call_args
+            body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+            assert body["response_format"] == {"type": "json_object"}
 
     @pytest.mark.asyncio
     async def test_non_json_mode_no_response_format(self):
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
 
-        mock_response = _make_completion_response("text")
+        mock_resp = _mock_httpx_response(_make_response_json("text"))
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
             await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
 
-            call_kwargs = mock_litellm.acompletion.call_args[1]
-            assert "response_format" not in call_kwargs
+            call_kwargs = mock_client.post.call_args
+            body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+            assert "response_format" not in body
 
     @pytest.mark.asyncio
-    async def test_no_usage_tracked_when_none(self):
+    async def test_no_usage_tracked_when_missing(self):
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
 
-        mock_response = _make_completion_response("ok")
-        mock_response.usage = None
+        mock_resp = _mock_httpx_response(_make_response_json("ok"))
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
             await provider.complete([{"role": "user", "content": "hi"}])
 
         assert provider.total_prompt_tokens == 0
@@ -99,19 +161,23 @@ class TestComplete:
         config = LLMConfig(model="primary", fallback_model="fallback")
         provider = LLMProvider(config)
 
-        mock_response = _make_completion_response("fallback ok")
-
         call_count = 0
 
-        async def _side_effect(**kwargs):
+        async def _side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            if kwargs["model"] == "primary":
-                raise RuntimeError("primary down")
-            return mock_response
+            body = kwargs.get("json", {})
+            if body.get("model") == "primary":
+                return _mock_httpx_response({}, status_code=500)
+            return _mock_httpx_response(_make_response_json("fallback ok"))
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(side_effect=_side_effect)
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=_side_effect)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
             result = await provider.complete([{"role": "user", "content": "hi"}])
 
         assert result == "fallback ok"
@@ -121,8 +187,14 @@ class TestComplete:
         config = LLMConfig(model="primary", fallback_model=None)
         provider = LLMProvider(config)
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_resp = _mock_httpx_response({}, status_code=500)
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
 
             with pytest.raises(LLMError, match="LLM completion failed"):
                 await provider.complete([{"role": "user", "content": "hi"}])
@@ -132,8 +204,14 @@ class TestComplete:
         config = LLMConfig(model="primary", fallback_model="fallback")
         provider = LLMProvider(config)
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(side_effect=RuntimeError("all down"))
+        mock_resp = _mock_httpx_response({}, status_code=500)
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
 
             with pytest.raises(LLMError, match="Both primary.*and fallback.*failed"):
                 await provider.complete([{"role": "user", "content": "hi"}])
@@ -143,37 +221,27 @@ class TestComplete:
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
 
-        message = SimpleNamespace(content=None)
-        choice = SimpleNamespace(message=message)
-        mock_response = SimpleNamespace(choices=[choice], usage=None)
+        resp_data = {"choices": [{"message": {"content": None}}]}
+        mock_resp = _mock_httpx_response(resp_data)
 
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.acompletion = AsyncMock(return_value=mock_response)
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
             result = await provider.complete([{"role": "user", "content": "hi"}])
 
         assert result == ""
 
 
 class TestCountTokens:
-    def test_successful_count(self):
+    def test_heuristic_count(self):
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
-
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.token_counter = MagicMock(return_value=42)
-            count = provider.count_tokens("hello world")
-
-        assert count == 42
-
-    def test_fallback_on_error(self):
-        config = LLMConfig(model="test-model")
-        provider = LLMProvider(config)
-
-        with patch("mira.llm.provider.litellm") as mock_litellm:
-            mock_litellm.token_counter = MagicMock(side_effect=Exception("no tokenizer"))
-            count = provider.count_tokens("hello world test")
-
-        # Fallback: len("hello world test") // 4 = 4
+        count = provider.count_tokens("hello world test")
+        # ~4 chars per token heuristic
         assert count == len("hello world test") // 4
 
 

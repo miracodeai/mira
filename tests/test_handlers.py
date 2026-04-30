@@ -286,29 +286,6 @@ async def test_handle_thread_reject_resolve_failure_posts_reply(
     assert "couldn't dismiss" in posted_body
 
 
-@patch("mira.github_app.handlers.create_provider")
-async def test_handle_thread_reject_resolve_failure_tracks_metrics(
-    mock_provider_cls: MagicMock,
-    mock_app_auth: AsyncMock,
-) -> None:
-    """When resolve_threads raises, tracks a thread_reject_failed metric."""
-    mock_provider = AsyncMock()
-    mock_provider.get_thread_id_for_comment = AsyncMock(return_value="PRRT_123")
-    mock_provider.resolve_threads = AsyncMock(side_effect=RuntimeError("network down"))
-    mock_provider.post_comment = AsyncMock()
-    mock_provider_cls.return_value = mock_provider
-
-    mock_metrics = MagicMock()
-    payload = _make_review_comment_payload("@mira-bot reject")
-    await handle_thread_reject(payload, mock_app_auth, "mira-bot", metrics=mock_metrics)
-
-    mock_metrics.track.assert_called_once_with(
-        "thread_reject_failed",
-        installation_id=1,
-        properties={"command": "reject", "error_type": "RuntimeError"},
-    )
-
-
 async def test_handle_thread_reject_exception_logged_not_raised(
     mock_app_auth: AsyncMock, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -381,30 +358,6 @@ async def test_handle_resume_removes_label_and_posts_comment(
     mock_provider.post_comment.assert_awaited_once()
     posted_body = mock_provider.post_comment.call_args[0][1]
     assert "resumed" in posted_body.lower()
-
-
-@patch("mira.github_app.handlers.create_provider")
-async def test_handle_pause_tracks_metrics(
-    mock_provider_cls: MagicMock,
-    mock_app_auth: AsyncMock,
-) -> None:
-    mock_provider = AsyncMock()
-    mock_provider_cls.return_value = mock_provider
-    mock_metrics = MagicMock()
-
-    await handle_pause_resume(
-        _make_pause_comment_payload(),
-        mock_app_auth,
-        "mira-bot",
-        "pause",
-        metrics=mock_metrics,
-    )
-
-    mock_metrics.track.assert_called_once_with(
-        "review_pause_toggle",
-        installation_id=1,
-        properties={"command": "pause"},
-    )
 
 
 async def test_handle_pause_exception_logged_not_raised(

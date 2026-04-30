@@ -1,16 +1,21 @@
 # Mira
 
-AI-powered PR reviewer with low-noise filtering.
+**The open-source AI code reviewer that's actually open.** Self-host every feature — full review engine, codebase indexing, vulnerability scanning, custom rules, org-wide package search, dashboard, learning loop. No paid tier, no license key, no SaaS upsell.
 
-Mira reviews your pull requests using any LLM (via [LiteLLM](https://github.com/BerriAI/litellm)) and posts concise, actionable feedback. Its noise filter ensures you only see comments that matter.
+[![Sponsor](https://img.shields.io/github/sponsors/miracodeai?style=social)](https://github.com/sponsors/miracodeai)
 
-## Features
+Mira reviews your pull requests using any LLM (via [LiteLLM](https://github.com/BerriAI/litellm)) and posts concise, actionable feedback. The noise filter, confidence clamping, and learning loop ensure you only see comments that matter. See [`FEATURES.md`](FEATURES.md) for the full surface.
 
-- **Any LLM**: Works with OpenAI, Anthropic, Google, Azure, and any LiteLLM-supported provider
-- **Low noise**: Confidence thresholds, deduplication, severity sorting, and comment caps
-- **GitHub Action**: Drop-in action for CI/CD pipelines
-- **CLI**: Review PRs or diffs from the command line
-- **Configurable**: `.mira.yml` for per-repo settings
+## Highlights
+
+- **Any LLM**: OpenAI, Anthropic, Google, Azure, OpenRouter, Ollama — anything LiteLLM supports
+- **Low noise**: Confidence thresholds, dedupe, severity sorting, per-PR comment caps
+- **Indexed reviews**: full-repo code index gives the LLM real context, not just the diff
+- **Learns your team**: synthesizes rules from rejected comments and human review patterns on merged PRs
+- **Vulnerability scanning**: hourly OSV.dev poll surfaces CVEs across every package in every repo
+- **Org-wide package search**: answer "which repos use `lodash@4.17.20`?" in seconds
+- **Configurable**: `.mira.yml` for per-repo settings, custom + global rules in the dashboard
+- **Self-host on day one**: Docker image, Railway / Fly.io / Render configs, SQLite or Postgres
 
 ## Quick Start
 
@@ -54,50 +59,6 @@ Mira uses [LiteLLM](https://docs.litellm.ai/docs/providers) under the hood, so y
 
 **Chat with Mira:** Comment `@mira-bot <question>` on any PR to ask about the code.
 
-### GitHub Action
-
-Add to `.github/workflows/mira.yml`:
-
-```yaml
-name: Mira Review
-on:
-  pull_request:
-    types: [opened, synchronize]
-
-permissions:
-  pull-requests: write
-
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mira-reviewer/mira/.github/actions/mira-review@main
-        with:
-          api_key: ${{ secrets.OPENAI_API_KEY }}
-```
-
-### CLI
-
-```bash
-pip install mira-reviewer
-```
-
-Review a PR:
-
-```bash
-export GITHUB_TOKEN="ghp_..."
-export OPENAI_API_KEY="sk-..."  # or ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.
-
-mira review --pr https://github.com/owner/repo/pull/123 --model openai/gpt-4o
-```
-
-Review a diff from stdin:
-
-```bash
-git diff main | mira review --stdin --dry-run
-```
-
 ## Configuration
 
 Create a `.mira.yml` in your repo root (see [`.mira.yml.example`](.mira.yml.example)):
@@ -113,24 +74,6 @@ filter:
 
 review:
   context_lines: 3
-```
-
-## CLI Options
-
-```
-mira review [OPTIONS]
-
-Options:
-  --pr TEXT                PR URL or shorthand (owner/repo#N)
-  --stdin                  Read diff from stdin
-  --model TEXT             LLM model (env: MIRA_MODEL)
-  --max-comments INT       Max comments (env: MIRA_MAX_COMMENTS)
-  --confidence FLOAT       Min confidence (env: MIRA_CONFIDENCE_THRESHOLD)
-  --github-token TEXT      GitHub token (env: GITHUB_TOKEN)
-  --dry-run                Print results without posting
-  --output [text|json]     Output format
-  --verbose                Enable debug logging
-  --config PATH            Path to .mira.yml
 ```
 
 ## Development

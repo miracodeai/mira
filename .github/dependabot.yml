@@ -1,0 +1,43 @@
+version: 2
+
+# Mira dependency update policy.
+#
+# `actions` updates keep the GitHub Actions referenced in our workflows on
+# their latest pinned SHA — important because a tag like `actions/checkout@v4`
+# can be moved by the action's owner without our knowledge, but a pinned
+# SHA can't. New SHAs are proposed weekly via PR.
+#
+# `pip` covers the Python dependency tree (uv.lock + pyproject.toml).
+# `npm` covers the dashboard UI.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
+    labels:
+      - dependencies
+      - python
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: "/ui/mira"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps(ui)"
+    labels:
+      - dependencies
+      - ui
+    open-pull-requests-limit: 10

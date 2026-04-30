@@ -136,6 +136,23 @@ class ReviewComment:
     agent_prompt: str | None = None
 
 
+def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
+    """Format severity counts as a parenthetical breakdown, e.g. ' (1 blocker, 2 warnings)'."""
+    labels = {
+        Severity.BLOCKER: "blocker",
+        Severity.WARNING: "warning",
+        Severity.SUGGESTION: "suggestion",
+        Severity.NITPICK: "nitpick",
+    }
+    items: list[str] = []
+    for sev in (Severity.BLOCKER, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK):
+        count = stats.get(sev, 0)
+        if count:
+            name = labels[sev]
+            items.append(f"{sev.emoji} {count} {name}{'s' if count != 1 else ''}")
+    return f" ({', '.join(items)})" if items else ""
+
+
 @dataclass
 class WalkthroughConfidenceScore:
     """Confidence score for merge readiness."""
@@ -179,24 +196,127 @@ class WalkthroughResult:
         bot_name: str = "miracodeai",
         review_stats: dict[Severity, int] | None = None,
         existing_issues: int = 0,
+        blast_radius: list[dict] | None = None,
+        reviewed_files: int = 0,
+        total_comments: int = 0,
+        key_issues: list[KeyIssue] | None = None,
+        in_progress: bool = False,
+        skipped_paths: list[str] | None = None,
+        total_paths: list[str] | None = None,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
 
         if self.sequence_diagram:
-            parts.append("")
-            parts.append("```mermaid")
-            parts.append(self.sequence_diagram)
-            parts.append("```")
+            diagram = self.sequence_diagram.strip()
+            # Only render if it looks like valid Mermaid
+            if diagram and any(
+                diagram.startswith(k) for k in ("graph ", "flowchart ", "sequenceDiagram")
+            ):
+                # Sanitise: wrap node names with special chars in quotes
+                import re
 
+                lines = []
+                for line in diagram.splitlines():
+                    # Fix bare node names with dots/slashes — wrap in quotes
+                    line = re.sub(
+                        r"(\w+\.[\w./\-]+)",
+                        lambda m: f'"{m.group(0)}"' if '"' not in m.group(0) else m.group(0),
+                        line,
+                    )
+                    lines.append(line)
+                diagram = "\n".join(lines)
+                parts.append("")
+                parts.append("```mermaid")
+                parts.append(diagram)
+                parts.append("```")
+
+        # --- Confidence score (collapsible) ---
         if self.confidence_score:
-            parts.append("")
             cs = self.confidence_score
-            label = cs.label.upper() if cs.label else ""
-            parts.append(f"**{cs.score}/5** {label}")
+            score = cs.score
+            filled = "\u25c9" * score  # ◉
+            empty = "\u25cb" * (5 - score)  # ○
+            label = cs.label if cs.label else ""
+            parts.append("")
+            parts.append(
+                f"<details>\n"
+                f"<summary><b>Confidence: {score}/5</b> &nbsp; {filled}{empty} &nbsp; {label}</summary>\n"
+            )
             if cs.reason:
-                parts.append(f"> {cs.reason}")
+                parts.append(f"- {cs.reason}")
+            if key_issues:
+                parts.append("")
+                parts.append("**Key files to review:**")
+                for ki in key_issues:
+                    parts.append(f"- `{ki.path}:{ki.line}` — {ki.issue}")
+            parts.append("")
+            parts.append("</details>")
+
+        # --- Blast radius ---
+        if blast_radius:
+            parts.append("")
+            total_refs = sum(len(e.get("files", [])) for e in blast_radius)
+            repo_count = len(blast_radius)
+            header = f"{'repository' if repo_count == 1 else 'repositories'}"
+
+            parts.append(
+                f"> **Blast Radius** \u2014 {repo_count} dependent {header}, {total_refs} total references"
+            )
+            parts.append(">")
+            for entry in blast_radius:
+                repo = entry.get("repo", "")
+                files = entry.get("files", [])
+                parts.append(
+                    f"> `{repo}` \u2014 {len(files)} reference{'s' if len(files) != 1 else ''}"
+                )
+            parts.append("")
+
+        # --- Stats footer ---
+        if in_progress:
+            parts.append("")
+            parts.append("*\u23f3 Code review in progress\u2026*")
+        else:
+            stats_parts: list[str] = []
+            if reviewed_files:
+                stats_parts.append(
+                    f"{reviewed_files} file{'s' if reviewed_files != 1 else ''} reviewed"
+                )
+            if total_comments:
+                comment_detail = _format_stats_breakdown(review_stats) if review_stats else ""
+                stats_parts.append(
+                    f"{total_comments} comment{'s' if total_comments != 1 else ''}{comment_detail}"
+                )
+            if existing_issues:
+                stats_parts.append(
+                    f"{existing_issues} unresolved thread{'s' if existing_issues != 1 else ''}"
+                )
+            if stats_parts:
+                separator = " \u00b7 "
+                parts.append("")
+                parts.append(f"*{separator.join(stats_parts)}*")
+
+        # --- Skipped-files banner (large-PR partial review) ---
+        if skipped_paths and not in_progress:
+            total = len(total_paths) if total_paths else (reviewed_files + len(skipped_paths))
+            shown = min(8, len(skipped_paths))
+            parts.append("")
+            parts.append("---")
+            parts.append("")
+            parts.append(f"### \ud83d\udccb Reviewed {reviewed_files} of {total} files")
+            parts.append("")
+            parts.append(
+                "This PR is large enough that some files were skipped to keep the "
+                "review focused on the highest-priority changes. To review the rest, "
+                f"comment `@{bot_name} review-rest` on this PR."
+            )
+            parts.append("")
+            parts.append("**Skipped:**")
+            for p in skipped_paths[:shown]:
+                parts.append(f"- `{p}`")
+            if len(skipped_paths) > shown:
+                parts.append(f"- _\u2026and {len(skipped_paths) - shown} more_")
 
         parts.append("")
         parts.append("---")
@@ -230,6 +350,12 @@ class ReviewResult:
     token_usage: dict[str, int] = field(default_factory=dict)
     walkthrough: WalkthroughResult | None = None
     thread_decisions: list[ThreadDecision] = field(default_factory=list)
+    # Paths selected for this review pass + paths intentionally skipped due to
+    # size or priority caps. Surfaced in the walkthrough banner so users can
+    # invoke `@mira-bot review-rest` to review the remainder.
+    reviewed_paths: list[str] = field(default_factory=list)
+    skipped_paths: list[str] = field(default_factory=list)
+    total_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -258,8 +384,74 @@ class UnresolvedThread:
 
 
 @dataclass
+class BotThreadRecord:
+    """A review thread authored by the bot, resolved or not."""
+
+    thread_id: str
+    path: str
+    line: int
+    body: str
+    is_resolved: bool
+    is_outdated: bool = False
+
+
+@dataclass
+class HumanReviewComment:
+    """A review comment on a PR authored by a human (not the bot)."""
+
+    path: str
+    line: int
+    body: str
+    author: str
+
+
+@dataclass
+class FileHistoryEntry:
+    """A commit that previously touched a file. Used by decision archaeology
+    to give the review LLM context on why code exists before suggesting it
+    be changed or removed."""
+
+    sha: str
+    message: str
+    author: str
+    date: str  # ISO-8601 timestamp from the GitHub API
+
+
+@dataclass
 class ReviewChunk:
     """A chunk of files that fits within a single LLM context window."""
 
     files: list[FileDiff] = field(default_factory=list)
     token_estimate: int = 0
+
+
+@dataclass
+class FeedbackEvent:
+    """A recorded feedback signal on a review comment."""
+
+    id: int
+    pr_number: int
+    pr_url: str
+    comment_path: str
+    comment_line: int
+    comment_category: str
+    comment_severity: str
+    comment_title: str
+    signal: str  # 'rejected' | 'accepted'
+    actor: str
+    created_at: float = 0.0
+
+
+@dataclass
+class LearnedRule:
+    """A rule synthesised from accumulated feedback patterns."""
+
+    id: int
+    rule_text: str
+    source_signal: str  # 'reject_pattern' | 'accept_pattern'
+    category: str
+    path_pattern: str  # e.g. 'tests/**' or '' for all
+    sample_count: int
+    active: bool = True
+    created_at: float = 0.0
+    updated_at: float = 0.0

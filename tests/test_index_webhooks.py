@@ -65,10 +65,10 @@ class TestInstallationWebhook:
         assert resp.json()["status"] == "processing"
         mock_handler.assert_called_once()
 
-    async def test_installation_deleted_ignored(self, client):
+    async def test_installation_deleted_processed(self, client):
         payload = {
             "action": "deleted",
-            "installation": {"id": 1},
+            "installation": {"id": 1, "account": {"login": "test-org"}},
         }
         body = json.dumps(payload).encode()
 
@@ -82,7 +82,7 @@ class TestInstallationWebhook:
         )
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ignored"
+        assert resp.json()["status"] == "processing"
 
 
 @pytest.mark.asyncio

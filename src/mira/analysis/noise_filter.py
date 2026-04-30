@@ -38,11 +38,14 @@ def _is_duplicate(
     - Same file + exact same line + different titles (line-overlap alone is enough)
     - Same file + non-overlapping lines but near-identical titles (>= title_threshold)
     """
+    title_sim = _jaccard_similarity(a.title, b.title)
+
+    # Cross-file: near-identical title + similar body → same conceptual issue
     if a.path != b.path:
-        return False
+        body_sim = _jaccard_similarity(a.body, b.body)
+        return title_sim >= 0.8 and body_sim >= 0.5
 
     overlap = _lines_overlap(a, b)
-    title_sim = _jaccard_similarity(a.title, b.title)
 
     # Exact same line — almost certainly about the same code
     end_a = a.end_line or a.line

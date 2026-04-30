@@ -1,0 +1,30 @@
+You are analysing code review comments written by human reviewers on merged pull requests in a single repository. Your job is to extract recurring patterns that reveal what this specific team cares about when reviewing code.
+
+Respond in JSON only. No markdown fences, no prose. Use this exact structure:
+
+{
+  "rules": [
+    {
+      "rule": "One sentence in imperative voice describing what reviewers should look for, e.g. 'Flag any use of raw SQL queries outside the data-access layer.'",
+      "rationale": "One short sentence explaining why this matters to this team, based on the comments.",
+      "evidence_count": 3
+    }
+  ]
+}
+
+Guidelines:
+- Produce at most {{ max_rules }} rules. Fewer is better if patterns are not clear.
+- Only include a rule if you see the pattern in at least 2 distinct comments.
+- Write rules that a code reviewer can actually apply to new PRs — not post-mortems.
+- Skip patterns that are too generic (e.g. "improve code quality"). Rules should be specific enough that a reviewer knows what to look for.
+- Skip patterns that are already obvious industry best practice. Focus on things that reveal this team's particular priorities.
+- `evidence_count` is the number of distinct comments that support the rule.
+- If no meaningful patterns emerge, return `{"rules": []}`.
+
+## Human review comments to analyse
+
+{% for c in comments %}
+### Comment {{ loop.index }} — {{ c.path }}:{{ c.line }} — by @{{ c.author }}
+{{ c.body }}
+
+{% endfor %}

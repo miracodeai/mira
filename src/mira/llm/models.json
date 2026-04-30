@@ -1,0 +1,92 @@
+{
+  "_comment": "Mira's supported-models registry. Only models listed here can be selected as the indexing or review model. Format mirrors a trimmed subset of LiteLLM's model_prices_and_context_window.json so users familiar with that file recognize the shape.",
+  "_fields": {
+    "label": "Display name shown in the dashboard dropdown.",
+    "provider": "Underlying provider (anthropic, openai, google, etc.) — purely informational.",
+    "max_input_tokens": "Hard cap on input tokens. Used to size prompt-trimming logic.",
+    "max_output_tokens": "Hard cap on output tokens per response. Used as the default max_tokens for completions.",
+    "input_cost_per_1m": "USD per 1M input tokens.",
+    "output_cost_per_1m": "USD per 1M output tokens.",
+    "supports_json_mode": "Whether the model honors response_format=json_object.",
+    "purposes": "Roles this model is allowed for: 'indexing', 'review', or both.",
+    "recommended_for": "Roles where this model is the recommended default (shown with a Recommended badge)."
+  },
+
+  "anthropic/claude-haiku-4-5": {
+    "label": "Claude Haiku 4.5",
+    "provider": "anthropic",
+    "max_input_tokens": 200000,
+    "max_output_tokens": 64000,
+    "input_cost_per_1m": 1.00,
+    "output_cost_per_1m": 5.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": ["indexing"]
+  },
+  "anthropic/claude-sonnet-4-6": {
+    "label": "Claude Sonnet 4.6",
+    "provider": "anthropic",
+    "max_input_tokens": 200000,
+    "max_output_tokens": 64000,
+    "input_cost_per_1m": 3.00,
+    "output_cost_per_1m": 15.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": ["review"]
+  },
+  "anthropic/claude-opus-4-6": {
+    "label": "Claude Opus 4.6",
+    "provider": "anthropic",
+    "max_input_tokens": 200000,
+    "max_output_tokens": 32000,
+    "input_cost_per_1m": 15.00,
+    "output_cost_per_1m": 75.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "openai/gpt-4o-mini": {
+    "label": "GPT-4o mini",
+    "provider": "openai",
+    "max_input_tokens": 128000,
+    "max_output_tokens": 16384,
+    "input_cost_per_1m": 0.15,
+    "output_cost_per_1m": 0.60,
+    "supports_json_mode": true,
+    "purposes": ["indexing"],
+    "recommended_for": []
+  },
+  "openai/gpt-4o": {
+    "label": "GPT-4o",
+    "provider": "openai",
+    "max_input_tokens": 128000,
+    "max_output_tokens": 16384,
+    "input_cost_per_1m": 2.50,
+    "output_cost_per_1m": 10.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "google/gemini-2.5-flash": {
+    "label": "Gemini 2.5 Flash",
+    "provider": "google",
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 65535,
+    "input_cost_per_1m": 0.30,
+    "output_cost_per_1m": 2.50,
+    "supports_json_mode": true,
+    "purposes": ["indexing"],
+    "recommended_for": []
+  },
+  "google/gemini-2.5-pro": {
+    "label": "Gemini 2.5 Pro",
+    "provider": "google",
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 65535,
+    "input_cost_per_1m": 1.25,
+    "output_cost_per_1m": 10.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  }
+}

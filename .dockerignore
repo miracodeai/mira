@@ -1,0 +1,41 @@
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.*
+htmlcov/
+.venv/
+.tox/
+*.egg-info/
+build/
+dist/
+
+# UI build artifacts and node_modules — Dockerfile builds the UI fresh in stage 1.
+ui/mira/node_modules/
+ui/mira/dist/
+ui/mira/.vite/
+
+# Local state — never bake into image
+data/
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Plans & ephemeral
+*.private-key.pem

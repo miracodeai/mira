@@ -44,13 +44,23 @@ class TestNoiseFilter:
         result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
         assert len(result) == 1
 
-    def test_no_dedup_different_paths(self):
+    def test_no_dedup_different_paths_different_issues(self):
+        """Different files with distinct issues should not be deduped."""
+        comments = [
+            _make_comment(path="a.py", title="Missing null check on user input"),
+            _make_comment(path="b.py", title="Database connection leak in handler"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
+        assert len(result) == 2
+
+    def test_dedup_cross_file_identical_issue(self):
+        """Near-identical title+body across different files should be deduped."""
         comments = [
             _make_comment(path="a.py", title="Same issue"),
             _make_comment(path="b.py", title="Same issue"),
         ]
         result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
-        assert len(result) == 2
+        assert len(result) == 1
 
     def test_sorts_by_severity_then_confidence(self):
         comments = [
@@ -176,10 +186,15 @@ class TestJaccardSimilarity:
 
 
 class TestIsDuplicate:
-    def test_different_paths_never_duplicate(self):
+    def test_different_paths_different_titles_not_duplicate(self):
+        a = _make_comment(path="a.py", line=1, title="Null check missing")
+        b = _make_comment(path="b.py", line=1, title="Connection leak in pool")
+        assert _is_duplicate(a, b) is False
+
+    def test_different_paths_identical_issue_is_duplicate(self):
         a = _make_comment(path="a.py", line=1, title="Same title")
         b = _make_comment(path="b.py", line=1, title="Same title")
-        assert _is_duplicate(a, b) is False
+        assert _is_duplicate(a, b) is True
 
     def test_same_line_always_duplicate(self):
         a = _make_comment(path="a.py", line=5, title="Totally different")

@@ -1,0 +1,28 @@
+diff --git a/fake_repo/payments.py b/fake_repo/payments.py
+index 1234567..abcdef0 100644
+--- a/fake_repo/payments.py
++++ b/fake_repo/payments.py
+@@ -43,3 +43,22 @@ def create_payment_intent(order: Order) -> dict:
+         "currency": "usd",
+         "status": "requires_payment",
+     }
++
++
++def validate_webhook_signature(payload: str, signature: str) -> bool:
++    """Validate a Stripe webhook signature.
++
++    Args:
++        payload: Raw request body.
++        signature: The Stripe-Signature header value.
++
++    Returns:
++        True if signature is valid.
++    """
++    import hmac
++    import hashlib
++    expected = hmac.new(
++        config.STRIPE_API_KEY.encode(),
++        payload.encode(),
++        hashlib.sha256,
++    ).hexdigest()
++    return signature == expected

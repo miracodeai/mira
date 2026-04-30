@@ -15,8 +15,11 @@ _DEFAULT_CONFIG_FILENAME = ".mira.yml"
 
 
 class LLMConfig(BaseModel):
-    model: str = "openai/gpt-4o"
+    model: str = "anthropic/claude-sonnet-4-6"
     fallback_model: str | None = None
+    # Optional per-purpose overrides. Fall back to `model` if not set.
+    indexing_model: str | None = None
+    review_model: str | None = None
     temperature: float = 0.2
     max_tokens: int = 4096
     max_context_tokens: int = 120_000
@@ -60,17 +63,34 @@ class FilterConfig(BaseModel):
 
 class ReviewConfig(BaseModel):
     context_lines: int = Field(default=3, ge=0)
-    max_diff_size: int = 50_000
+    # Total diff size cap. Above this, the diff is *not* truncated arbitrarily —
+    # files are ranked by priority and the lowest-priority files are skipped
+    # until the diff fits. Skipped files are listed in the walkthrough so the
+    # user can invoke `@mira-bot review-rest` to review them.
+    max_diff_size: int = 250_000
+    # Per-file size cap. A single huge file (lockfile, generated SDK, etc.)
+    # gets skipped before chunking even starts.
+    max_file_size: int = 50_000
+    # Hard ceiling on chunks per single review pass. If the diff would split
+    # into more chunks, only the top-priority N are reviewed; the rest are
+    # listed as skipped.
+    max_chunks_per_review: int = Field(default=5, ge=1, le=20)
     include_summary: bool = True
     focus_only_on_problems: bool = False
     walkthrough: bool = True
     walkthrough_sequence_diagram: bool = True
     code_context: bool = True
     context_token_budget: int = 8_000
+    max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
 
 
 class ProviderConfig(BaseModel):
     type: str = "github"
+
+
+class DatabaseConfig(BaseModel):
+    url: str = ""  # empty = SQLite fallback. "postgresql://user:pass@host:5432/mira"
+    admin_password: str = "admin"  # default admin password, change in production
 
 
 class MiraConfig(BaseModel):
@@ -78,6 +98,7 @@ class MiraConfig(BaseModel):
     filter: FilterConfig = Field(default_factory=FilterConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
 
 def find_config_file(start_dir: Path | None = None) -> Path | None:
@@ -122,6 +143,13 @@ def load_config(
     if overrides:
         for key, value in overrides.items():
             _set_nested(data, key.split("."), value)
+
+    # Respect DATABASE_URL env var
+    env_db_url = os.environ.get("DATABASE_URL")
+    if env_db_url and "database" not in data:
+        data["database"] = {"url": env_db_url}
+    elif env_db_url and "url" not in data.get("database", {}):
+        data.setdefault("database", {})["url"] = env_db_url
 
     # Respect MIRA_MODEL env var as a fallback when not set via file or overrides
     env_model = os.environ.get("MIRA_MODEL")

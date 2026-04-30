@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/miracodeai/mira/security/advisories/new
+    about: Report a vulnerability privately. Do not file a public issue.
+  - name: Question or discussion
+    url: https://github.com/miracodeai/mira/discussions
+    about: Ask a question, share a use case, or start a discussion.

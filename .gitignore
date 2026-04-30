@@ -23,13 +23,37 @@ ENV/
 # Testing
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .mypy_cache/
+.ruff_cache/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Environment
+# Secrets — never commit these
+*.pem
+*.key
 .env
-.env.local
+.env.*
+!.env.example
+
+# Local Mira data
+# - data/app.db is the SQLite-backed app DB
+# - data/indexes/ contains per-repo code indexes
+# Both are runtime state, never source.
+data/
+
+# Demo / scratch output that ends up in the repo root from local runs
+report.txt
+*.tmp
+
+# Frontend
+ui/mira/node_modules/
+ui/mira/dist/
+ui/mira/.vite/
+
+# Claude Code workspace artifacts
+.claude/

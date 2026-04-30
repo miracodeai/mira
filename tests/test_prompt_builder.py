@@ -40,7 +40,7 @@ class TestBuildReviewPrompt:
         messages = build_review_prompt(files, config)
         system = messages[0]["content"]
         assert "Mira" in system
-        assert "JSON" in system
+        assert "submit_review" in system
         assert "blocker" in system
 
     def test_includes_file_paths(self):
