@@ -122,6 +122,42 @@ SUBMIT_REVIEW_TOOL = {
     },
 }
 
+SUBMIT_THREAD_REPLY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_thread_reply",
+        "description": (
+            "Reply to a human's comment on one of your previous PR review "
+            "suggestions. Classify their intent and write a short reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": ["disagreement", "question", "agreement", "other"],
+                    "description": (
+                        "disagreement = human refutes the suggestion / says it doesn't apply. "
+                        "question = human is asking for clarification. "
+                        "agreement = human is acknowledging or thanking. "
+                        "other = anything else (off-topic, unclear)."
+                    ),
+                },
+                "reply": {
+                    "type": "string",
+                    "description": (
+                        "Your reply, 1-2 short sentences, plain text, no markdown. "
+                        'No emojis, no apologies, no "as an AI". For disagreement, '
+                        "concede gracefully. For questions, answer directly."
+                    ),
+                },
+            },
+            "required": ["intent", "reply"],
+        },
+    },
+}
+
+
 SUBMIT_WALKTHROUGH_TOOL = {
     "type": "function",
     "function": {

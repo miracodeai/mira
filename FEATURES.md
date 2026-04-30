@@ -56,10 +56,10 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 
 ## Bring your own LLM
 
-- Any LiteLLM-supported provider: OpenAI, Anthropic, Google Gemini, Azure OpenAI, DeepSeek, OpenRouter
-- Local models via Ollama, vLLM, LM Studio, or any OpenAI-compatible endpoint
+- Any provider available through OpenRouter — Anthropic, OpenAI, Google Gemini, DeepSeek, and more — so you pay your provider directly with no Mira markup
 - Separate model configuration for indexing (cheap) vs review (powerful)
 - Fallback-model chain
+- Direct (non-OpenRouter) provider integration is on the roadmap for users who'd rather hold their own API keys per provider
 
 ## Dashboard and analytics
 

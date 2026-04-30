@@ -96,6 +96,13 @@ def create_app(
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    # Both paths route to the same handler.
+    # `/github/webhook` is the canonical path going forward — the namespace
+    # leaves room for `/gitlab/webhook`, `/bitbucket/webhook`, etc. without
+    # breaking GitHub installations.
+    # `/webhook` stays as a deprecated alias so existing GitHub Apps that
+    # were created before the rename keep working.
+    @app.post("/github/webhook")
     @app.post("/webhook")
     async def webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
         payload_bytes = await request.body()

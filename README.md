@@ -4,11 +4,11 @@
 
 [![Sponsor](https://img.shields.io/github/sponsors/miracodeai?style=social)](https://github.com/sponsors/miracodeai)
 
-Mira reviews your pull requests using any LLM (via [LiteLLM](https://github.com/BerriAI/litellm)) and posts concise, actionable feedback. The noise filter, confidence clamping, and learning loop ensure you only see comments that matter. See [`FEATURES.md`](FEATURES.md) for the full surface.
+Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https://openrouter.ai), which fronts Anthropic, OpenAI, Google, DeepSeek, and more) and posts concise, actionable feedback. The noise filter, confidence clamping, and learning loop ensure you only see comments that matter. See [`FEATURES.md`](FEATURES.md) for the full surface.
 
 ## Highlights
 
-- **Any LLM**: OpenAI, Anthropic, Google, Azure, OpenRouter, Ollama — anything LiteLLM supports
+- **Any provider via OpenRouter**: Anthropic, OpenAI, Google Gemini, DeepSeek, and more — pay your provider directly, no Mira markup
 - **Low noise**: Confidence thresholds, dedupe, severity sorting, per-PR comment caps
 - **Indexed reviews**: full-repo code index gives the LLM real context, not just the diff
 - **Learns your team**: synthesizes rules from rejected comments and human review patterns on merged PRs
@@ -24,7 +24,7 @@ Mira reviews your pull requests using any LLM (via [LiteLLM](https://github.com/
 Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
 
 **1. Create a GitHub App** at [github.com/settings/apps/new](https://github.com/settings/apps/new):
-- Webhook URL: `https://your-server.com/webhook`
+- Webhook URL: `https://your-server.com/github/webhook`
 - Permissions: Pull Requests (read+write), Contents (read), Issues (read+write)
 - Events: Pull requests, Issue comments
 - Generate a private key (.pem)
@@ -40,20 +40,22 @@ docker run -p 8000:8000 \
   -e MIRA_GITHUB_APP_ID=123456 \
   -e MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)" \
   -e MIRA_WEBHOOK_SECRET=your-secret \
-  -e MIRA_MODEL=openai/gpt-4o \
-  -e OPENAI_API_KEY=sk-... \
-  ghcr.io/mira-reviewer/mira:latest
+  -e MIRA_MODEL=anthropic/claude-sonnet-4-6 \
+  -e OPENROUTER_API_KEY=sk-or-... \
+  ghcr.io/miracodeai/mira:latest
 ```
 
-Mira uses [LiteLLM](https://docs.litellm.ai/docs/providers) under the hood, so you can use any supported provider. Just set the model and the matching API key:
+Mira talks to OpenRouter under the hood, so any model OpenRouter supports works. The `MIRA_MODEL` value is whatever the [OpenRouter Models page](https://openrouter.ai/models) lists — examples:
 
-| Provider | `MIRA_MODEL` | API key env var |
-|----------|-------------|-----------------|
-| OpenAI | `openai/gpt-4o` | `OPENAI_API_KEY` |
-| Anthropic | `anthropic/claude-sonnet-4-5-20250929` | `ANTHROPIC_API_KEY` |
-| OpenRouter | `anthropic/claude-sonnet-4-5` | `OPENROUTER_API_KEY` |
-| Google Gemini | `gemini/gemini-2.5-pro` | `GEMINI_API_KEY` |
-| Azure OpenAI | `azure/my-gpt4o-deployment` | `AZURE_API_KEY` |
+| Provider | `MIRA_MODEL` |
+|----------|--------------|
+| Anthropic | `anthropic/claude-sonnet-4-6` |
+| Anthropic (cheap, indexing) | `anthropic/claude-haiku-4-5` |
+| OpenAI | `openai/gpt-4o` |
+| OpenAI (cheap) | `openai/gpt-4o-mini` |
+| Google | `google/gemini-2.5-pro` |
+
+Set `OPENROUTER_API_KEY` once; one key works across every provider. See [`src/mira/llm/models.json`](src/mira/llm/models.json) for the full registry of models Mira recognises (with pricing and per-purpose recommendations).
 
 **3. Install the app** on your repos — every PR gets auto-reviewed.
 

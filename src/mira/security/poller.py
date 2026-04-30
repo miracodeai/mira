@@ -32,7 +32,10 @@ def _prefer_resolved(rows: list[dict]) -> list[dict]:
     """
     by_key: dict[tuple[str, str, str, str], dict] = {}
     for r in rows:
-        key = (r["owner"], r["repo"], r["kind"], r["name"])
+        # Case-insensitive on name — PyPI normalises `PyJWT`/`pyjwt`/`PyJwt`
+        # to the same package, so a manifest row spelled `PyJWT` should
+        # collapse with the lockfile row spelled `pyjwt`.
+        key = (r["owner"], r["repo"], r["kind"], r["name"].lower())
         existing = by_key.get(key)
         if existing is None:
             by_key[key] = r

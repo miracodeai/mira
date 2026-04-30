@@ -225,7 +225,9 @@ async def test_handle_thread_reject_resolves_for_each_keyword(
     payload = _make_review_comment_payload(f"@mira-bot {keyword}")
     await handle_thread_reject(payload, mock_app_auth, "mira-bot")
 
-    mock_provider.get_thread_id_for_comment.assert_awaited_once_with("MDI0Ol_abc")
+    mock_provider.get_thread_id_for_comment.assert_awaited_once()
+    args = mock_provider.get_thread_id_for_comment.call_args
+    assert args[0][0] == "MDI0Ol_abc"
     mock_provider.resolve_threads.assert_awaited_once()
     args = mock_provider.resolve_threads.call_args
     assert args[0][1] == ["PRRT_123"]

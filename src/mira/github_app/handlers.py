@@ -171,6 +171,165 @@ async def handle_comment(
         logger.exception("Error handling comment event")
 
 
+async def _handle_thread_freeform_reply(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+) -> None:
+    """Reply to a free-form @-mention on a review-comment thread.
+
+    Triggered when a human writes ``@bot_name <anything>`` on one of our
+    review comments without using the explicit ``reject``/``dismiss``
+    keywords. The LLM classifies their intent and we respond accordingly:
+
+    - ``disagreement`` → reply acknowledging, resolve the thread, record
+      a ``rejected`` feedback signal so synthesis learns from it.
+    - ``question`` → reply with a one-shot answer, leave thread open.
+    - ``agreement`` → brief acknowledgement, leave thread open.
+    - ``other`` → conservative neutral acknowledgement.
+    """
+    import json
+    from pathlib import Path
+
+    from jinja2 import Environment, FileSystemLoader
+
+    from mira.dashboard.models_config import llm_config_for
+    from mira.llm.provider import SUBMIT_THREAD_REPLY_TOOL
+    from mira.models import PRInfo
+
+    installation_id: int = payload.get("installation", {}).get("id", 0)
+    try:
+        token = await app_auth.get_installation_token(installation_id)
+        provider = create_provider("github", token)
+
+        comment = payload["comment"]
+        comment_id: int = comment["id"]
+        comment_body: str = comment["body"]
+        comment_node_id: str = comment["node_id"]
+        in_reply_to_id: int | None = comment.get("in_reply_to_id")
+
+        owner = payload["repository"]["owner"]["login"]
+        repo = payload["repository"]["name"]
+        number = payload["pull_request"]["number"]
+        pr_info = PRInfo(
+            title="",
+            description="",
+            base_branch="",
+            head_branch="",
+            url=f"https://github.com/{owner}/{repo}/pull/{number}",
+            number=number,
+            owner=owner,
+            repo=repo,
+        )
+
+        # Strip the @-mention prefix so the LLM sees just the message.
+        user_reply = re.sub(
+            rf"@{re.escape(bot_name)}\s*", "", comment_body, flags=re.IGNORECASE
+        ).strip()
+
+        # If this is a reply to a bot comment, fetch the original suggestion
+        # text so the LLM has context. Best-effort — proceed without it on
+        # any failure.
+        original_suggestion = ""
+        if in_reply_to_id:
+            try:
+                gh_repo = provider._github.get_repo(f"{owner}/{repo}")  # type: ignore[attr-defined]
+                pr = gh_repo.get_pull(number)
+                orig = pr.get_review_comment(in_reply_to_id)
+                original_suggestion = (orig.body or "")[:1500]
+            except Exception:
+                pass
+
+        # Build prompt and call the cheap indexing model — this isn't a
+        # review, just a short conversational classification.
+        config = load_config()
+        llm = LLMProvider(llm_config_for("indexing", config.llm))
+        env = Environment(
+            loader=FileSystemLoader(
+                str(Path(__file__).resolve().parents[1] / "llm" / "prompts" / "templates")
+            ),
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+        template = env.get_template("thread_reply.jinja2")
+        prompt = template.render(
+            user_reply=user_reply or "(empty)",
+            original_suggestion=original_suggestion,
+        )
+        # Use tool calling instead of json_mode — the model is forced to
+        # return a tool-call argument matching our schema, which is far more
+        # reliable than parsing free-form JSON output. The provider's tenacity
+        # decorator already retries transient failures.
+        try:
+            raw = await llm.complete_with_tools(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[SUBMIT_THREAD_REPLY_TOOL],
+                temperature=0.0,
+            )
+            data = json.loads(raw) if raw else {}
+        except Exception as exc:
+            logger.warning("Free-form thread reply LLM call failed: %s", exc)
+            return
+
+        intent = str(data.get("intent", "other")).lower()
+        reply_text = str(data.get("reply", "")).strip()
+        if not reply_text:
+            logger.warning(
+                "Free-form thread reply: tool call returned empty reply "
+                "(intent=%s, raw_len=%d). Skipping.",
+                intent,
+                len(raw or ""),
+            )
+            return
+
+        try:
+            await provider.reply_to_review_comment(pr_info, comment_id, reply_text)
+        except Exception as exc:
+            logger.warning("Failed to post thread reply: %s", exc)
+            return
+
+        if intent == "disagreement":
+            # Treat as a soft reject: resolve + record feedback. This is the
+            # same learning signal we capture for explicit `reject` keywords.
+            try:
+                thread_id = await provider.get_thread_id_for_comment(
+                    comment_node_id,
+                    pr_info,
+                )
+                if thread_id:
+                    await provider.resolve_threads(pr_info, [thread_id])
+            except Exception as exc:
+                logger.warning("Failed to resolve disagreement thread: %s", exc)
+            try:
+                store = _open_store(owner, repo)
+                store.record_feedback(
+                    pr_number=number,
+                    pr_url=pr_info.url,
+                    comment_path=comment.get("path", ""),
+                    comment_line=comment.get("original_line", 0) or comment.get("line", 0),
+                    comment_category="",
+                    comment_severity="",
+                    comment_title="",
+                    signal="rejected",
+                    actor=comment["user"]["login"],
+                )
+                store.close()
+            except Exception as fb_err:
+                logger.debug("Failed to record disagreement feedback: %s", fb_err)
+
+        logger.info(
+            "Thread reply (%s) on PR %s/%s#%d: %s",
+            intent,
+            owner,
+            repo,
+            number,
+            reply_text[:80],
+        )
+
+    except Exception:
+        logger.exception("Error handling free-form thread reply")
+
+
 async def handle_thread_reject(
     payload: dict[str, Any],
     app_auth: GitHubAppAuth,
@@ -186,10 +345,14 @@ async def handle_thread_reject(
 
         # Extract the first word after @bot_name
         match = re.search(rf"@{re.escape(bot_name)}\s+(\w+)", comment_body, re.IGNORECASE)
-        if not match:
-            return
-        command = match.group(1).lower()
+        command = match.group(1).lower() if match else ""
+
+        # No explicit reject/dismiss keyword → fall through to the
+        # free-form LLM reply path. The bot reads the human's message,
+        # classifies intent, and either acknowledges + resolves (if the
+        # human refuted) or just replies (questions, agreements).
         if command not in _REJECT_KEYWORDS:
+            await _handle_thread_freeform_reply(payload, app_auth, bot_name)
             return
 
         owner = payload["repository"]["owner"]["login"]
@@ -197,7 +360,22 @@ async def handle_thread_reject(
         number = payload["pull_request"]["number"]
 
         provider = create_provider("github", token)
-        thread_id = await provider.get_thread_id_for_comment(comment_node_id)
+        from mira.models import PRInfo as _PRInfo
+
+        _pr_info_for_lookup = _PRInfo(
+            title="",
+            description="",
+            base_branch="",
+            head_branch="",
+            url=f"https://github.com/{owner}/{repo}/pull/{number}",
+            number=number,
+            owner=owner,
+            repo=repo,
+        )
+        thread_id = await provider.get_thread_id_for_comment(
+            comment_node_id,
+            _pr_info_for_lookup,
+        )
         if not thread_id:
             logger.info(
                 "Thread not found or already resolved for comment %s on PR %s/%s#%d",

@@ -61,7 +61,11 @@ class BaseProvider(abc.ABC):
         """Resolve review threads by ID. Returns count of successfully resolved."""
         return 0
 
-    async def get_thread_id_for_comment(self, comment_node_id: str) -> str | None:
+    async def get_thread_id_for_comment(
+        self,
+        comment_node_id: str,
+        pr_info: PRInfo,
+    ) -> str | None:
         """Look up the review thread for a comment. Returns thread ID or None."""
         return None
 

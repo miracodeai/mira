@@ -986,7 +986,7 @@ def get_packages(owner: str, repo: str) -> list[PackageModel]:
             file_path=r.file_path,
             is_dev=r.is_dev,
         )
-        key = (r.kind, r.name)
+        key = (r.kind, r.name.lower())
         existing = by_key.get(key)
         if existing is None or (
             _is_lockfile_path(r.file_path) and not _is_lockfile_path(existing.file_path)
@@ -1150,7 +1150,9 @@ def search_packages(
 
     deduped: dict[tuple[str, str, str, str], dict] = {}
     for r in rows:
-        key = (r["owner"], r["repo"], r["kind"], r["name"])
+        # Case-insensitive on name — PyPI normalises `PyJWT`/`pyjwt` to the
+        # same package; without this the dropdown shows both spellings.
+        key = (r["owner"], r["repo"], r["kind"], r["name"].lower())
         existing = deduped.get(key)
         if existing is None or (
             _is_lockfile_path(r.get("file_path", ""))
