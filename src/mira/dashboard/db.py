@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS pr_review_progress (
     reviewed_paths TEXT NOT NULL DEFAULT '[]',  -- JSON array of paths reviewed so far
     skipped_paths TEXT NOT NULL DEFAULT '[]',   -- JSON array of paths intentionally skipped (low priority)
     chunk_index INTEGER NOT NULL DEFAULT 0,
+    -- Head SHA of the most recent review on this PR. Round 2+ uses this
+    -- as the base for an incremental diff so unchanged files aren't
+    -- re-flagged after a new push.
+    last_reviewed_sha TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (owner, repo, pr_number)
 );
@@ -152,6 +156,7 @@ CREATE TABLE IF NOT EXISTS pr_review_progress (
     reviewed_paths TEXT NOT NULL DEFAULT '[]',
     skipped_paths TEXT NOT NULL DEFAULT '[]',
     chunk_index INTEGER NOT NULL DEFAULT 0,
+    last_reviewed_sha TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (owner, repo, pr_number)
 );
@@ -271,6 +276,14 @@ class AppDatabase:
             self._sqlite_conn.execute(
                 "ALTER TABLE repos ADD COLUMN conventions TEXT NOT NULL DEFAULT ''"
             )
+        progress_cols = {
+            r[1]
+            for r in self._sqlite_conn.execute("PRAGMA table_info(pr_review_progress)").fetchall()
+        }
+        if "last_reviewed_sha" not in progress_cols:
+            self._sqlite_conn.execute(
+                "ALTER TABLE pr_review_progress ADD COLUMN last_reviewed_sha TEXT NOT NULL DEFAULT ''"
+            )
         self._sqlite_conn.commit()
         logger.info("App database: SQLite at %s", db_path)
 
@@ -289,6 +302,10 @@ class AppDatabase:
                 )
                 cur.execute(
                     "ALTER TABLE repos ADD COLUMN IF NOT EXISTS conventions TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
+                    "ALTER TABLE pr_review_progress ADD COLUMN IF NOT EXISTS "
+                    "last_reviewed_sha TEXT NOT NULL DEFAULT ''"
                 )
             logger.info("App database: PostgreSQL")
         except ImportError:
@@ -1036,6 +1053,74 @@ class AppDatabase:
             chunk_index=int(row[3]),
             updated_at=float(row[4] or 0),
         )
+
+    def get_last_reviewed_sha(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+    ) -> str:
+        """Return the head SHA at the time of the last review on this PR.
+
+        Empty string if there is no prior review (first round, or progress
+        row never written) — callers should treat empty as "no previous SHA,
+        do a full review."
+        """
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            row = self._sqlite_conn.execute(
+                "SELECT last_reviewed_sha FROM pr_review_progress "
+                "WHERE owner=? AND repo=? AND pr_number=?",
+                (owner, repo, pr_number),
+            ).fetchone()
+        else:
+            assert self._pg_conn is not None
+            with self._pg_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT last_reviewed_sha FROM pr_review_progress "
+                    "WHERE owner=%s AND repo=%s AND pr_number=%s",
+                    (owner, repo, pr_number),
+                )
+                row = cur.fetchone()
+        return str(row[0]) if row and row[0] else ""
+
+    def set_last_reviewed_sha(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        sha: str,
+    ) -> None:
+        """Record the head SHA we just reviewed against. Round 2+ uses this
+        as the base for the incremental diff.
+        """
+        if not sha:
+            return
+        now = time.time()
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(
+                "INSERT INTO pr_review_progress "
+                "(owner, repo, pr_number, last_reviewed_sha, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(owner, repo, pr_number) DO UPDATE SET "
+                "last_reviewed_sha=excluded.last_reviewed_sha, "
+                "updated_at=excluded.updated_at",
+                (owner, repo, pr_number, sha, now),
+            )
+            self._sqlite_conn.commit()
+        else:
+            assert self._pg_conn is not None
+            with self._pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO pr_review_progress "
+                    "(owner, repo, pr_number, last_reviewed_sha, updated_at) "
+                    "VALUES (%s, %s, %s, %s, NOW()) "
+                    "ON CONFLICT (owner, repo, pr_number) DO UPDATE SET "
+                    "last_reviewed_sha=EXCLUDED.last_reviewed_sha, "
+                    "updated_at=NOW()",
+                    (owner, repo, pr_number, sha),
+                )
 
     def delete_pr_review_progress(self, owner: str, repo: str, pr_number: int) -> None:
         if self._backend == "sqlite":

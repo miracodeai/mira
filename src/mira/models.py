@@ -207,6 +207,8 @@ class WalkthroughResult:
         in_progress: bool = False,
         skipped_paths: list[str] | None = None,
         total_paths: list[str] | None = None,
+        index_was_empty: bool = False,
+        dashboard_url: str = "",
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -322,6 +324,24 @@ class WalkthroughResult:
             if len(skipped_paths) > shown:
                 parts.append(f"- _\u2026and {len(skipped_paths) - shown} more_")
 
+        # --- Index-empty nudge ---
+        # When the repo hasn't been indexed, this review used JIT cross-file
+        # lookup — useful but less complete than a pre-built index (no blast
+        # radius, no cross-repo impact, no doc context). Tell the user so
+        # they can choose to index for a noticeably better next review.
+        if index_was_empty and not in_progress:
+            parts.append("")
+            parts.append("---")
+            parts.append("")
+            link = f"[Mira dashboard]({dashboard_url})" if dashboard_url else "the Mira dashboard"
+            parts.append(
+                f"> 💡 **This review will be more accurate after indexing.** "
+                f"This repo hasn't been indexed yet, so the review is based on "
+                f"the diff plus on-demand file lookups. Visit {link} to index "
+                f"this repo — Mira will then know about callers, dependents, "
+                f"and cross-repo impact."
+            )
+
         parts.append("")
         parts.append("---")
         parts.append(
@@ -374,6 +394,11 @@ class PRInfo:
     number: int
     owner: str
     repo: str
+    # Current head commit SHA. Used by round 2+ reviews to fetch the
+    # incremental diff (last reviewed SHA → current head SHA) instead of
+    # re-reviewing the full base→head diff. Empty when unknown
+    # (the engine then falls back to a full review).
+    head_sha: str = ""
 
 
 @dataclass

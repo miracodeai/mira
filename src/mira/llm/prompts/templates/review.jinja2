@@ -180,6 +180,17 @@ Recent commits that touched the files in this PR. Use this context **before** su
 {% endfor %}
 {% endif %}
 
+{% if footguns %}
+## Common Footguns to Watch For
+
+These are subtle bugs that are easy to miss because they look correct at a
+glance. Use this list as a recognition trigger when reviewing the diff —
+flag matches with the appropriate severity. Don't comment if the pattern
+isn't actually present.
+
+{{ footguns }}
+
+{% endif %}
 ## Diffs to Review
 
 Review the file diffs provided in the user message below.

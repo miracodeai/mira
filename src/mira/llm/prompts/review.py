@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig
 from mira.core.context import build_file_context_string
+from mira.llm.prompts.footguns import get_footguns_for_files
 from mira.llm.prompts.verify_fixes import _extract_issue_description
 from mira.models import FileDiff, UnresolvedThread
 
@@ -75,6 +76,8 @@ def build_review_prompt(
             if entries
         ]
 
+    footguns = get_footguns_for_files(files)
+
     system_content = template.render(
         pr_title=pr_title,
         pr_description=pr_description,
@@ -91,6 +94,7 @@ def build_review_prompt(
         review_round=review_round,
         resolved_threads=resolved_threads,
         team_conventions=team_conventions,
+        footguns=footguns,
     )
 
     # Build user message with optional code context before diffs
@@ -102,6 +106,33 @@ def build_review_prompt(
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
+def build_security_review_prompt(
+    files: list[FileDiff],
+    pr_title: str = "",
+) -> list[dict[str, str]]:
+    """Build the security-focused review prompt messages for the LLM.
+
+    Runs in parallel with the main review pass. Output is merged into the
+    main review's comments list and goes through the same noise filter
+    (dedup against any overlap with main-pass findings).
+    """
+    env = _get_template_env()
+    template = env.get_template("security_review.jinja2")
+
+    file_contexts = [build_file_context_string(f) for f in files]
+    file_paths = [f.path for f in files]
+
+    system_content = template.render(
+        pr_title=pr_title,
+        file_paths=file_paths,
+    )
+
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": "\n\n".join(file_contexts)},
     ]
 
 

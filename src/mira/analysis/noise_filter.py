@@ -89,7 +89,10 @@ def filter_noise(
     2. Drop below minimum severity (escalates per ``review_round``)
     3. Sort by severity (desc) then confidence (desc)
     4. Deduplicate (first occurrence = highest quality)
-    5. Cap at max_comments
+    5. Apply the cap **only to suggestions and nitpicks** — every blocker
+       and warning that survives the floor gets posted, no matter how
+       many. Real bugs deserve to be flagged; the cap is a noise control
+       for low-priority findings, not a quality cap on real ones.
 
     ``review_round`` is the 1-indexed count of bot reviews on this PR.
     Round 1 uses ``config`` defaults; round 2+ raise the floor so the bot
@@ -113,4 +116,9 @@ def filter_noise(
     result = [c for c in result if c.severity >= min_severity]
     result.sort(key=lambda c: (c.severity, c.confidence), reverse=True)
     result = _deduplicate(result)
-    return result[: config.max_comments]
+
+    # Split: blockers + warnings always post; suggestions + nitpicks share
+    # the cap so they can't drown out real findings.
+    urgent = [c for c in result if c.severity >= Severity.WARNING]
+    low_priority = [c for c in result if c.severity < Severity.WARNING]
+    return urgent + low_priority[: config.max_comments]

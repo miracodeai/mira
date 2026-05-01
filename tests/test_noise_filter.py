@@ -78,10 +78,49 @@ class TestNoiseFilter:
         assert result[1].severity == Severity.WARNING
         assert result[2].severity == Severity.NITPICK
 
-    def test_caps_at_max_comments(self):
-        comments = [_make_comment(line=i, title=f"Issue {i}") for i in range(20)]
-        result = filter_noise(comments, FilterConfig(confidence_threshold=0.0, max_comments=3))
+    def test_caps_at_max_comments_for_low_priority(self):
+        """The max_comments cap applies to suggestions and nitpicks only —
+        every blocker/warning above the floor should be posted regardless."""
+        comments = [
+            _make_comment(line=i, title=f"Nit {i}", severity=Severity.NITPICK) for i in range(20)
+        ]
+        result = filter_noise(
+            comments,
+            FilterConfig(
+                confidence_threshold=0.0,
+                max_comments=3,
+                min_severity="nitpick",
+            ),
+        )
         assert len(result) == 3
+
+    def test_does_not_cap_blockers_or_warnings(self):
+        """A PR with many real bugs should surface all of them, not be silenced
+        by max_comments. The cap is for low-priority noise, not real findings."""
+        comments = (
+            [_make_comment(line=i, title=f"Bug {i}", severity=Severity.BLOCKER) for i in range(8)]
+            + [
+                _make_comment(line=100 + i, title=f"Warn {i}", severity=Severity.WARNING)
+                for i in range(5)
+            ]
+            + [
+                _make_comment(line=200 + i, title=f"Nit {i}", severity=Severity.NITPICK)
+                for i in range(10)
+            ]
+        )
+        result = filter_noise(
+            comments,
+            FilterConfig(
+                confidence_threshold=0.0,
+                max_comments=3,
+                min_severity="nitpick",
+            ),
+        )
+        # 8 blockers + 5 warnings always pass; nitpicks capped at 3 → 16 total.
+        assert len(result) == 16
+        assert sum(1 for c in result if c.severity == Severity.BLOCKER) == 8
+        assert sum(1 for c in result if c.severity == Severity.WARNING) == 5
+        assert sum(1 for c in result if c.severity == Severity.NITPICK) == 3
 
     def test_empty_input(self):
         result = filter_noise([], FilterConfig())

@@ -90,6 +90,15 @@ class ReviewConfig(BaseModel):
     # where the extra ~5-10s wall time matters.
     self_critique: bool = True
 
+    # Run a dedicated security review pass in parallel with the main review.
+    # Uses the same review-tier LLM with a security-focused prompt (XSS,
+    # injection, auth bypass, CSRF, SSRF, origin validation, deserialization,
+    # crypto). Findings are merged into the main review's comments list and
+    # go through the same noise filter (dedup against overlapping main-pass
+    # findings). Adds ~one main-tier LLM call per PR; disable on cost-
+    # sensitive deployments.
+    security_pass: bool = True
+
 
 class ProviderConfig(BaseModel):
     type: str = "github"

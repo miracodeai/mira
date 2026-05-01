@@ -183,6 +183,7 @@ class GitHubProvider(BaseProvider):
                 number=pr.number,
                 owner=owner,
                 repo=repo,
+                head_sha=pr.head.sha or "",
             )
 
         try:
@@ -212,6 +213,44 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to fetch PR diff: {e}") from e
+
+    async def get_compare_diff(
+        self,
+        pr_info: PRInfo,
+        base_sha: str,
+        head_sha: str,
+    ) -> str:
+        """Fetch a unified diff between two commits via GitHub's compare API.
+
+        Used by round 2+ reviews so we only review what's been pushed since
+        the last review (``last_reviewed_sha``..``current_head_sha``) rather
+        than re-flagging every file in the PR.
+
+        Returns an empty string if the two SHAs are identical (nothing new
+        to review).
+        """
+        if base_sha == head_sha or not base_sha or not head_sha:
+            return ""
+        url = (
+            f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}"
+            f"/compare/{base_sha}...{head_sha}"
+        )
+        headers = {
+            "Authorization": f"token {self._token}",
+            "Accept": "application/vnd.github.v3.diff",
+        }
+
+        @_retry_transient
+        async def _fetch() -> str:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, follow_redirects=True)
+                resp.raise_for_status()
+                return resp.text
+
+        try:
+            return await _fetch()
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch compare diff: {e}") from e
 
     async def post_review(
         self,
@@ -590,6 +629,34 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to remove label: {e}") from e
+
+    async def get_repo_tree(self, pr_info: PRInfo, ref: str) -> list[str]:
+        """List every blob (file) path in the repo at a given ref.
+
+        Used by JIT cross-file context: we fetch the tree once, then
+        check which import-resolution candidates actually exist before
+        spending API calls fetching their contents. One API call → up to
+        thousands of paths in response.
+        """
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/git/trees/{ref}?recursive=1"
+        headers = {
+            "Authorization": f"token {self._token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        @_retry_transient
+        async def _fetch() -> list[str]:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, follow_redirects=True)
+                resp.raise_for_status()
+                data = resp.json()
+            return [item["path"] for item in data.get("tree", []) if item.get("type") == "blob"]
+
+        try:
+            return await _fetch()
+        except Exception as exc:
+            logger.debug("Failed to fetch repo tree: %s", exc)
+            return []
 
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref via the REST API."""

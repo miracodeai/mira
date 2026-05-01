@@ -93,6 +93,7 @@ async def handle_pull_request(
                     number=number,
                     owner=owner,
                     repo=repo,
+                    head_sha=pr["head"].get("sha") or "",
                 )
                 dashboard_url = os.environ.get("MIRA_DASHBOARD_URL", "http://localhost:5173")
                 note = (
@@ -490,6 +491,7 @@ async def handle_pr_merged(
             number=number,
             owner=owner,
             repo=repo,
+            head_sha=pr["head"].get("sha") or "",
         )
 
         from mira.providers.github import parse_bot_comment_metadata

@@ -249,6 +249,11 @@ class ReviewEngine:
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
+        # Set during _build_context: True when the repo has no prior index,
+        # so cross-file context came from JIT lookup (less complete than
+        # a full pre-built index). Drives the walkthrough nudge that tells
+        # the user reviews will be more accurate after indexing.
+        self._index_was_empty = False
 
     async def _post_placeholder_comment(self, pr_info: PRInfo) -> int | None:
         """Post an immediate 'Reviewing this PR...' comment and return its ID.
@@ -361,6 +366,52 @@ class ReviewEngine:
         except Exception as exc:
             logger.warning("Failed to compute review round: %s", exc)
 
+        # Incremental diff for round 2+: if we have a stored last-reviewed
+        # SHA, fetch only what's been pushed since then. This prevents the
+        # bot from "discovering" issues in untouched files between rounds —
+        # which feels to authors like the bot withheld findings on round 1.
+        # Falls back silently to the full diff if anything goes wrong.
+        if review_round >= 2 and pr_info.head_sha:
+            try:
+                from mira.dashboard.api import _app_db
+
+                last_sha = _app_db.get_last_reviewed_sha(
+                    pr_info.owner,
+                    pr_info.repo,
+                    pr_info.number,
+                )
+                if last_sha and last_sha != pr_info.head_sha:
+                    incremental = await self.provider.get_compare_diff(
+                        pr_info,
+                        last_sha,
+                        pr_info.head_sha,
+                    )
+                    if incremental.strip():
+                        logger.info(
+                            "Round %d incremental diff %s..%s on PR %s (was %d chars, now %d)",
+                            review_round,
+                            last_sha[:8],
+                            pr_info.head_sha[:8],
+                            pr_info.url,
+                            len(diff_text),
+                            len(incremental),
+                        )
+                        diff_text = incremental
+                    else:
+                        # Same head SHA or empty diff — nothing new to review.
+                        logger.info(
+                            "Round %d: no new commits since %s on PR %s, skipping review",
+                            review_round,
+                            last_sha[:8],
+                            pr_info.url,
+                        )
+                        diff_text = ""
+            except Exception as exc:
+                logger.warning(
+                    "Incremental diff fetch failed, falling back to full diff: %s",
+                    exc,
+                )
+
         # Pull the team conventions text the indexer extracted from
         # CONTRIBUTING.md / AGENTS.md / STYLE.md so the LLM knows
         # repo-specific style rules.
@@ -430,6 +481,8 @@ class ReviewEngine:
                     except Exception:
                         pass
 
+                    import os as _os
+
                     markdown = result.walkthrough.to_markdown(
                         bot_name=self.bot_name,
                         review_stats=stats,
@@ -440,6 +493,8 @@ class ReviewEngine:
                         key_issues=result.key_issues or None,
                         skipped_paths=result.skipped_paths or None,
                         total_paths=result.total_paths or None,
+                        index_was_empty=getattr(self, "_index_was_empty", False),
+                        dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
                     )
                     # Prefer the known placeholder ID. Fall back to marker-based
                     # lookup if the placeholder never posted (network blip, etc.).
@@ -547,6 +602,23 @@ class ReviewEngine:
         except Exception as exc:
             logger.debug("Failed to record review event: %s", exc)
 
+        # Always anchor the SHA after a successful review — including rounds
+        # that found zero comments. Otherwise round 2 has no SHA to diff
+        # against and falls back to a full review, which is the bug we're
+        # trying to avoid.
+        if pr_info.head_sha:
+            try:
+                from mira.dashboard.api import _app_db
+
+                _app_db.set_last_reviewed_sha(
+                    pr_info.owner,
+                    pr_info.repo,
+                    pr_info.number,
+                    pr_info.head_sha,
+                )
+            except Exception as exc:
+                logger.debug("Failed to record last reviewed SHA: %s", exc)
+
         return result
 
     async def review_diff(self, diff_text: str) -> ReviewResult:
@@ -653,8 +725,9 @@ class ReviewEngine:
                         source_fetcher = ProviderSourceFetcher(
                             self.provider, pr_info, pr_info.head_branch
                         )
+                    changed_paths = [f.path for f in filtered]
                     ctx = await build_code_context(
-                        changed_paths=[f.path for f in filtered],
+                        changed_paths=changed_paths,
                         store=store,
                         token_budget=self.config.review.context_token_budget,
                         source_fetcher=source_fetcher,
@@ -662,6 +735,44 @@ class ReviewEngine:
                     doc_context = store.get_all_review_context_text()
                     if doc_context:
                         ctx = ctx + "\n\n" + doc_context
+
+                    # Detect "empty index" — no summaries for any changed file
+                    # means the indexer hasn't run for this repo. Fall back to
+                    # JIT cross-file lookup: parse imports in the changed
+                    # files, fetch the imported files from HEAD, extract their
+                    # symbols, and inline. Works without a pre-built index.
+                    index_has_data = bool(store.get_summaries(changed_paths))
+                    self._index_was_empty = not index_has_data
+                    if not index_has_data and source_fetcher is not None:
+                        try:
+                            from mira.index.jit_context import (
+                                build_jit_cross_file_context,
+                            )
+
+                            tree_paths: set[str] | None = None
+                            if hasattr(self.provider, "get_repo_tree"):
+                                try:
+                                    tree_paths = set(
+                                        await self.provider.get_repo_tree(
+                                            pr_info,
+                                            pr_info.head_branch,
+                                        )
+                                    )
+                                except Exception as exc:
+                                    logger.debug(
+                                        "JIT: tree fetch failed: %s",
+                                        exc,
+                                    )
+                            jit = await build_jit_cross_file_context(
+                                changed_files=filtered,
+                                source_fetcher=source_fetcher,
+                                repo_tree=tree_paths,
+                                char_budget=(self.config.review.context_token_budget * 4),
+                            )
+                            if jit:
+                                ctx = ctx + "\n\n" + jit
+                        except Exception as exc:
+                            logger.debug("JIT context build failed: %s", exc)
 
                     # Append cross-repo impact so inline reviews know about
                     # other repositories that depend on the changed code.
@@ -837,7 +948,17 @@ class ReviewEngine:
                     )
                     return [], [], ""
 
-        chunk_results = await _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
+        # Run main chunked review and the dedicated security pass in
+        # parallel. Security findings get merged into all_comments and go
+        # through the same noise filter (dedup catches any overlap with
+        # main-pass findings on the same line).
+        review_task = _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
+        security_task = _asyncio.create_task(
+            self._security_review_pass(filtered, pr_title)
+            if self.config.review.security_pass
+            else _asyncio.sleep(0, result=[])
+        )
+        chunk_results, security_comments = await _asyncio.gather(review_task, security_task)
 
         all_comments: list[ReviewComment] = []
         all_key_issues: list[KeyIssue] = []
@@ -847,6 +968,7 @@ class ReviewEngine:
             all_key_issues.extend(key_issues)
             if summary_text:
                 summaries.append(summary_text)
+        all_comments.extend(security_comments)
 
         # Classify severity
         all_comments = [classify_severity(c) for c in all_comments]
@@ -906,6 +1028,56 @@ class ReviewEngine:
             skipped_paths=skipped_paths_only,
             total_paths=all_paths,
         )
+
+    async def _security_review_pass(
+        self,
+        files: list,
+        pr_title: str = "",
+    ) -> list[ReviewComment]:
+        """Dedicated security review using the same review-tier LLM.
+
+        Runs in parallel with the main review. The output is a list of
+        ``ReviewComment`` to merge into ``all_comments`` before noise
+        filtering — overlapping findings dedupe naturally.
+
+        Returns ``[]`` and logs (debug) on any failure so a transient
+        LLM/API error doesn't kill the main review.
+        """
+        if not files:
+            return []
+
+        from mira.llm.prompts.review import build_security_review_prompt
+        from mira.llm.provider import SUBMIT_REVIEW_TOOL
+
+        try:
+            messages = build_security_review_prompt(files=files, pr_title=pr_title)
+            raw = await self.llm.complete_with_tools(
+                messages=messages,
+                tools=[SUBMIT_REVIEW_TOOL],
+                temperature=0.0,
+            )
+        except Exception as exc:
+            logger.warning("Security review pass failed: %s", exc)
+            return []
+
+        try:
+            parsed = parse_llm_response(raw)
+            comments = convert_to_review_comments(parsed, diff_files=files)
+        except ResponseParseError as exc:
+            logger.warning("Security review pass parse error: %s", exc)
+            return []
+        except Exception as exc:
+            logger.warning("Security review pass conversion failed: %s", exc)
+            return []
+
+        # Force category=security so the badge renders correctly even if the
+        # LLM put something else.
+        for c in comments:
+            if not c.category or c.category != "security":
+                c.category = "security"
+        if comments:
+            logger.info("Security pass produced %d candidate comment(s)", len(comments))
+        return comments
 
     async def _self_critique(self, comments: list[ReviewComment]) -> list[ReviewComment]:
         """Run a second-pass critique on each draft comment.
