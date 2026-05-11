@@ -73,6 +73,15 @@ function AppBreadcrumb() {
   const label = (part: string) =>
     PAGE_LABELS[part] || decodeURIComponent(part)
 
+  // /repos/{owner}/{repo} doesn't have a real /repos/{owner} route, so the
+  // owner segment links back to the repos list with that owner pre-filtered.
+  const hrefFor = (i: number) => {
+    if (parts[0] === "repos" && i === 1 && parts.length >= 3) {
+      return `/repos?owner=${encodeURIComponent(parts[1])}`
+    }
+    return `/${parts.slice(0, i + 1).join("/")}`
+  }
+
   return (
     <Breadcrumb>
       <BreadcrumbList>
@@ -83,9 +92,7 @@ function AppBreadcrumb() {
               {i === parts.length - 1 ? (
                 <BreadcrumbPage>{label(part)}</BreadcrumbPage>
               ) : (
-                <BreadcrumbLink href={`/${parts.slice(0, i + 1).join("/")}`}>
-                  {label(part)}
-                </BreadcrumbLink>
+                <BreadcrumbLink href={hrefFor(i)}>{label(part)}</BreadcrumbLink>
               )}
             </BreadcrumbItem>
           </span>

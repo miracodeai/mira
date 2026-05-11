@@ -13,6 +13,7 @@ import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -825,6 +826,25 @@ class AppDatabase:
     @property
     def setup_complete(self) -> bool:
         return self.get_setting("setup_complete") == "true"
+
+    # JSON-blobbed under one settings row — schema doesn't churn when
+    # ReviewConfig / FilterConfig grow new fields.
+    _GLOBAL_OVERRIDES_KEY = "global_review_overrides"
+
+    def get_global_review_overrides(self) -> dict[str, Any]:
+        """Return the admin-set runtime overrides, or {} if none."""
+        raw = self.get_setting(self._GLOBAL_OVERRIDES_KEY)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def set_global_review_overrides(self, overrides: dict[str, Any]) -> None:
+        """Replace the admin-set runtime overrides. Pass `{}` to clear."""
+        self.set_setting(self._GLOBAL_OVERRIDES_KEY, json.dumps(overrides))
 
     def mark_setup_complete(self) -> None:
         self.set_setting("setup_complete", "true")

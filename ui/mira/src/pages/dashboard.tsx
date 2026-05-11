@@ -183,7 +183,7 @@ export function DashboardPage() {
               {stats?.total_files ?? 0} files indexed
             </div>
             <div className="text-muted-foreground">
-              {stats?.total_edges ?? 0} cross-repo edges
+              {stats?.total_edges ?? 0} repository relationships
             </div>
           </CardFooter>
         </Card>

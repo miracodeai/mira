@@ -93,9 +93,15 @@ function AppShell() {
 
         if (cancelled) return
 
-        // Show install popup if there are pending repos
+        // Show install popup if there are pending repos that haven't been
+        // explicitly skipped. `Skip for now` sets index_mode='none' but leaves
+        // status='pending' — without the second clause the modal would re-fire
+        // on every reload.
         const repos = await api.listRepos()
-        if (!cancelled && repos.some((r) => r.status === "pending")) {
+        if (
+          !cancelled &&
+          repos.some((r) => r.status === "pending" && r.index_mode !== "none")
+        ) {
           setShowInstallPopup(true)
         }
 

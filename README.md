@@ -40,7 +40,7 @@ If your engineering team needs answers like *"which of our repos are exposed to 
 - **Learns your team**: synthesizes rules from rejected comments and human review patterns on merged PRs
 - **Vulnerability scanning**: hourly OSV.dev poll surfaces CVEs across every package in every repo
 - **Org-wide package search**: answer "which repos use `lodash@4.17.20`?" in seconds
-- **Configurable**: `.mira.yml` for per-repo settings, custom + global rules in the dashboard
+- **Configurable**: `.mira.yaml` for per-repo settings, custom + global rules in the dashboard
 - **Self-host on day one**: Docker image, Railway / Fly.io / Render configs, SQLite or Postgres
 - **GitHub today, more platforms coming**: GitLab, Bitbucket, and Gitea support are on the roadmap — same review engine, same dashboard, just a different provider adapter
 
@@ -64,19 +64,44 @@ Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
 
 Or with Docker:
 
-```bash
-docker run -p 8000:8000 \
-  -e MIRA_GITHUB_APP_ID=123456 \
-  -e MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)" \
-  -e MIRA_WEBHOOK_SECRET=your-secret \
-  -e MIRA_MODEL=anthropic/claude-sonnet-4-6 \
-  -e OPENROUTER_API_KEY=sk-or-... \
-  ghcr.io/miracodeai/mira:latest
+Two files: `mira.yaml` for non-secret defaults, `.env` for secrets. Pass both into the container.
+
+```yaml
+# mira.yaml — deployment-wide defaults. Every key is optional.
+llm:
+  model: "anthropic/claude-sonnet-4-6"
+  fallback_model: "anthropic/claude-haiku-4-5"
+  indexing_model: "anthropic/claude-haiku-4-5"
+
+filter:
+  confidence_threshold: 0.7
+  max_comments: 5
+
+review:
+  walkthrough: true
+  self_critique: true
+  security_pass: true
 ```
 
-Mira talks to OpenRouter under the hood, so any model OpenRouter supports works. The `MIRA_MODEL` value is whatever the [OpenRouter Models page](https://openrouter.ai/models) lists — examples:
+```bash
+# .env — secrets only. Don't commit this.
+MIRA_GITHUB_APP_ID=123456
+MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)"
+MIRA_WEBHOOK_SECRET=your-secret
+OPENROUTER_API_KEY=sk-or-...
+```
 
-| Provider | `MIRA_MODEL` |
+```bash
+docker run -p 8000:8000 \
+  --env-file .env \
+  -v "$(pwd)/mira.yaml:/app/mira.yaml" \
+  ghcr.io/miracodeai/mira:latest \
+  --config /app/mira.yaml
+```
+
+Mira talks to OpenRouter under the hood, so any model OpenRouter supports works. `llm.model` in `mira.yaml` is whatever the [OpenRouter Models page](https://openrouter.ai/models) lists — examples:
+
+| Provider | `llm.model` |
 |----------|--------------|
 | Anthropic | `anthropic/claude-sonnet-4-6` |
 | Anthropic (cheap, indexing) | `anthropic/claude-haiku-4-5` |
@@ -90,24 +115,22 @@ Set `OPENROUTER_API_KEY` once; one key works across every provider. See [`src/mi
 
 **3. Install the app** on your repos — every PR gets auto-reviewed.
 
-**Chat with Mira:** Comment `@mira-bot <question>` on any PR to ask about the code.
+**Chat with Mira:** Comment `@miracodeai <question>` on any PR to ask about the code.
 
 ## Configuration
 
-Create a `.mira.yml` in your repo root (see [`.mira.yml.example`](.mira.yml.example)):
+`mira.yaml` (loaded via `--config`) holds deployment-wide defaults — model choices, filter thresholds, review behaviour. Most teams stop here.
+
+If a single repo needs different review behaviour, drop a `.mira.yaml` at its root **or** edit that repo's settings from the dashboard — both deep-merge over `mira.yaml` for that one repo only:
 
 ```yaml
-llm:
-  model: "openai/gpt-4o"
-  fallback_model: "openai/gpt-4o-mini"
-
+# .mira.yaml — optional per-repo override
 filter:
-  confidence_threshold: 0.7
-  max_comments: 5
-
-review:
-  context_lines: 3
+  confidence_threshold: 0.5  # noisier repo → lower bar
+  max_comments: 10
 ```
+
+See the [docs](https://docs.miracode.ai/configuration) for the full schema.
 
 ## Development
 

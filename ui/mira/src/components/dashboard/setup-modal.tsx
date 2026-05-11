@@ -56,7 +56,9 @@ export function SetupModal({
         api.getCostEstimate().catch(() => null),
       ])
       if (cancelled) return
-      setRepos(data.filter((r) => r.status === "pending"))
+      setRepos(
+        data.filter((r) => r.status === "pending" && r.index_mode !== "none"),
+      )
       setIndexingModel(models.indexing_model)
       if (est) setEstimate(est)
       setLoading(false)

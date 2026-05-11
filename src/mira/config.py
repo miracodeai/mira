@@ -11,7 +11,10 @@ from pydantic import BaseModel, Field
 
 from mira.exceptions import ConfigError
 
-_DEFAULT_CONFIG_FILENAME = ".mira.yml"
+# `.mira.yaml` is the canonical per-repo override filename. `.mira.yaml`
+# is accepted for backward compat with repos that committed it before the
+# 0.1.1 standardization on the .yaml extension.
+_DEFAULT_CONFIG_FILENAMES = (".mira.yaml", ".mira.yaml")
 
 
 class LLMConfig(BaseModel):
@@ -135,12 +138,13 @@ class MiraConfig(BaseModel):
 
 
 def find_config_file(start_dir: Path | None = None) -> Path | None:
-    """Walk up from start_dir looking for .mira.yml."""
+    """Walk up from start_dir looking for `.mira.yaml` (or legacy `.mira.yaml`)."""
     current = start_dir or Path.cwd()
     for directory in [current, *current.parents]:
-        candidate = directory / _DEFAULT_CONFIG_FILENAME
-        if candidate.is_file():
-            return candidate
+        for name in _DEFAULT_CONFIG_FILENAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
     return None
 
 
@@ -156,22 +160,75 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         raise ConfigError(f"Invalid YAML in {path}: {e}") from e
 
 
+_global_defaults: dict[str, Any] = {}
+
+
+def set_global_defaults(config_path: Path | str) -> MiraConfig:
+    """Load a deployment-wide config file once at server startup.
+
+    Subsequent `load_config()` calls deep-merge per-repo `.mira.yaml` (and
+    env-var fallbacks) over these defaults.
+    """
+    global _global_defaults
+    path = Path(config_path)
+    if not path.is_file():
+        raise ConfigError(f"Config file not found: {path}")
+    _global_defaults = _load_yaml(path)
+    # Validate eagerly so a malformed file fails server boot, not first review.
+    return load_config()
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Right-biased deep merge — overlay wins; nested dicts recurse."""
+    out: dict[str, Any] = dict(base)
+    for key, value in overlay.items():
+        if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 def load_config(
     config_path: Path | str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> MiraConfig:
-    """Load config from YAML file, merge with defaults, apply overrides."""
-    data: dict[str, Any] = {}
+    """Load config, layering global defaults → per-repo `.mira.yaml` → overrides.
+
+    Sources, lowest priority first:
+      1. Built-in pydantic defaults (`MiraConfig()`).
+      2. Deployment-wide defaults loaded via `set_global_defaults(...)`.
+      3. Admin-editable runtime overrides stored in the dashboard DB
+         (Settings page). Optional — falls through cleanly if no DB is
+         available (CLI usage, tests, etc.).
+      4. Per-repo `.mira.yaml` (auto-discovered by walking up from cwd, OR
+         the explicit `config_path` if passed).
+      5. Caller-supplied `overrides` dict.
+      6. `DATABASE_URL` / `MIRA_MODEL` env-var fallbacks.
+    """
+    data: dict[str, Any] = _deep_merge({}, _global_defaults)
+
+    # Lazy import + broad except: this function runs in CLI / test contexts
+    # that have no DB attached. A DB error must never block a review.
+    try:
+        from mira.dashboard.api import _app_db
+
+        if _app_db is not None:
+            db_overrides = _app_db.get_global_review_overrides()
+            if db_overrides:
+                data = _deep_merge(data, db_overrides)
+    except Exception:
+        pass
 
     if config_path is not None:
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"Config file not found: {path}")
-        data = _load_yaml(path)
+        data = _deep_merge(data, _load_yaml(path))
     else:
         found = find_config_file()
         if found:
-            data = _load_yaml(found)
+            data = _deep_merge(data, _load_yaml(found))
 
     if overrides:
         for key, value in overrides.items():

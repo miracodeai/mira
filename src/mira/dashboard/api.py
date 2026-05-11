@@ -121,6 +121,7 @@ class RepoDetail(BaseModel):
     symbols_count: int
     imports_count: int
     external_refs_count: int
+    lines_count: int = 0
     last_indexed: str | None = None
 
 
@@ -386,6 +387,102 @@ def get_models() -> ModelsResponse:
     )
 
 
+class GlobalSettingsResponse(BaseModel):
+    overrides: dict
+    effective: dict
+
+
+class GlobalSettingsUpdate(BaseModel):
+    overrides: dict
+
+
+# Only `filter` and `review` are admin-editable from the UI; LLM creds and
+# DB settings stay env-only and would be silently overwritten if exposed
+# here.
+_ALLOWED_OVERRIDE_SECTIONS = {"filter", "review"}
+
+
+def _humanize_pydantic_message(err: dict) -> str:
+    """Pydantic 'Input should be less than or equal to 1' → 'must be ≤ 1'."""
+    err_type = err.get("type", "")
+    ctx = err.get("ctx") or {}
+    if err_type == "less_than_equal":
+        return f"must be ≤ {ctx.get('le')}"
+    if err_type == "greater_than_equal":
+        return f"must be ≥ {ctx.get('ge')}"
+    if err_type == "less_than":
+        return f"must be < {ctx.get('lt')}"
+    if err_type == "greater_than":
+        return f"must be > {ctx.get('gt')}"
+    if err_type in ("int_parsing", "int_type", "float_parsing", "float_type"):
+        return "must be a number"
+    if err_type in ("bool_parsing", "bool_type"):
+        return "must be true or false"
+    if err_type == "string_type":
+        return "must be text"
+    return err.get("msg", "invalid value")
+
+
+@router.get("/api/admin/settings", response_model=GlobalSettingsResponse)
+def get_global_settings(request: Request) -> GlobalSettingsResponse:
+    """Return the admin override blob + the effective config."""
+    user = getattr(request.state, "user", None)
+    if not user or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from mira.config import load_config
+
+    overrides = _app_db.get_global_review_overrides()
+    effective = load_config().model_dump()
+    return GlobalSettingsResponse(overrides=overrides, effective=effective)
+
+
+@router.put("/api/admin/settings")
+def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
+    """Replace the admin override blob. Pass `{"overrides": {}}` to clear."""
+    user = getattr(request.state, "user", None)
+    if not user or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    bad = set(body.overrides.keys()) - _ALLOWED_OVERRIDE_SECTIONS
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Override sections not allowed: {sorted(bad)}. "
+                f"Permitted: {sorted(_ALLOWED_OVERRIDE_SECTIONS)}."
+            ),
+        )
+
+    # Validate before persisting so a typo or wrong type fails the PUT
+    # rather than the next PR review. Return a structured error so the
+    # UI can render it inline under the offending input rather than as a
+    # raw banner.
+    from pydantic import ValidationError
+
+    from mira.config import MiraConfig, _deep_merge, _global_defaults
+
+    merged = _deep_merge(_global_defaults, body.overrides)
+    try:
+        MiraConfig.model_validate(merged)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "field": ".".join(str(p) for p in first.get("loc", ())),
+                "message": _humanize_pydantic_message(first),
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail={"message": f"Invalid overrides: {exc}"}
+        ) from exc
+
+    _app_db.set_global_review_overrides(body.overrides)
+    return {"ok": True}
+
+
 @router.put("/api/settings/models")
 def set_models(body: ModelsUpdate) -> dict:
     from mira.llm.registry import is_supported
@@ -607,11 +704,16 @@ async def complete_setup(body: SetupRequest) -> dict:
 
 
 async def _run_initial_indexing(default_mode: str) -> None:
-    """Index all repos that aren't set to 'none'."""
+    """Index repos that `complete_setup` just enabled.
+
+    Filtering on ``status`` is what scopes this to "just this setup batch" —
+    a bare ``index_mode != 'none'`` filter would re-index every previously
+    ready repo every time a new install lands.
+    """
     from mira.index.status import tracker
 
     repos = _app_db.list_repos()
-    to_index = [r for r in repos if r.index_mode != "none"]
+    to_index = [r for r in repos if r.index_mode != "none" and r.status in ("pending", "indexing")]
 
     if not to_index:
         return
@@ -682,6 +784,7 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
         total_symbols = 0
         total_imports = 0
         total_external_refs = 0
+        total_loc = 0
 
         for path in paths:
             fs = summaries.get(path)
@@ -703,6 +806,7 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
             total_symbols += len(fs.symbols)
             total_imports += len(fs.imports)
             total_external_refs += len(fs.external_refs)
+            total_loc += fs.loc or 0
 
         repo_record = _app_db.get_repo(owner, repo)
         last_indexed = (
@@ -719,6 +823,7 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
             symbols_count=total_symbols,
             imports_count=total_imports,
             external_refs_count=total_external_refs,
+            lines_count=total_loc,
             last_indexed=last_indexed,
         )
 

@@ -74,7 +74,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 
 ## Configuration
 
-- Repo-level `.mira.yml` configuration file
+- Repo-level `.mira.yaml` configuration file
 - Per-repo context entries (architecture docs, coding guidelines)
 - Confidence thresholds, severity thresholds, comment caps
 - Exclude patterns and per-language overrides

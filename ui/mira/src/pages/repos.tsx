@@ -1,6 +1,6 @@
 import { Loader2, Search } from "lucide-react"
 import { useEffect, useState } from "react"
-import { Link } from "react-router"
+import { Link, useSearchParams } from "react-router"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
@@ -17,7 +17,9 @@ import { api, type RepoListItem } from "@/lib/api"
 export function ReposPage() {
   const [repos, setRepos] = useState<RepoListItem[]>([])
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState("")
+  const [searchParams] = useSearchParams()
+  // Seed the filter from `?owner=` so breadcrumb links can pre-filter the list.
+  const [search, setSearch] = useState(searchParams.get("owner") ?? "")
 
   // Initial load + poll while any repo is indexing
   useEffect(() => {

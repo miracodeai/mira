@@ -1,5 +1,5 @@
 # Mira configuration file
-# Copy this to .mira.yml in your repository root
+# Copy this to .mira.yaml in your repository root
 
 llm:
   # Model identifier (any LiteLLM-supported model)

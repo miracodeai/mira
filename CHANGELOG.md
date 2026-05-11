@@ -4,6 +4,41 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-05-11
+
+### Added
+
+- **Layered config: `mira serve --config /path/to/mira.yaml`** — deployment-wide YAML defaults loaded once at startup. Per-repo `.mira.yaml` deep-merges over it; admin UI overrides layer between the two. Replaces the env-var grab-bag for non-secret settings; secrets stay in env. (`MIRA_CONFIG` env var also accepted.)
+- **Admin Settings → Review behaviour overrides** — DB-backed runtime overrides for `filter` and `review` knobs (confidence threshold, max comments, walkthrough, self-critique, security pass, max concurrent chunks). Editable from the dashboard with field-level validation, inline error messages, bounded inputs, and "Overrides `mira.yaml`" badges.
+- **`/api/admin/settings`** GET/PUT (admin-only) and **`/api/version`** endpoints.
+- **Version chip under the dashboard logo** — shows the running Mira version at a glance.
+- **Auto-detected bot `@mention`** — `mira serve` reads the GitHub App's slug from `GET /app` at startup; `MIRA_BOT_NAME` is now optional and only needed for overrides or when the lookup fails.
+- **LiteLLM-style Docker invocation** — `ENTRYPOINT ["mira", "serve"]` so `docker run … image --config /app/mira.yaml` passes through cleanly.
+- **TLS termination examples** in the docs — Caddy, nginx + Let's Encrypt, Cloudflare Tunnel.
+- **Vulnerabilities page collapses repeats by package** — multiple advisories against the same `(repo, package, version)` collapse to one row with the highest required upgrade target in a new "Upgrade to" column and an advisory-count chip. Click to expand for the individual GHSAs.
+- **Changelog button next to the docs logo** — History-icon chip linking to the changelog page.
+
+### Changed
+
+- **`@miracodeai` is the canonical bot mention** — docs/README updated everywhere from the old `@mira-bot` placeholder.
+- **Walkthrough nudge no longer fires on indexed repos** — split `_index_was_empty` (whole-repo signal) from `_jit_needed` (per-PR signal). PRs that touch only files the indexer skips (e.g. `README.md`) no longer falsely tell users "this repo isn't indexed."
+- **Inline review comments stopped failing with 422** — reverted forced `side: RIGHT` / `start_side: RIGHT` on review-comment payloads; let GitHub auto-infer side from the diff.
+- **Mermaid sequence diagrams render cleanly** — removed the duplicate sanitizer in `models.to_markdown` that was re-introducing the nested-quote bug `_sanitize_mermaid` had just fixed.
+- **`agentic_tools._grep_repo` capped at 15 files** (was 60) to bound the per-grep network spend.
+- **Postgres `set_last_reviewed_sha`** got an explicit `commit()` mirroring the SQLite branch (defense in depth — the connection is autocommit, but explicit is safer).
+- **Sidebar item count + version chip** in the dashboard reads `/api/version` so admins can confirm what's deployed.
+- **`.mira.yml` → `.mira.yaml`** everywhere in docs and code paths; legacy `.mira.yml` is still read for backward-compat.
+- **Dashboard "Repositories" card** subtitle reads "N repository relationships" (was "N cross-repo edges") — clearer wording, same underlying count.
+- **Repo detail page stat cards** — "Symbols" replaced with "Lines of code" (sums per-file `loc`); "External Refs" renamed "External references" (the metric covers npm/pip/go packages, Docker images, Terraform modules, and outbound API endpoints, not just package calls).
+- **Breadcrumb owner segment** on `/repos/{owner}/{repo}` now links to `/repos?owner={owner}`; the repos page seeds its filter from that query param.
+
+### Fixed
+
+- Validation errors from `/api/admin/settings` now surface as humanized, field-keyed messages (`Confidence threshold must be ≤ 1.0`) instead of raw Pydantic stacks.
+- Number inputs on the Settings page handle decimal entry, backspace, and arrow-key stepping correctly.
+- **Setup modal stops re-appearing after "Skip for now"** — the popup trigger now also checks `index_mode !== "none"`, so an explicit skip persists across reloads instead of nagging on every refresh.
+- **`_run_initial_indexing` no longer re-indexes already-ready repos** when a later install lands — filters by `status in ("pending", "indexing")` rather than blindly walking every repo with a non-`none` index mode.
+
 ## [0.1.0] — 2026-04-29
 
 Initial public release.

@@ -48,6 +48,7 @@ export interface RepoDetail {
   symbols_count: number
   imports_count: number
   external_refs_count: number
+  lines_count: number
   last_indexed: string | null
 }
 
@@ -302,6 +303,18 @@ export const api = {
       model: string
       file_count: number
     }>("/api/indexing/estimate"),
+
+  getGlobalSettings: () =>
+    fetchJson<{
+      overrides: {
+        filter?: Record<string, number | boolean | string>
+        review?: Record<string, number | boolean | string>
+      }
+      effective: Record<string, unknown>
+    }>("/api/admin/settings"),
+
+  saveGlobalSettings: (overrides: Record<string, Record<string, number | boolean | string>>) =>
+    putJson<{ ok: boolean }>("/api/admin/settings", { overrides }),
 
   saveModels: (indexing_model: string, review_model: string) =>
     putJson<{ ok: boolean }>("/api/settings/models", {

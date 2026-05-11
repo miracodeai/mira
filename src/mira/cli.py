@@ -131,7 +131,7 @@ def main() -> None:
 @click.option("--dry-run", is_flag=True, help="Don't post review, just print results")
 @click.option("--output", "output_format", type=click.Choice(["text", "json"]), default="text")
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
-@click.option("--config", "config_path", default=None, help="Path to .mira.yml")
+@click.option("--config", "config_path", default=None, help="Path to .mira.yaml")
 @click.option(
     "--no-walkthrough",
     is_flag=True,
@@ -242,6 +242,17 @@ def review(
     default=None,
     help="Bot @mention name. If unset, auto-detected from the GitHub App's own slug.",
 )
+@click.option(
+    "--config",
+    "config_path",
+    envvar="MIRA_CONFIG",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help=(
+        "Path to a deployment-wide config YAML (model defaults, filter, review). "
+        "Per-repo `.mira.yaml` files, when present, deep-merge over these defaults."
+    ),
+)
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 def serve(
     host: str,
@@ -250,6 +261,7 @@ def serve(
     private_key: str,
     webhook_secret: str,
     bot_name: str | None,
+    config_path: str | None,
     verbose: bool,
 ) -> None:
     """Run the Mira GitHub App webhook server."""
@@ -258,6 +270,7 @@ def serve(
 
         import uvicorn
 
+        from mira.config import set_global_defaults
         from mira.github_app.auth import GitHubAppAuth
         from mira.github_app.webhooks import create_app
     except ImportError as exc:
@@ -270,6 +283,13 @@ def serve(
         format="%(name)s %(levelname)s: %(message)s",
         stream=sys.stdout,
     )
+
+    if config_path:
+        try:
+            set_global_defaults(config_path)
+            click.echo(f"Loaded deployment config: {config_path}")
+        except Exception as exc:
+            raise click.ClickException(f"Invalid --config file: {exc}") from exc
 
     # Support @path/to/key.pem syntax
     if private_key.startswith("@"):

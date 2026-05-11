@@ -271,9 +271,9 @@ export function RepoDetailPage() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Symbols</CardDescription>
+            <CardDescription>Lines of code</CardDescription>
             <CardTitle className="text-4xl tabular-nums">
-              {data.symbols_count}
+              {data.lines_count.toLocaleString()}
             </CardTitle>
           </CardHeader>
         </Card>
@@ -287,7 +287,7 @@ export function RepoDetailPage() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>External Refs</CardDescription>
+            <CardDescription>External references</CardDescription>
             <CardTitle className="text-4xl tabular-nums">
               {data.external_refs_count}
             </CardTitle>

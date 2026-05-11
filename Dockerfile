@@ -21,4 +21,6 @@ RUN pip install --no-cache-dir "/app[serve]"
 COPY --from=ui-builder /ui/dist /app/ui_dist
 
 EXPOSE 8000
-CMD ["mira", "serve"]
+# ENTRYPOINT (not CMD) so `docker run … image --config /app/mira.yaml`
+# appends the args to `mira serve` instead of replacing the command.
+ENTRYPOINT ["mira", "serve"]
