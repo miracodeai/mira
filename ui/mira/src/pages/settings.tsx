@@ -117,18 +117,18 @@ export function SettingsPage() {
         (fresh.effective as { filter?: Record<string, number | boolean | string>; review?: Record<string, number | boolean | string> }) ?? null,
       )
     } catch (err) {
-      // The API returns `{detail: {field?, message}}` for validation
-      // failures. Pull the JSON detail out of the wrapper and key it by
-      // field so each input renders its own error inline.
+      // The API returns `{detail: {field?, message}}` for validation failures.
+      // `fetchJson`/`putJson` wrap the response body in `API error NNN: <body>`,
+      // so strip that prefix and JSON.parse the rest to recover the structured
+      // detail. Regex-extracting the detail object choked on nested braces /
+      // escaped quotes — full JSON.parse is the right tool.
       const raw = err instanceof Error ? err.message : String(err)
-      const detailMatch = raw.match(/"detail":(\{[^}]+\})/)
-      if (detailMatch) {
-        try {
-          const detail = JSON.parse(detailMatch[1]) as { field?: string; message: string }
-          setFieldErrors({ [detail.field ?? "_global"]: detail.message })
-        } catch {
-          setFieldErrors({ _global: raw })
-        }
+      // Try to parse the full error message as JSON to extract structured detail.
+      let parsedError: { detail?: { field?: string; message: string } } | null = null
+      try { parsedError = JSON.parse(raw.replace(/^API error \d+: /, "")) } catch { /* ignore */ }
+      const detail = parsedError?.detail
+      if (detail && typeof detail === "object" && "message" in detail) {
+        setFieldErrors({ [detail.field ?? "_global"]: detail.message })
       } else {
         setFieldErrors({ _global: raw })
       }

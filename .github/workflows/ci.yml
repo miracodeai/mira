@@ -81,8 +81,14 @@ jobs:
       - name: Build image
         run: docker build -t mira:ci .
 
+      # Image ENTRYPOINT is `mira serve`, so anything after the image name
+      # is appended as args to `serve`. Override the entrypoint for tests
+      # that need a different command.
       - name: Smoke test — CLI runs
-        run: docker run --rm mira:ci mira --help
+        run: docker run --rm --entrypoint mira mira:ci --help
+
+      - name: Smoke test — `mira serve` reachable via default ENTRYPOINT
+        run: docker run --rm mira:ci --help
 
       - name: Smoke test — UI assets bundled
-        run: docker run --rm mira:ci ls /app/ui_dist/index.html
+        run: docker run --rm --entrypoint ls mira:ci /app/ui_dist/index.html

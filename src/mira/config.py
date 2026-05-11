@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,12 @@ from pydantic import BaseModel, Field
 
 from mira.exceptions import ConfigError
 
+logger = logging.getLogger(__name__)
+
 # `.mira.yaml` is the canonical per-repo override filename. `.mira.yaml`
 # is accepted for backward compat with repos that committed it before the
 # 0.1.1 standardization on the .yaml extension.
-_DEFAULT_CONFIG_FILENAMES = (".mira.yaml", ".mira.yaml")
+_DEFAULT_CONFIG_FILENAMES = (".mira.yaml", ".mira.yml")
 
 
 class LLMConfig(BaseModel):
@@ -217,8 +220,8 @@ def load_config(
             db_overrides = _app_db.get_global_review_overrides()
             if db_overrides:
                 data = _deep_merge(data, db_overrides)
-    except Exception:
-        pass
+    except Exception as _db_exc:  # noqa: BLE001
+        logger.debug("load_config: skipping DB overrides (%s)", _db_exc)
 
     if config_path is not None:
         path = Path(config_path)
