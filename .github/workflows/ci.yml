@@ -87,7 +87,7 @@ jobs:
       - name: Smoke test — CLI runs
         run: docker run --rm --entrypoint mira mira:ci --help
 
-      - name: Smoke test — `mira serve` reachable via default ENTRYPOINT
+      - name: Smoke test — `mira serve --help` via default ENTRYPOINT
         run: docker run --rm mira:ci --help
 
       - name: Smoke test — UI assets bundled
