@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mira.llm.prompts.conversation import build_conversation_prompt
+from mira.llm.prompts.review import build_conversation_prompt
 
 
 def test_returns_two_messages() -> None:
