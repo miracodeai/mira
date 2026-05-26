@@ -228,7 +228,6 @@ class WalkthroughResult:
                 parts.append(diagram)
                 parts.append("```")
 
-        # --- Confidence score (collapsible) ---
         if self.confidence_score:
             cs = self.confidence_score
             score = cs.score
@@ -250,7 +249,6 @@ class WalkthroughResult:
             parts.append("")
             parts.append("</details>")
 
-        # --- Blast radius ---
         if blast_radius:
             parts.append("")
             total_refs = sum(len(e.get("files", [])) for e in blast_radius)
@@ -269,7 +267,6 @@ class WalkthroughResult:
                 )
             parts.append("")
 
-        # --- Stats footer ---
         if in_progress:
             parts.append("")
             parts.append("*\u23f3 Code review in progress\u2026*")
@@ -293,7 +290,6 @@ class WalkthroughResult:
                 parts.append("")
                 parts.append(f"*{separator.join(stats_parts)}*")
 
-        # --- Skipped-files banner (large-PR partial review) ---
         if skipped_paths and not in_progress:
             total = len(total_paths) if total_paths else (reviewed_files + len(skipped_paths))
             shown = min(8, len(skipped_paths))
@@ -314,11 +310,6 @@ class WalkthroughResult:
             if len(skipped_paths) > shown:
                 parts.append(f"- _\u2026and {len(skipped_paths) - shown} more_")
 
-        # --- Index-empty nudge ---
-        # When the repo hasn't been indexed, this review used JIT cross-file
-        # lookup — useful but less complete than a pre-built index (no blast
-        # radius, no cross-repo impact, no doc context). Tell the user so
-        # they can choose to index for a noticeably better next review.
         if index_was_empty and not in_progress:
             parts.append("")
             parts.append("---")
