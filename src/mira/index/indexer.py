@@ -21,6 +21,7 @@ from mira.config import MiraConfig, load_config
 from mira.index.manifests import is_manifest, parse_manifest
 from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
 from mira.llm.provider import LLMProvider
+from mira.llm.utils import strip_code_fences, strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +345,13 @@ async def _fetch_repo_tarball(
     return out
 
 
+def _safe_call(call: Any) -> tuple[str, str]:
+    """Safely extract (path, symbol) from a call entry that may be str or dict or None."""
+    if isinstance(call, dict):
+        return call.get("path", ""), call.get("symbol", "")
+    return "", ""
+
+
 def _strip_code_fences(raw: str) -> str:
     """Strip markdown code fences (```json ... ```) from LLM output."""
     text = raw.strip()
@@ -360,7 +368,7 @@ def _strip_code_fences(raw: str) -> str:
 
 def _parse_summarize_response(raw: str) -> list[dict[str, Any]]:
     """Parse the LLM response from the summarization prompt."""
-    text = _strip_code_fences(raw)
+    text = strip_think_blocks(_strip_code_fences(raw))
     try:
         data = json.loads(text)
         if isinstance(data, dict) and "files" in data:
@@ -400,8 +408,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
     for ref in file_data.get("symbol_references", []):
         source_sym = ref.get("source", "")
         for call in ref.get("calls", []):
-            target_path = call.get("path", "")
-            target_sym = call.get("symbol", "")
+            target_path, target_sym = _safe_call(call)
             if source_sym and target_path and target_sym:
                 symbol_refs.append((source_sym, target_path, target_sym))
 
@@ -866,7 +873,7 @@ async def _summarize_directories(
                     temperature=0.0,
                     max_tokens=4096,
                 )
-                data = json.loads(_strip_code_fences(raw))
+                data = json.loads(strip_think_blocks(_strip_code_fences(raw)))
             except Exception as exc:
                 logger.warning("Directory batch summary failed: %s", exc)
                 return
@@ -1027,7 +1034,7 @@ async def _summarize_directories_selective(
         async with semaphore:
             try:
                 raw = await llm.complete(messages, json_mode=True, temperature=0.0)
-                data = json.loads(_strip_code_fences(raw))
+                data = json.loads(strip_think_blocks(_strip_code_fences(raw)))
                 summary_text = data.get("summary", "")
                 if summary_text:
                     store.upsert_directory(

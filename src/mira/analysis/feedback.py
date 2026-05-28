@@ -11,6 +11,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from mira.index.store import IndexStore
+from mira.llm.utils import strip_code_fences, strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,7 @@ async def synthesize_from_human_reviews(store: IndexStore, llm) -> int:  # type:
         return 0
 
     try:
-        data = json.loads(raw)
+        data = json.loads(strip_think_blocks(strip_code_fences(raw)))
     except json.JSONDecodeError:
         logger.warning("LLM returned non-JSON response for feedback synthesis")
         return 0

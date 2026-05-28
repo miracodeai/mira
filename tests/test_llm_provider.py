@@ -256,3 +256,49 @@ class TestUsageProperty:
         assert usage["prompt_tokens"] == 100
         assert usage["completion_tokens"] == 50
         assert usage["total_tokens"] == 150
+
+
+class TestStripModelPrefix:
+    """Tests for _strip_model_prefix — provider prefix stripping for non-OpenRouter endpoints."""
+
+    def test_openrouter_url_strips_openrouter_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("openrouter/deepseek-r1", "https://openrouter.ai/api/v1")
+        assert result == "deepseek-r1"
+
+    def test_openrouter_url_preserves_non_openrouter_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("anthropic/claude-sonnet-4-6", "https://openrouter.ai/api/v1")
+        assert result == "anthropic/claude-sonnet-4-6"
+
+    def test_openrouter_url_preserves_model_without_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("gpt-4o", "https://openrouter.ai/api/v1")
+        assert result == "gpt-4o"
+
+    def test_non_openrouter_url_strips_provider_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("minimax/MiniMax-M2.7", "https://api.minimax.io/v1")
+        assert result == "MiniMax-M2.7"
+
+    def test_non_openrouter_url_strips_anthropic_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("anthropic/claude-sonnet-4-6", "https://api.anthropic.com/v1")
+        assert result == "claude-sonnet-4-6"
+
+    def test_non_openrouter_url_preserves_model_without_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("gpt-4o", "https://api.openai.com/v1")
+        assert result == "gpt-4o"
+
+    def test_non_openrouter_url_local_ollama(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("llama3.1:latest", "http://localhost:11434/v1")
+        assert result == "llama3.1:latest"

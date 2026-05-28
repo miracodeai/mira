@@ -303,10 +303,21 @@ def _get_api_key(config: LLMConfig) -> str:
 
 
 def _strip_model_prefix(model: str, base_url: str) -> str:
-    """Strip 'openrouter/' prefix only when targeting OpenRouter; other
-    endpoints accept (and often require) the full model string."""
-    if _is_openrouter(base_url) and model.startswith("openrouter/"):
-        return model[len("openrouter/") :]
+    """Strip provider prefix for non-OpenRouter endpoints.
+
+    OpenRouter routes based on the full model string with provider prefix.
+    Other endpoints (MiniMax, Azure, etc.) expect just the model name without
+    the provider prefix (e.g., 'minimax-M2.7' not 'minimax/minimax-M2.7').
+    """
+    if _is_openrouter(base_url):
+        # OpenRouter: only strip openrouter/ prefix
+        if model.startswith("openrouter/"):
+            return model[len("openrouter/") :]
+        return model
+    # Non-OpenRouter endpoint: strip the provider prefix
+    # e.g. "minimax/minimax-M2.7" → "minimax-M2.7"
+    if "/" in model:
+        return model.split("/", 1)[1]
     return model
 
 
