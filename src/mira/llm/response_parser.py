@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from mira.core.context import extract_hunk_lines
 from mira.exceptions import ResponseParseError
-from mira.llm.utils import strip_code_fences
+from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import (
     FileChangeType,
     FileDiff,
@@ -56,7 +56,8 @@ class LLMReviewResponse(BaseModel):
 
 def parse_llm_response(raw_text: str) -> LLMReviewResponse:
     """Parse raw LLM text output into a validated LLMReviewResponse."""
-    cleaned = strip_code_fences(raw_text)
+    cleaned = strip_think_blocks(raw_text)
+    cleaned = strip_code_fences(cleaned)
 
     # strict=False permits raw control chars (newlines/tabs) inside
     # strings — some tool-calling models occasionally double-encode the
@@ -283,7 +284,8 @@ def _try_load_json(text: str) -> object | None:
 
 def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
     """Parse raw LLM text output into a validated LLMWalkthroughResponse."""
-    cleaned = strip_code_fences(raw_text)
+    cleaned = strip_think_blocks(raw_text)
+    cleaned = strip_code_fences(cleaned)
 
     try:
         data = json.loads(cleaned)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mira.llm.utils import strip_code_fences
+from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import UnresolvedThread
 
 # Markers that signal the start of noise sections in formatted review comments.
@@ -123,7 +123,7 @@ def parse_verify_fixes_response(raw: str) -> list[str]:
     import json
 
     try:
-        data = json.loads(strip_code_fences(raw))
+        data = json.loads(strip_think_blocks(strip_code_fences(raw)))
     except (json.JSONDecodeError, TypeError):
         return []
 

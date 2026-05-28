@@ -18,6 +18,7 @@ from mira.github_app.auth import GitHubAppAuth
 from mira.index.store import IndexStore
 from mira.llm.prompts.conversation import build_conversation_prompt
 from mira.llm.provider import SUBMIT_THREAD_REPLY_TOOL, LLMProvider
+from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import PRInfo
 from mira.providers import create_provider
 
@@ -296,7 +297,7 @@ async def _handle_thread_freeform_reply(
                 tools=[SUBMIT_THREAD_REPLY_TOOL],
                 temperature=0.0,
             )
-            data = json.loads(raw) if raw else {}
+            data = json.loads(strip_think_blocks(strip_code_fences(raw))) if raw else {}
         except Exception as exc:
             logger.warning("Free-form thread reply LLM call failed: %s", exc)
             return
