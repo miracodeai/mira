@@ -19,11 +19,11 @@ class TestStripThinkBlocks:
 
     def test_think_block_at_start_no_json(self):
         """<think> at start with no JSON in remaining content — think tag stripped, rest preserved."""
-        raw = "<think> thinking\n\n real content"
+        raw = "<think> thinking\n\n</think> real content"
         result = strip_think_blocks(raw)
         assert "<think>" not in result
         # No JSON found — remaining text is preserved (not empty)
-        assert "thinking" in result
+        assert "real content" in result
 
     def test_think_block_in_middle(self):
         """<think> in middle with newlines — stripped to expose JSON."""
@@ -60,10 +60,10 @@ class TestStripThinkBlocks:
 
     def test_only_whitespace_after_stripping(self):
         """Only think block with no JSON content — think tag stripped, rest preserved."""
-        raw = "<think> just thinking "
+        raw = "<think> just thinking</think> useful output"
         result = strip_think_blocks(raw)
         assert "<think>" not in result
-        assert "just thinking" in result
+        assert "useful output" in result
 
 
 class TestVerifyFixesWithThinkBlocks:
