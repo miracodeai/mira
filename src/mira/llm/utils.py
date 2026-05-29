@@ -2,7 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import re
+
+_THINK_RE = re.compile(r"<think>.*?", re.DOTALL)
+
+
+def strip_think_blocks(text: str | None) -> str:
+    """Remove <think>… reasoning blocks from model output.
+
+    Some models (e.g. MiniMax) output <think>… blocks as part of their
+    thinking process before the actual response. These must be stripped
+    before JSON parsing.
+    """
+    if not text:
+        return ""
+    result = _THINK_RE.sub("", text).strip()
+    try:
+        idx = next(i for i, c in enumerate(result) if c in "{[")
+        obj, _ = json.JSONDecoder().raw_decode(result[idx:])
+        return json.dumps(obj)
+    except (StopIteration, json.JSONDecodeError):
+        return result
 
 
 def strip_code_fences(text: str | None) -> str:

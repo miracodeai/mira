@@ -88,5 +88,16 @@
     "supports_json_mode": true,
     "purposes": ["review"],
     "recommended_for": []
+  },
+  "minimax/MiniMax-M2.7": {
+    "label": "MiniMax M2.7",
+    "provider": "minimax",
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 131072,
+    "input_cost_per_1m": 0.30,
+    "output_cost_per_1m": 2.50,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": []
   }
 }

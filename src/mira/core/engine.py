@@ -29,6 +29,7 @@ from mira.llm.response_parser import (
     parse_llm_response,
     parse_walkthrough_response,
 )
+from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import (
     WALKTHROUGH_MARKER,
     KeyIssue,
@@ -1426,7 +1427,7 @@ class ReviewEngine:
                 tools=[SUBMIT_CRITIQUE_TOOL],
                 temperature=0.0,
             )
-            data = _json.loads(raw) if raw else {}
+            data = _json.loads(strip_think_blocks(strip_code_fences(raw))) if raw else {}
         except Exception as exc:
             logger.warning("Self-critique LLM call failed: %s. Keeping all drafts.", exc)
             return comments
