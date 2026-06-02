@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import ClassVar
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -312,6 +313,9 @@ def _strip_model_prefix(model: str, base_url: str) -> str:
 
 class LLMProvider:
     """Direct OpenRouter API client for LLM completions."""
+
+    supports_json_mode: ClassVar[bool] = True
+    supports_tool_calling: ClassVar[bool] = True
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config

@@ -53,6 +53,9 @@ serve = [
     # either backend out of the box.
     "psycopg[binary]>=3.1",
 ]
+bedrock = [
+    "boto3>=1.35",
+]
 
 [project.scripts]
 mira = "mira.cli:main"

@@ -1373,19 +1373,12 @@ class TestSelfCritique:
             }
         )
 
-        # Patch LLMProvider so the critic LLM returns our canned response.
-        # The engine instantiates the critic via load_config(); easier to
-        # patch complete_with_tools globally.
-        from mira.llm import provider as provider_mod
+        mock_llm = AsyncMock()
+        mock_llm.complete_with_tools.return_value = verdict_response
 
-        async def fake_complete_with_tools(self, messages, tools, temperature=None):
-            return verdict_response
-
-        monkeypatch.setattr(
-            provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=AsyncMock(), provider=None, indexing_llm=mock_llm
         )
-
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
         kept = await engine._self_critique(comments)
 
         assert len(kept) == 1
@@ -1528,16 +1521,15 @@ class TestRegenerateSummary:
 
     @pytest.mark.asyncio
     async def test_uses_cheap_llm_output(self, monkeypatch):
-        """Successful regen returns the cheap LLM's prose, stripped."""
+        """Successful regen returns the LLM's prose, stripped."""
         from mira.core.engine import ReviewEngine
-        from mira.llm import provider as provider_mod
 
-        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
-            return "  Fresh summary based on filed issues only.  "
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = "  Fresh summary based on filed issues only.  "
 
-        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
-
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=AsyncMock(), provider=None, indexing_llm=mock_llm
+        )
         out = await engine._regenerate_summary(
             [self._comment()], [], "title", "desc", fallback="old summary"
         )
@@ -1547,14 +1539,13 @@ class TestRegenerateSummary:
     async def test_falls_back_on_llm_failure(self, monkeypatch):
         """LLM error must not crash the review — use the original summary."""
         from mira.core.engine import ReviewEngine
-        from mira.llm import provider as provider_mod
 
-        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
-            raise RuntimeError("LLM down")
+        mock_llm = AsyncMock()
+        mock_llm.complete.side_effect = RuntimeError("LLM down")
 
-        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
-
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=AsyncMock(), provider=None, indexing_llm=mock_llm
+        )
         out = await engine._regenerate_summary(
             [self._comment()], [], "t", "d", fallback="original prose"
         )
@@ -1564,14 +1555,13 @@ class TestRegenerateSummary:
     async def test_falls_back_when_llm_returns_empty(self, monkeypatch):
         """Empty LLM output → use fallback so summary is never blank."""
         from mira.core.engine import ReviewEngine
-        from mira.llm import provider as provider_mod
 
-        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
-            return "   "
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = "   "
 
-        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
-
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=AsyncMock(), provider=None, indexing_llm=mock_llm
+        )
         out = await engine._regenerate_summary([self._comment()], [], "t", "d", fallback="fallback")
         assert out == "fallback"
 

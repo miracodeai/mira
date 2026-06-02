@@ -69,7 +69,7 @@ def mock_pr_info() -> PRInfo:
 
 @patch("mira.github_app.handlers.ReviewEngine")
 @patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.LLMProvider")
+@patch("mira.github_app.handlers.create_llm")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_pr_event(
     mock_config: MagicMock,
@@ -93,7 +93,7 @@ async def test_handle_pr_event(
 
 @patch("mira.github_app.handlers.ReviewEngine")
 @patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.LLMProvider")
+@patch("mira.github_app.handlers.create_llm")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_review_keyword(
     mock_config: MagicMock,
@@ -115,7 +115,7 @@ async def test_handle_comment_review_keyword(
 
 
 @patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.LLMProvider")
+@patch("mira.github_app.handlers.create_llm")
 @patch("mira.github_app.handlers.load_config")
 @pytest.mark.parametrize("verb", ["help", "?", "commands", "HELP", "Help"])
 async def test_handle_comment_help_posts_command_list(
@@ -151,7 +151,7 @@ async def test_handle_comment_help_posts_command_list(
 
 
 @patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.LLMProvider")
+@patch("mira.github_app.handlers.create_llm")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_question(
     mock_config: MagicMock,
@@ -183,7 +183,7 @@ async def test_handle_comment_question(
 
 
 @patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.LLMProvider")
+@patch("mira.github_app.handlers.create_llm")
 @patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_formats_reply_with_attribution(
     mock_config: MagicMock,

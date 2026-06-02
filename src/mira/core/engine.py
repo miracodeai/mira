@@ -5,6 +5,10 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mira.llm.base import LLMProviderProtocol
 
 from mira.analysis.noise_filter import filter_noise
 from mira.analysis.severity import classify_severity
@@ -22,7 +26,6 @@ from mira.llm.prompts.review import (
     build_walkthrough_prompt,
 )
 from mira.llm.prompts.verify_fixes import build_verify_fixes_prompt, parse_verify_fixes_response
-from mira.llm.provider import LLMProvider
 from mira.llm.response_parser import (
     convert_to_review_comments,
     convert_to_walkthrough_result,
@@ -317,13 +320,15 @@ class ReviewEngine:
     def __init__(
         self,
         config: MiraConfig,
-        llm: LLMProvider,
+        llm: LLMProviderProtocol,
         provider: BaseProvider | None = None,
         bot_name: str = "miracodeai",
         dry_run: bool = False,
+        indexing_llm: LLMProviderProtocol | None = None,
     ) -> None:
         self.config = config
         self.llm = llm
+        self.indexing_llm = indexing_llm or llm
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
@@ -1293,52 +1298,19 @@ class ReviewEngine:
             # migrations / specs CAN still introduce auth/permission bugs.
             narrowed = files
 
-        from mira.config import load_config
-        from mira.dashboard.models_config import llm_config_for
         from mira.llm.prompts.review import build_security_review_prompt
-        from mira.llm.provider import SUBMIT_REVIEW_TOOL, LLMProvider
-
-        # Build a security LLM on the indexing tier. If the config is
-        # missing the indexing model (or load_config raises in some
-        # exotic test setup), fall back to the main LLM rather than
-        # skip the pass entirely.
-        try:
-            base_config = load_config()
-            security_llm = LLMProvider(llm_config_for("indexing", base_config.llm))
-        except Exception:
-            security_llm = self.llm
+        from mira.llm.provider import SUBMIT_REVIEW_TOOL
 
         messages = build_security_review_prompt(files=narrowed, pr_title=pr_title)
         try:
-            raw = await security_llm.complete_with_tools(
+            raw = await self.indexing_llm.complete_with_tools(
                 messages=messages,
                 tools=[SUBMIT_REVIEW_TOOL],
                 temperature=0.0,
             )
         except Exception as exc:
-            # The indexing-tier model can fail at call time even when
-            # construction succeeded (missing API key, model not routable
-            # by the provider, etc.). Retry on the main LLM rather than
-            # silently dropping the whole security pass — paying review-
-            # tier cost on this PR is the right tradeoff vs losing the
-            # findings.
-            if security_llm is not self.llm:
-                logger.debug(
-                    "Security pass on indexing tier failed (%s); retrying on review LLM",
-                    exc,
-                )
-                try:
-                    raw = await self.llm.complete_with_tools(
-                        messages=messages,
-                        tools=[SUBMIT_REVIEW_TOOL],
-                        temperature=0.0,
-                    )
-                except Exception as exc2:
-                    logger.warning("Security review pass failed: %s", exc2)
-                    return []
-            else:
-                logger.warning("Security review pass failed: %s", exc)
-                return []
+            logger.warning("Security review pass failed: %s", exc)
+            return []
 
         try:
             parsed = parse_llm_response(raw)
@@ -1372,9 +1344,7 @@ class ReviewEngine:
         """
         import json as _json
 
-        from mira.config import load_config
-        from mira.dashboard.models_config import llm_config_for
-        from mira.llm.provider import SUBMIT_CRITIQUE_TOOL, LLMProvider
+        from mira.llm.provider import SUBMIT_CRITIQUE_TOOL
 
         if not comments:
             return comments
@@ -1411,17 +1381,8 @@ class ReviewEngine:
             "## Draft comments\n\n" + "\n".join(draft_lines)
         )
 
-        # Use the configured indexing model — critique is a verification
-        # task, not generation. Falls back to the review model if no
-        # indexing model is configured.
         try:
-            base_config = load_config()
-            critic_llm = LLMProvider(llm_config_for("indexing", base_config.llm))
-        except Exception:
-            critic_llm = self.llm
-
-        try:
-            raw = await critic_llm.complete_with_tools(
+            raw = await self.indexing_llm.complete_with_tools(
                 messages=[{"role": "user", "content": critic_prompt}],
                 tools=[SUBMIT_CRITIQUE_TOOL],
                 temperature=0.0,
@@ -1470,10 +1431,6 @@ class ReviewEngine:
         if not comments and not key_issues:
             return "No issues found."
 
-        from mira.config import load_config
-        from mira.dashboard.models_config import llm_config_for
-        from mira.llm.provider import LLMProvider
-
         # Compact representation of what got filed.
         filed_lines = []
         for c in comments:
@@ -1498,13 +1455,7 @@ class ReviewEngine:
         )
 
         try:
-            base_config = load_config()
-            summary_llm = LLMProvider(llm_config_for("indexing", base_config.llm))
-        except Exception:
-            summary_llm = self.llm
-
-        try:
-            text = await summary_llm.complete(
+            text = await self.indexing_llm.complete(
                 messages=[{"role": "user", "content": prompt}],
                 json_mode=False,
                 temperature=0.0,

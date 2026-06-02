@@ -2,12 +2,22 @@
 # Copy this to .mira.yaml in your repository root
 
 llm:
+  # Provider: "openai" (default, any OpenAI-compatible endpoint) or "bedrock" (AWS)
+  # provider: "openai"
+
   # Model identifier (any LiteLLM-supported model)
   model: "openai/gpt-4o"
   # Fallback model if primary fails
   fallback_model: "openai/gpt-4o-mini"
   temperature: 0.2
   max_tokens: 4096
+
+  # ── AWS Bedrock configuration (uncomment to use) ──
+  # provider: "bedrock"
+  # model: "us.anthropic.claude-sonnet-4-6-v1:0"
+  # fallback_model: "us.anthropic.claude-haiku-4-5-v1:0"
+  # region: "us-east-1"
+  # aws_profile: "my-profile"  # optional, uses default AWS credential chain if omitted
 
 filter:
   # Minimum confidence threshold (0.0 - 1.0)

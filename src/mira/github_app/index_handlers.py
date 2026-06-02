@@ -10,7 +10,7 @@ from mira.config import load_config
 from mira.github_app.auth import GitHubAppAuth
 from mira.index.indexer import _fetch_repo_tree, _should_index, index_diff, index_repo
 from mira.index.store import IndexStore
-from mira.llm.provider import LLMProvider
+from mira.llm import create_llm
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +243,7 @@ async def handle_push_index(
         # Use the configured indexing model (not the default review model)
         from mira.dashboard.models_config import llm_config_for
 
-        llm = LLMProvider(llm_config_for("indexing", config.llm))
+        llm = create_llm(llm_config_for("indexing", config.llm))
         store = IndexStore.open(owner, repo_name)
 
         # If too many files changed (large rebase/squash), do a full re-index

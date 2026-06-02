@@ -30,7 +30,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra serve
+        run: uv sync --extra dev --extra serve --extra bedrock
 
       # Run the same pre-commit hooks contributors run locally. Single source
       # of truth — if a hook is added/removed/version-bumped in
