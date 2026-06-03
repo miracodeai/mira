@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from mira.models import FileDiff, ReviewChunk
 
 if TYPE_CHECKING:
-    from mira.llm.provider import LLMProvider
+    from mira.llm.base import LLMProviderProtocol
 
 
 def _estimate_tokens(text: str) -> int:
@@ -27,7 +27,7 @@ def _file_token_estimate(file_diff: FileDiff) -> int:
 def chunk_files(
     files: list[FileDiff],
     max_tokens: int,
-    provider: LLMProvider | None = None,
+    provider: LLMProviderProtocol | None = None,
 ) -> list[ReviewChunk]:
     """Split files into chunks that fit within token limits.
 

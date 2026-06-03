@@ -737,10 +737,10 @@ async def _run_initial_indexing(default_mode: str) -> None:
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
     from mira.index.indexer import index_repo
-    from mira.llm.provider import LLMProvider
+    from mira.llm import create_llm
 
     config = load_config()
-    llm = LLMProvider(llm_config_for("indexing", config.llm))
+    llm = create_llm(llm_config_for("indexing", config.llm))
 
     for repo_record in to_index:
         full_name = f"{repo_record.owner}/{repo_record.repo}"
@@ -1876,7 +1876,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
 
     from mira.config import load_config
     from mira.index.indexer import IndexingCancelled, index_repo
-    from mira.llm.provider import LLMProvider
+    from mira.llm import create_llm
 
     async def _do_index() -> None:
         count = 0
@@ -1889,7 +1889,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
             # Use the configured indexing model — without this swap we'd
             # silently fall back to the review model, which is slower and
             # more expensive per token.
-            llm = LLMProvider(llm_config_for("indexing", config.llm))
+            llm = create_llm(llm_config_for("indexing", config.llm))
             store = IndexStore.open(owner, repo)
             if full:
                 # Wipe existing index
