@@ -408,7 +408,8 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
                 continue
             target_path = call.get("path", "")
             target_sym = call.get("symbol", "")
-            if isinstance(source_sym, str) and isinstance(target_path, str) and isinstance(target_sym, str):
+            if isinstance(source_sym, str) and isinstance(target_path, str) \
+               and isinstance(target_sym, str):
                 if source_sym and target_path and target_sym:
                     symbol_refs.append((source_sym, target_path, target_sym))
 
