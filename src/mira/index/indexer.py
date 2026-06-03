@@ -391,10 +391,10 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
             continue
         symbols.append(
             SymbolInfo(
-                name=sym.get("name", ""),
-                kind=sym.get("kind", "function"),
-                signature=sym.get("signature", ""),
-                description=sym.get("description", ""),
+                name=sym.get("name") or "",
+                kind=sym.get("kind") or "function",
+                signature=sym.get("signature") or "",
+                description=sym.get("description") or "",
             )
         )
 
@@ -424,7 +424,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
                     file_path=path,
                     kind=kind,
                     target=target,
-                    description=eref.get("description", ""),
+                    description=eref.get("description") or "",
                 )
             )
 
