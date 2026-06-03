@@ -67,4 +67,4 @@ ui/mira/.vite/
 # Local deployment & custom config — not part of upstream source
 docker-compose.yml
 mira.yaml
-indexer.py
+/indexer.py

@@ -171,7 +171,7 @@ async def handle_comment(
         first_word = normalized.split()[0] if normalized else ""
         is_review = first_word == "review" or normalized in _REVIEW_KEYWORDS
         is_review_rest = first_word in _REVIEW_REST_KEYWORDS or normalized in _REVIEW_REST_KEYWORDS
-        is_help = first_word == "help"
+        is_help = first_word in _HELP_KEYWORDS or normalized in _HELP_KEYWORDS
 
         if is_help:
             pr_info_for_help = await provider.get_pr_info(pr_url)
