@@ -176,11 +176,11 @@ async def build_code_context(
                 # Changed files: extract all symbols
                 symbols = extract_symbols(source, lang)
                 if symbols:
-                    for sym in symbols:
+                    for span in symbols:
                         block_lines = [
-                            f"#### `{path}` — `{sym.name}` (lines {sym.start_line}-{sym.end_line})",
+                            f"#### `{path}` — `{span.name}` (lines {span.start_line}-{span.end_line})",
                             f"```{lang}",
-                            sym.source,
+                            span.source,
                             "```",
                             "",
                         ]

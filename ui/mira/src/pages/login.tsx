@@ -44,7 +44,8 @@ export function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
-          <img src="/logo.png" alt="Mira" className="mx-auto mb-2 h-10 w-10" />
+          <img src="/logo.png" alt="Mira" className="mx-auto mb-2 hidden h-10 w-10 dark:block" />
+          <img src="/logo-light.png" alt="Mira" className="mx-auto mb-2 h-10 w-10 dark:hidden" />
           <CardTitle className="text-xl">Sign in to Mira</CardTitle>
           <CardDescription>
             Enter your credentials to continue

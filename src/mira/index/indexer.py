@@ -20,7 +20,7 @@ from jinja2 import Environment, FileSystemLoader
 from mira.config import MiraConfig, load_config
 from mira.index.manifests import is_manifest, parse_manifest
 from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
-from mira.llm.provider import LLMProvider
+from mira.llm import create_llm
 from mira.llm.utils import strip_think_blocks
 
 logger = logging.getLogger(__name__)
@@ -441,7 +441,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
 
 async def _summarize_batch(
     files: list[tuple[str, str]],  # (path, content)
-    llm: LLMProvider,
+    llm: Any,
     semaphore: asyncio.Semaphore,
 ) -> list[tuple[str, str, dict[str, Any]]]:
     """Summarize a batch of files using the LLM. Returns (path, content, data) triples."""
@@ -496,7 +496,7 @@ async def index_repo(
     token: str,
     config: MiraConfig | None = None,
     store: IndexStore | None = None,
-    llm: LLMProvider | None = None,
+    llm: Any = None,
     full: bool = False,
     branch: str | None = None,
     cancel_check: Callable[[], bool] | None = None,
@@ -516,7 +516,7 @@ async def index_repo(
     if llm is None:
         from mira.dashboard.models_config import llm_config_for
 
-        llm = LLMProvider(llm_config_for("indexing", config.llm))
+        llm = create_llm(llm_config_for("indexing", config.llm))
     if store is None:
         store = IndexStore.open(owner, repo)
 
@@ -806,9 +806,7 @@ async def _index_manifests(
         )
 
 
-async def _summarize_directories(
-    store: IndexStore, llm: LLMProvider, semaphore: asyncio.Semaphore
-) -> None:
+async def _summarize_directories(store: IndexStore, llm: Any, semaphore: asyncio.Semaphore) -> None:
     """Generate directory summaries from file summaries.
 
     Batched into chunks of ~15 directories per LLM call. Each directory was
@@ -911,7 +909,7 @@ async def index_diff(
     token: str,
     config: MiraConfig | None = None,
     store: IndexStore | None = None,
-    llm: LLMProvider | None = None,
+    llm: Any = None,
     changed_paths: list[str] | None = None,
     removed_paths: list[str] | None = None,
     branch: str = "main",
@@ -922,7 +920,7 @@ async def index_diff(
     if llm is None:
         from mira.dashboard.models_config import llm_config_for
 
-        llm = LLMProvider(llm_config_for("indexing", config.llm))
+        llm = create_llm(llm_config_for("indexing", config.llm))
     if store is None:
         store = IndexStore.open(owner, repo)
 
@@ -992,7 +990,7 @@ async def index_diff(
 
 async def _summarize_directories_selective(
     store: IndexStore,
-    llm: LLMProvider,
+    llm: Any,
     semaphore: asyncio.Semaphore,
     target_dirs: set[str],
 ) -> None:

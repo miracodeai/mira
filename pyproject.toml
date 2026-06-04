@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mira-reviewer"
-version = "0.2.0"
+version = "0.2.2"
 description = "AI-powered PR reviewer with low-noise filtering"
 readme = "README.md"
 license = "Apache-2.0"
@@ -52,6 +52,9 @@ serve = [
     # (SQLite is the default), but bundled so the Docker image works with
     # either backend out of the box.
     "psycopg[binary]>=3.1",
+]
+bedrock = [
+    "boto3>=1.35",
 ]
 
 [project.scripts]

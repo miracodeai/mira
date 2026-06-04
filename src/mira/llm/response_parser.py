@@ -59,11 +59,8 @@ def parse_llm_response(raw_text: str) -> LLMReviewResponse:
     cleaned = strip_think_blocks(raw_text)
     cleaned = strip_code_fences(cleaned)
 
-    # strict=False permits raw control chars (newlines/tabs) inside
-    # strings — some tool-calling models occasionally double-encode the
-    # comments array as a string containing pretty-printed JSON, and
-    # that pretty-printed JSON has literal newlines that strict mode
-    # rejects.
+    # strict=False tolerates raw newlines from models that double-encode the
+    # comments array as a pretty-printed JSON string.
     try:
         data = json.loads(cleaned, strict=False)
     except json.JSONDecodeError as e:
@@ -72,18 +69,12 @@ def parse_llm_response(raw_text: str) -> LLMReviewResponse:
     if not isinstance(data, dict):
         raise ResponseParseError(f"Expected JSON object, got {type(data).__name__}")
 
-    # Fix double-encoded nested JSON from tool calling
     data = _unstring_nested_json(data)
 
     try:
         return LLMReviewResponse.model_validate(data)
     except Exception as e:
         raise ResponseParseError(f"LLM response validation failed: {e}") from e
-
-
-def _build_hunk_text_index(files: list[FileDiff]) -> dict[str, str]:
-    """Map each file path to its concatenated hunk content for lookup."""
-    return {f.path: extract_hunk_lines(f) for f in files}
 
 
 def _build_diff_line_ranges(files: list[FileDiff]) -> dict[str, list[tuple[int, int]]]:
@@ -105,11 +96,6 @@ def _build_diff_line_ranges(files: list[FileDiff]) -> dict[str, list[tuple[int, 
         if file_ranges:
             ranges[f.path] = file_ranges
     return ranges
-
-
-def _line_in_diff(line: int, ranges: list[tuple[int, int]]) -> bool:
-    """Check if a line number falls within any of the diff hunk ranges."""
-    return any(start <= line <= end for start, end in ranges)
 
 
 def _snap_to_diff(line: int, ranges: list[tuple[int, int]]) -> int | None:
@@ -139,7 +125,9 @@ def convert_to_review_comments(
     When diff_files is given, validates existing_code against actual hunk content,
     checks for no-op suggestions, and ensures line numbers are within diff ranges.
     """
-    hunk_index: dict[str, str] = _build_hunk_text_index(diff_files) if diff_files else {}
+    hunk_index: dict[str, str] = (
+        {f.path: extract_hunk_lines(f) for f in diff_files} if diff_files else {}
+    )
     diff_ranges: dict[str, list[tuple[int, int]]] = (
         _build_diff_line_ranges(diff_files) if diff_files else {}
     )
@@ -152,30 +140,25 @@ def convert_to_review_comments(
         if c.line < 1:
             continue
 
-        # Validate line number is in the diff — snap to nearest hunk if close
         if diff_ranges and c.path in diff_ranges:
             file_ranges = diff_ranges[c.path]
-            if not _line_in_diff(c.line, file_ranges):
+            if not any(start <= c.line <= end for start, end in file_ranges):
                 snapped = _snap_to_diff(c.line, file_ranges)
                 if snapped is not None:
                     c.line = snapped
-                    c.end_line = None  # reset multi-line since we snapped
+                    c.end_line = None
                 else:
-                    continue  # line is too far from any diff hunk
+                    continue
 
-        # Skip comments with no body (no explanation = low value)
         if c.suggestion and not c.body.strip():
             continue
 
-        # Validate existing_code against diff hunks (only when present —
-        # an empty/missing citation is permitted but a present-but-wrong
-        # one is dropped as hallucination).
+        # Drop hallucinated citations (present existing_code that isn't in the diff).
         if hunk_index and c.existing_code:
             hunk_text = hunk_index.get(c.path, "")
             if c.existing_code.strip() not in hunk_text:
                 continue
 
-        # Clear no-op suggestions (suggestion equals existing_code)
         suggestion = c.suggestion
         if suggestion and c.existing_code and suggestion.strip() == c.existing_code.strip():
             suggestion = None
@@ -197,11 +180,6 @@ def convert_to_review_comments(
         )
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# Walkthrough response models & parsing
-# ---------------------------------------------------------------------------
 
 
 class LLMWalkthroughFileChange(BaseModel):
@@ -295,7 +273,6 @@ def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
     if not isinstance(data, dict):
         raise ResponseParseError(f"Expected JSON object, got {type(data).__name__}")
 
-    # Fix double-encoded nested JSON from tool calling
     data = _unstring_nested_json(data)
 
     try:

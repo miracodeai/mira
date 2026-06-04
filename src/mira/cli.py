@@ -13,7 +13,7 @@ from mira import __version__
 from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.exceptions import MiraError
-from mira.llm.provider import LLMProvider
+from mira.llm import create_llm
 from mira.models import ReviewResult, Severity
 
 
@@ -176,7 +176,10 @@ def review(
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
-    llm = LLMProvider(config.llm)
+    from mira.dashboard.models_config import llm_config_for
+
+    llm = create_llm(llm_config_for("review", config.llm))
+    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
 
     github_provider = None
     if pr_url:
@@ -194,7 +197,9 @@ def review(
                 f"Unknown provider type {config.provider.type!r}. Available providers: {available}"
             ) from err
 
-    engine = ReviewEngine(config=config, llm=llm, provider=github_provider, dry_run=dry_run)
+    engine = ReviewEngine(
+        config=config, llm=llm, provider=github_provider, dry_run=dry_run, indexing_llm=indexing_llm
+    )
 
     try:
         if use_stdin:

@@ -25,14 +25,15 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart"
+import { Skeleton } from "@/components/ui/skeleton"
 import { api } from "@/lib/api"
 import { useAsync } from "@/lib/hooks"
 
 export function DashboardPage() {
   const [period, setPeriod] = useState<"day" | "week" | "month">("day")
 
-  const { data: stats } = useAsync(() => api.getOrgStats(), [])
-  const { data: timeseries } = useAsync(
+  const { data: stats, loading: statsLoading } = useAsync(() => api.getOrgStats(), [])
+  const { data: timeseries, loading: timeseriesLoading } = useAsync(
     () => api.getTimeseries(period),
     [period],
   )
@@ -47,15 +48,16 @@ export function DashboardPage() {
     { repo: string; status: string; files_done: number; started_at: number }[]
   >([])
 
-  // Poll indexing status every 3s
+  // Poll fast (3s) when something is indexing, slow (30s) when idle.
+  const hasActiveJob = indexingJobs.some((j) => j.status === "indexing")
   useEffect(() => {
     const poll = () => {
       api.getIndexingStatus().then(setIndexingJobs).catch(() => {})
     }
     poll()
-    const interval = setInterval(poll, 3000)
+    const interval = setInterval(poll, hasActiveJob ? 3000 : 30000)
     return () => clearInterval(interval)
-  }, [])
+  }, [hasActiveJob])
 
   const activeJobs = indexingJobs.filter((j) => j.status === "indexing")
 
@@ -115,11 +117,16 @@ export function DashboardPage() {
           <CardHeader className="pb-2">
             <CardDescription>PRs Reviewed</CardDescription>
             <CardTitle className="text-4xl tabular-nums">
-              {rs?.total_reviews ?? 0}
+              {statsLoading ? <Skeleton className="h-9 w-16" /> : (rs?.total_reviews ?? 0)}
             </CardTitle>
           </CardHeader>
           <CardFooter className="flex-col items-start gap-1 text-sm">
-            {rs && rs.total_reviews > 0 ? (
+            {statsLoading ? (
+              <>
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="h-4 w-28" />
+              </>
+            ) : rs && rs.total_reviews > 0 ? (
               <>
                 <div className="font-medium">
                   Avg {rs.avg_comments_per_pr.toFixed(1)} comments per PR
@@ -138,17 +145,26 @@ export function DashboardPage() {
           <CardHeader className="pb-2">
             <CardDescription>Issues Found</CardDescription>
             <CardTitle className="text-4xl tabular-nums">
-              {rs?.total_comments ?? 0}
+              {statsLoading ? <Skeleton className="h-9 w-16" /> : (rs?.total_comments ?? 0)}
             </CardTitle>
           </CardHeader>
           <CardFooter className="flex-col items-start gap-1 text-sm">
-            <div className="font-medium">
-              {rs?.total_blockers ?? 0} blockers, {rs?.total_warnings ?? 0}{" "}
-              warnings
-            </div>
-            <div className="text-muted-foreground">
-              {rs?.total_suggestions ?? 0} suggestions
-            </div>
+            {statsLoading ? (
+              <>
+                <Skeleton className="h-4 w-44" />
+                <Skeleton className="h-4 w-28" />
+              </>
+            ) : (
+              <>
+                <div className="font-medium">
+                  {rs?.total_blockers ?? 0} blockers, {rs?.total_warnings ?? 0}{" "}
+                  warnings
+                </div>
+                <div className="text-muted-foreground">
+                  {rs?.total_suggestions ?? 0} suggestions
+                </div>
+              </>
+            )}
           </CardFooter>
         </Card>
 
@@ -156,18 +172,31 @@ export function DashboardPage() {
           <CardHeader className="pb-2">
             <CardDescription>Avg Review Time</CardDescription>
             <CardTitle className="text-4xl tabular-nums">
-              {rs && rs.avg_duration_ms > 0
-                ? `${(rs.avg_duration_ms / 1000).toFixed(1)}s`
-                : "—"}
+              {statsLoading ? (
+                <Skeleton className="h-9 w-20" />
+              ) : rs && rs.avg_duration_ms > 0 ? (
+                `${(rs.avg_duration_ms / 1000).toFixed(1)}s`
+              ) : (
+                "—"
+              )}
             </CardTitle>
           </CardHeader>
           <CardFooter className="flex-col items-start gap-1 text-sm">
-            <div className="font-medium">
-              {rs ? fmt(rs.total_lines_changed) : "0"} lines reviewed
-            </div>
-            <div className="text-muted-foreground">
-              {rs ? fmt(rs.total_tokens) : "0"} tokens used
-            </div>
+            {statsLoading ? (
+              <>
+                <Skeleton className="h-4 w-36" />
+                <Skeleton className="h-4 w-32" />
+              </>
+            ) : (
+              <>
+                <div className="font-medium">
+                  {rs ? fmt(rs.total_lines_changed) : "0"} lines reviewed
+                </div>
+                <div className="text-muted-foreground">
+                  {rs ? fmt(rs.total_tokens) : "0"} tokens used
+                </div>
+              </>
+            )}
           </CardFooter>
         </Card>
 
@@ -175,16 +204,25 @@ export function DashboardPage() {
           <CardHeader className="pb-2">
             <CardDescription>Repositories</CardDescription>
             <CardTitle className="text-4xl tabular-nums">
-              {stats?.total_repos ?? 0}
+              {statsLoading ? <Skeleton className="h-9 w-12" /> : (stats?.total_repos ?? 0)}
             </CardTitle>
           </CardHeader>
           <CardFooter className="flex-col items-start gap-1 text-sm">
-            <div className="font-medium">
-              {stats?.total_files ?? 0} files indexed
-            </div>
-            <div className="text-muted-foreground">
-              {stats?.total_edges ?? 0} repository relationships
-            </div>
+            {statsLoading ? (
+              <>
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-4 w-40" />
+              </>
+            ) : (
+              <>
+                <div className="font-medium">
+                  {stats?.total_files ?? 0} files indexed
+                </div>
+                <div className="text-muted-foreground">
+                  {stats?.total_edges ?? 0} repository relationships
+                </div>
+              </>
+            )}
           </CardFooter>
         </Card>
       </div>
@@ -219,7 +257,9 @@ export function DashboardPage() {
             <CardDescription>Lines of code scanned per period</CardDescription>
           </CardHeader>
           <CardContent>
-            {timeseries && timeseries.length > 0 ? (
+            {timeseriesLoading ? (
+              <ChartSkeleton />
+            ) : timeseries && timeseries.length > 0 ? (
               <LinesChart key={period} data={timeseries} useBars={period !== "day"} />
             ) : (
               <Empty />
@@ -233,7 +273,9 @@ export function DashboardPage() {
             <CardDescription>PRs reviewed and issues found</CardDescription>
           </CardHeader>
           <CardContent>
-            {timeseries && timeseries.length > 0 ? (
+            {timeseriesLoading ? (
+              <ChartSkeleton />
+            ) : timeseries && timeseries.length > 0 ? (
               <ReviewsChart key={period} data={timeseries} useBars={period !== "day"} />
             ) : (
               <Empty />
@@ -247,7 +289,9 @@ export function DashboardPage() {
             <CardDescription>LLM tokens consumed over time</CardDescription>
           </CardHeader>
           <CardContent>
-            {timeseries && timeseries.length > 0 ? (
+            {timeseriesLoading ? (
+              <ChartSkeleton />
+            ) : timeseries && timeseries.length > 0 ? (
               <TokensChart key={period} data={timeseries} useBars={period !== "day"} />
             ) : (
               <Empty />
@@ -262,7 +306,9 @@ export function DashboardPage() {
             <CardDescription>Comments by severity level per period</CardDescription>
           </CardHeader>
           <CardContent>
-            {timeseries && timeseries.length > 0 ? (
+            {timeseriesLoading ? (
+              <ChartSkeleton />
+            ) : timeseries && timeseries.length > 0 ? (
               <SeverityStackedBar key={period} data={timeseries} />
             ) : (
               <Empty />
@@ -303,6 +349,10 @@ function Empty() {
       No data yet
     </div>
   )
+}
+
+function ChartSkeleton() {
+  return <Skeleton className="h-[250px] w-full" />
 }
 
 function formatDate(d: string) {

@@ -64,7 +64,10 @@ export function SettingsPage() {
     })
     api.getGlobalSettings().then((s) => {
       setEffective(
-        (s.effective as { filter?: Record<string, number | boolean | string>; review?: Record<string, number | boolean | string> }) ?? null,
+        (s.effective as {
+          filter?: Record<string, number | boolean | string>
+          review?: Record<string, number | boolean | string>
+        }) ?? null
       )
       setOverrides({
         filter: s.overrides.filter ?? {},
@@ -92,7 +95,7 @@ export function SettingsPage() {
   const setOverride = (
     section: "filter" | "review",
     key: string,
-    value: number | boolean | string | null,
+    value: number | boolean | string | null
   ) => {
     setOverrides((prev) => {
       const next = { ...prev[section] }
@@ -107,14 +110,19 @@ export function SettingsPage() {
     setFieldErrors({})
     try {
       const body: Record<string, Record<string, number | boolean | string>> = {}
-      if (Object.keys(overrides.filter).length > 0) body.filter = overrides.filter
-      if (Object.keys(overrides.review).length > 0) body.review = overrides.review
+      if (Object.keys(overrides.filter).length > 0)
+        body.filter = overrides.filter
+      if (Object.keys(overrides.review).length > 0)
+        body.review = overrides.review
       await api.saveGlobalSettings(body)
       setOverridesSaved(true)
       setTimeout(() => setOverridesSaved(false), 2000)
       const fresh = await api.getGlobalSettings()
       setEffective(
-        (fresh.effective as { filter?: Record<string, number | boolean | string>; review?: Record<string, number | boolean | string> }) ?? null,
+        (fresh.effective as {
+          filter?: Record<string, number | boolean | string>
+          review?: Record<string, number | boolean | string>
+        }) ?? null
       )
     } catch (err) {
       // The API returns `{detail: {field?, message}}` for validation failures.
@@ -124,8 +132,13 @@ export function SettingsPage() {
       // escaped quotes — full JSON.parse is the right tool.
       const raw = err instanceof Error ? err.message : String(err)
       // Try to parse the full error message as JSON to extract structured detail.
-      let parsedError: { detail?: { field?: string; message: string } } | null = null
-      try { parsedError = JSON.parse(raw.replace(/^API error \d+: /, "")) } catch { /* ignore */ }
+      let parsedError: { detail?: { field?: string; message: string } } | null =
+        null
+      try {
+        parsedError = JSON.parse(raw.replace(/^API error \d+: /, ""))
+      } catch {
+        /* ignore */
+      }
       const detail = parsedError?.detail
       if (detail && typeof detail === "object" && "message" in detail) {
         setFieldErrors({ [detail.field ?? "_global"]: detail.message })
@@ -144,10 +157,12 @@ export function SettingsPage() {
     description: string,
     step: string = "1",
     min?: number,
-    max?: number,
+    max?: number
   ) => {
     const fieldKey = `${section}.${key}`
-    const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[key]
+    const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[
+      key
+    ]
     const override = overrides[section][key]
     const overridden = override !== undefined
     const committed = typeof override === "number" ? override : eff
@@ -228,9 +243,11 @@ export function SettingsPage() {
     section: "filter" | "review",
     key: string,
     label: string,
-    description: string,
+    description: string
   ) => {
-    const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[key]
+    const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[
+      key
+    ]
     const override = overrides[section][key]
     const overridden = override !== undefined
     const checked = typeof override === "boolean" ? override : Boolean(eff)
@@ -238,13 +255,20 @@ export function SettingsPage() {
     return (
       <div className="space-y-1">
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm font-medium" htmlFor={`${section}.${key}`}>
+          <label
+            className="flex items-center gap-2 text-sm font-medium"
+            htmlFor={`${section}.${key}`}
+          >
             <input
               id={`${section}.${key}`}
               type="checkbox"
               checked={checked}
               onChange={(e) =>
-                setOverride(section, key, e.target.checked === Boolean(eff) ? null : e.target.checked)
+                setOverride(
+                  section,
+                  key,
+                  e.target.checked === Boolean(eff) ? null : e.target.checked
+                )
               }
               className="size-4 rounded border-input accent-primary"
             />
@@ -257,11 +281,11 @@ export function SettingsPage() {
           )}
         </div>
         {error ? (
-          <p className="text-xs text-destructive pl-6">
+          <p className="pl-6 text-xs text-destructive">
             {label} {error}
           </p>
         ) : (
-          <p className="text-xs text-muted-foreground pl-6">{description}</p>
+          <p className="pl-6 text-xs text-muted-foreground">{description}</p>
         )}
       </div>
     )
@@ -351,8 +375,9 @@ export function SettingsPage() {
           <CardTitle>Review behaviour overrides</CardTitle>
           <CardDescription>
             Tune the noise filter and review knobs without restarting the
-            server. These overrides deep-merge over <code className="text-xs">mira.yaml</code>{" "}
-            and apply to every repo this Mira instance reviews. Per-repo{" "}
+            server. These overrides deep-merge over{" "}
+            <code className="text-xs">mira.yaml</code> and apply to every repo
+            this Mira instance reviews. Per-repo{" "}
             <code className="text-xs">.mira.yml</code> files still take
             precedence for individual repos.
           </CardDescription>
@@ -368,7 +393,7 @@ export function SettingsPage() {
                 "Drop comments the LLM rated below this confidence (0.0–1.0). Lower = more comments survive.",
                 "0.1",
                 0,
-                1,
+                1
               )}
               {numField(
                 "filter",
@@ -376,7 +401,7 @@ export function SettingsPage() {
                 "Max comments per PR",
                 "Hard cap on inline comments per PR. Most severe + most confident N are kept.",
                 "1",
-                1,
+                1
               )}
               {numField(
                 "filter",
@@ -384,7 +409,7 @@ export function SettingsPage() {
                 "Max files",
                 "Cap on files reviewed in a single PR. PRs above this are partially reviewed.",
                 "1",
-                1,
+                1
               )}
             </div>
           </div>
@@ -396,19 +421,25 @@ export function SettingsPage() {
                 "review",
                 "walkthrough",
                 "Post walkthrough comment",
-                "Top-level summary comment with file coverage and per-severity stats.",
+                "Top-level summary comment with file coverage and per-severity stats."
               )}
               {boolField(
                 "review",
                 "self_critique",
                 "Self-critique pass",
-                "Second-pass LLM critique on each draft comment. Drops confident-but-wrong findings at the cost of latency.",
+                "Second-pass LLM critique on each draft comment. Drops confident-but-wrong findings at the cost of latency."
               )}
               {boolField(
                 "review",
                 "security_pass",
                 "Security review pass",
-                "Dedicated security pass (XSS, injection, auth, CSRF, SSRF, deserialization, crypto) merged with the main review.",
+                "Dedicated security pass (XSS, injection, auth, CSRF, SSRF, deserialization, crypto) merged with the main review."
+              )}
+              {boolField(
+                "review",
+                "blast_radius",
+                "Blast radius",
+                "Lists dependent repositories that import code touched by this PR in the walkthrough comment."
               )}
               {numField(
                 "review",
@@ -417,7 +448,7 @@ export function SettingsPage() {
                 "Parallelism for chunk reviews (1–20). Raise if your LLM provider can handle it.",
                 "1",
                 1,
-                20,
+                20
               )}
             </div>
           </div>
@@ -439,14 +470,13 @@ export function SettingsPage() {
               )}
             </div>
             {fieldErrors._global && (
-              <p className="text-xs text-destructive break-words">
+              <p className="text-xs break-words text-destructive">
                 {fieldErrors._global}
               </p>
             )}
           </div>
         </CardContent>
       </Card>
-
     </div>
   )
 }

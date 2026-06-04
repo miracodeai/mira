@@ -14,7 +14,7 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 WORKDIR /app
 COPY . /app
-RUN pip install --no-cache-dir "/app[serve]"
+RUN pip install --no-cache-dir "/app[serve,bedrock]"
 
 # Pull the built UI in from stage 1. webhooks.create_app() picks this up
 # automatically and serves it at / with SPA fallback.

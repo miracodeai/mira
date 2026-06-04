@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 
+from mira.index._store_shared import _StoreSharedMixin
 from mira.index.store import (
     BlastRadiusEntry,
     DirectorySummary,
@@ -364,7 +365,7 @@ def search_packages_org_wide(
     ]
 
 
-class PgIndexStore:
+class PgIndexStore(_StoreSharedMixin):
     """PostgreSQL-backed index store with owner/repo scoping.
 
     Implements the same public interface as IndexStore. Shares a single
@@ -415,14 +416,6 @@ class PgIndexStore:
         fs.symbol_refs = self._load_symbol_refs(path)
         fs.external_refs = self._load_external_refs(path)
         return fs
-
-    def get_summaries(self, paths: list[str]) -> dict[str, FileSummary]:
-        result: dict[str, FileSummary] = {}
-        for path in paths:
-            s = self.get_summary(path)
-            if s is not None:
-                result[path] = s
-        return result
 
     def get_dependents(self, path: str) -> list[str]:
         rows = self._fetchall(
@@ -510,10 +503,6 @@ class PgIndexStore:
                     (self._owner, self._repo, summary.path, ref.kind, ref.target, ref.description),
                 )
 
-    def upsert_batch(self, summaries: list[FileSummary]) -> None:
-        for s in summaries:
-            self.upsert_summary(s)
-
     def remove_paths(self, paths: list[str]) -> None:
         with self._conn.cursor() as cur:
             for path in paths:
@@ -546,14 +535,6 @@ class PgIndexStore:
         if row is None:
             return None
         return DirectorySummary(path=row[0], summary=row[1], file_count=row[2], updated_at=row[3])
-
-    def get_directory_summaries(self, paths: list[str]) -> dict[str, DirectorySummary]:
-        result: dict[str, DirectorySummary] = {}
-        for path in paths:
-            ds = self.get_directory_summary(path)
-            if ds is not None:
-                result[path] = ds
-        return result
 
     def upsert_directory(self, summary: DirectorySummary) -> None:
         now = time.time()
@@ -852,23 +833,6 @@ class PgIndexStore:
                 (self._owner, self._repo, context_id),
             )
 
-    def get_all_review_context_text(self) -> str:
-        entries = self.list_review_context()
-        if not entries:
-            return ""
-        parts = ["## Repository Documentation Context\n"]
-        for entry in entries:
-            parts.append(f"### {entry.title}\n{entry.content}\n")
-        return "\n".join(parts)
-
-    # ── External refs ──
-
-    def get_external_refs_for_paths(self, paths: list[str]) -> list[ExternalRef]:
-        result: list[ExternalRef] = []
-        for path in paths:
-            result.extend(self._load_external_refs(path))
-        return result
-
     def get_files_referencing(self, target: str) -> list[ExternalRef]:
         rows = self._fetchall(
             "SELECT file_path, kind, target, description FROM external_refs "
@@ -1130,12 +1094,6 @@ class PgIndexStore:
             )
             for r in rows
         ]
-
-    def get_learned_rules_text(self) -> list[str]:
-        rules = self.list_active_learned_rules()
-        return [r.rule_text for r in rules[:10]]
-
-    # ── Package manifests ──
 
     def replace_manifest_packages(
         self,

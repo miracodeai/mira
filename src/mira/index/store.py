@@ -8,6 +8,8 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 
+from mira.index._store_shared import _StoreSharedMixin
+
 logger = logging.getLogger(__name__)
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
@@ -277,7 +279,7 @@ class BlastRadiusEntry:
     depth: int
 
 
-class IndexStore:
+class IndexStore(_StoreSharedMixin):
     """SQLite-backed index for a single repository."""
 
     def __init__(self, db_path: str) -> None:
@@ -337,15 +339,6 @@ class IndexStore:
         fs.external_refs = self._load_external_refs(path)
         return fs
 
-    def get_summaries(self, paths: list[str]) -> dict[str, FileSummary]:
-        """Get summaries for multiple files."""
-        result: dict[str, FileSummary] = {}
-        for path in paths:
-            s = self.get_summary(path)
-            if s is not None:
-                result[path] = s
-        return result
-
     def get_dependents(self, path: str) -> list[str]:
         """Files that import this path."""
         rows = self._conn.execute(
@@ -362,15 +355,6 @@ class IndexStore:
         if row is None:
             return None
         return DirectorySummary(path=row[0], summary=row[1], file_count=row[2], updated_at=row[3])
-
-    def get_directory_summaries(self, paths: list[str]) -> dict[str, DirectorySummary]:
-        """Get summaries for multiple directories."""
-        result: dict[str, DirectorySummary] = {}
-        for path in paths:
-            ds = self.get_directory_summary(path)
-            if ds is not None:
-                result[path] = ds
-        return result
 
     def upsert_summary(self, summary: FileSummary) -> None:
         """Insert or update a file summary and its related data."""
@@ -393,7 +377,6 @@ class IndexStore:
                 now,
             ),
         )
-        # Replace symbols
         self._conn.execute("DELETE FROM symbols WHERE file_path = ?", (summary.path,))
         for sym in summary.symbols:
             self._conn.execute(
@@ -401,14 +384,12 @@ class IndexStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (summary.path, sym.name, sym.kind, sym.signature, sym.description),
             )
-        # Replace imports (dedup)
         self._conn.execute("DELETE FROM imports WHERE source_path = ?", (summary.path,))
         for target in set(summary.imports):
             self._conn.execute(
                 "INSERT OR IGNORE INTO imports (source_path, target_path) VALUES (?, ?)",
                 (summary.path, target),
             )
-        # Replace symbol refs (dedup)
         self._conn.execute("DELETE FROM symbol_refs WHERE source_path = ?", (summary.path,))
         for src_sym, tgt_path, tgt_sym in set(summary.symbol_refs):
             self._conn.execute(
@@ -417,7 +398,6 @@ class IndexStore:
                 "VALUES (?, ?, ?, ?)",
                 (summary.path, src_sym, tgt_path, tgt_sym),
             )
-        # Replace external refs (dedup by kind+target)
         self._conn.execute("DELETE FROM external_refs WHERE file_path = ?", (summary.path,))
         seen_refs: set[tuple[str, str]] = set()
         for ref in summary.external_refs:
@@ -431,11 +411,6 @@ class IndexStore:
                 (summary.path, ref.kind, ref.target, ref.description),
             )
         self._conn.commit()
-
-    def upsert_batch(self, summaries: list[FileSummary]) -> None:
-        """Insert or update multiple file summaries in a single transaction."""
-        for s in summaries:
-            self.upsert_summary(s)
 
     def upsert_directory(self, summary: DirectorySummary) -> None:
         """Insert or update a directory summary."""
@@ -561,8 +536,6 @@ class IndexStore:
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
-
-    # ── Review events ──
 
     def record_review(
         self,
@@ -691,8 +664,6 @@ class IndexStore:
             "categories": cat_counts,
         }
 
-    # ── Review context CRUD ──
-
     def list_review_context(self) -> list[ReviewContext]:
         """List all review context entries."""
         rows = self._conn.execute(
@@ -737,25 +708,6 @@ class IndexStore:
         self._conn.execute("DELETE FROM review_context WHERE id = ?", (context_id,))
         self._conn.commit()
 
-    def get_all_review_context_text(self) -> str:
-        """Get all review context concatenated for injection into prompts."""
-        entries = self.list_review_context()
-        if not entries:
-            return ""
-        parts = ["## Repository Documentation Context\n"]
-        for entry in entries:
-            parts.append(f"### {entry.title}\n{entry.content}\n")
-        return "\n".join(parts)
-
-    # ── External refs ──
-
-    def get_external_refs_for_paths(self, paths: list[str]) -> list[ExternalRef]:
-        """Get all external refs for the given file paths."""
-        result: list[ExternalRef] = []
-        for path in paths:
-            result.extend(self._load_external_refs(path))
-        return result
-
     def get_files_referencing(self, target: str) -> list[ExternalRef]:
         """Find all external refs whose target contains the given string."""
         rows = self._conn.execute(
@@ -796,8 +748,6 @@ class IndexStore:
             (path,),
         ).fetchall()
         return [(r[0], r[1], r[2]) for r in rows]
-
-    # ── Feedback events ──
 
     def record_feedback(
         self,
@@ -916,8 +866,6 @@ class IndexStore:
             stats[key]["total"] += count
         return stats
 
-    # ── Learned rules ──
-
     def upsert_learned_rule(
         self,
         rule_text: str,
@@ -986,13 +934,6 @@ class IndexStore:
             )
             for r in rows
         ]
-
-    def get_learned_rules_text(self) -> list[str]:
-        """Get active learned rules as a list of rule strings for prompt injection."""
-        rules = self.list_active_learned_rules()
-        return [r.rule_text for r in rules[:10]]
-
-    # ── Package manifests (deterministic from package.json/requirements.txt/etc) ──
 
     def replace_manifest_packages(
         self,
@@ -1069,8 +1010,6 @@ class IndexStore:
         )
         self._conn.commit()
         return len(stale)
-
-    # ── Vulnerabilities (from OSV.dev poller) ──
 
     def replace_vulnerabilities_for_package(
         self,
@@ -1181,10 +1120,9 @@ class IndexStore:
         return {r[0]: r[1] for r in rows}
 
 
-# ── Org-wide aggregation over per-repo SQLite stores ──────────────
-#
-# These mirror the Postgres helpers in pg_store.py for self-host setups
-# where each repo is a separate SQLite file under MIRA_INDEX_DIR.
+# Org-wide aggregation over per-repo SQLite stores. Mirrors the Postgres
+# helpers in pg_store.py for self-host setups where each repo is a
+# separate SQLite file under MIRA_INDEX_DIR.
 
 
 def _iter_repo_dbs(index_dir: str) -> list[tuple[str, str, str]]:

@@ -12,6 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
 import { api, type RepoListItem } from "@/lib/api"
 
 export function ReposPage() {
@@ -74,13 +75,28 @@ export function ReposPage() {
       <Card>
         <CardHeader>
           <CardTitle>
-            {loading ? "Loading..." : `${filtered.length} repositories`}
+            {loading ? (
+              <Skeleton className="h-6 w-32" />
+            ) : (
+              `${filtered.length} repositories`
+            )}
           </CardTitle>
           <CardDescription>Click a repository to view details</CardDescription>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading...</p>
+            <div className="space-y-4">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="flex items-center">
+                  <Skeleton className="h-9 w-9 rounded-full" />
+                  <div className="ml-4 space-y-2">
+                    <Skeleton className="h-4 w-40" />
+                    <Skeleton className="h-3 w-24" />
+                  </div>
+                  <Skeleton className="ml-auto h-5 w-16" />
+                </div>
+              ))}
+            </div>
           ) : filtered.length > 0 ? (
             <div className="space-y-4">
               {filtered.map((r) => {

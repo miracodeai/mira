@@ -29,12 +29,19 @@ class LLMConfig(BaseModel):
     temperature: float = 0.2
     max_tokens: int = 4096
     max_context_tokens: int = 120_000
+    # Provider selection. "openai" uses any OpenAI-compatible endpoint (default).
+    # "bedrock" uses AWS Bedrock Converse API directly (requires boto3).
+    provider: str = "openai"
     # Endpoint configuration. Defaults to OpenRouter but any OpenAI-compatible
     # chat-completions endpoint works — vLLM, Ollama, LiteLLM proxy, LocalAI,
     # llama.cpp server, Together, Fireworks, Groq, etc. Set api_key_env to ""
     # for local endpoints that don't require auth.
     base_url: str = "https://openrouter.ai/api/v1"
     api_key_env: str = "OPENROUTER_API_KEY"
+    # AWS Bedrock settings. Auth uses the standard AWS credential chain
+    # (env vars, instance profile, ECS task role, SSO).
+    region: str = "us-east-1"
+    aws_profile: str | None = None
 
 
 class FilterConfig(BaseModel):
@@ -127,6 +134,11 @@ class ReviewConfig(BaseModel):
     # hurting on a given codebase. The agentic loop still covers cross-file
     # needs for Java/Go on the unindexed path when this is False.
     jit_java_go: bool = True
+
+    # Render the cross-repo "Blast Radius" section in the walkthrough comment.
+    # Lists dependent repos that import code touched by this PR. Disable to
+    # skip the relationship-store lookup and trim the walkthrough.
+    blast_radius: bool = True
 
 
 class ProviderConfig(BaseModel):

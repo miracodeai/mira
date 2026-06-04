@@ -5,6 +5,8 @@ import { NavLink, Outlet, useLocation } from "react-router"
 import { useTheme } from "@/components/theme-provider"
 import { useAuth } from "@/lib/auth"
 
+const API_BASE = import.meta.env.VITE_API_URL || ""
+
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -114,7 +116,7 @@ export function DashboardLayout() {
   // the endpoint) — the chrome stays clean instead of showing "unknown".
   const [version, setVersion] = useState<string | null>(null)
   useEffect(() => {
-    fetch("/api/version")
+    fetch(`${API_BASE}/api/version`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.version) setVersion(data.version)
@@ -131,7 +133,8 @@ export function DashboardLayout() {
               <SidebarMenuButton size="lg" asChild>
                 <a href="/">
                   <div className="flex aspect-square size-8 items-center justify-center">
-                    <img src="/logo.png" alt="Mira" className="size-7" />
+                    <img src="/logo.png" alt="Mira" className="hidden size-7 dark:block" />
+                    <img src="/logo-light.png" alt="Mira" className="size-7 dark:hidden" />
                   </div>
                   <div className="flex flex-col leading-tight">
                     <span className="text-sm font-semibold">Mira</span>

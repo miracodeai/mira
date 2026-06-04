@@ -4,6 +4,33 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-06-03
+
+### Added
+
+- **Blast Radius toggle** — new `review.blast_radius` setting (default on) with a Review-settings switch in the dashboard. Turns the walkthrough's cross-repo "Blast Radius" section on or off; when off, the relationship-store lookup is skipped entirely.
+- **Loading skeletons** on the Dashboard, Repositories, and Vulnerabilities pages, so a slow data fetch no longer looks identical to an empty result.
+- **Light-mode logo** — the dashboard logo now swaps with the theme across the sidebar, login, setup, and setup modal.
+
+### Fixed
+
+- **Learned rules now survive self-critique** — the self-critique pass was discarding review comments that enforced a team's own learned/custom rules (e.g. "we always want tests") as style nits. The critic now sees the active rules and keeps comments that enforce them.
+- **Dashboard version indicator** — the version under the sidebar logo queried `/api/version` against the dev server without credentials and never rendered; now fixed.
+
+### Changed
+
+- Internal code-hygiene pass: trimmed redundant comments and split the review passes out of `engine.py` into `core/passes.py` and `core/threads.py`. No behaviour change.
+
+## [0.2.1] — 2026-06-02
+
+### Added
+
+- **AWS Bedrock provider** — set `llm.provider: "bedrock"` to run reviews against Claude (or other models) on Amazon Bedrock via the Converse API, instead of an OpenAI-compatible endpoint. Auth uses the standard AWS credential chain (env vars, instance profile, ECS task role, SSO), with an optional `aws_profile`. Configurable `region` and `fallback_model`. See [Choosing a model](https://docs.miracode.ai/configuration/models#aws-bedrock).
+
+### Changed
+
+- Dependency bumps (recharts, lucide-react, prettier, typescript-eslint, eslint-plugin-react-hooks, shadcn, docker/metadata-action) and README updates.
+
 ## [0.2.0] — 2026-05-14
 
 ### Added
@@ -92,6 +119,8 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.2.2]: https://github.com/miracodeai/mira/releases/tag/v0.2.2
+[0.2.1]: https://github.com/miracodeai/mira/releases/tag/v0.2.1
 [0.2.0]: https://github.com/miracodeai/mira/releases/tag/v0.2.0
 [0.1.1]: https://github.com/miracodeai/mira/releases/tag/v0.1.1
 [0.1.0]: https://github.com/miracodeai/mira/releases/tag/v0.1.0

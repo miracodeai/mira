@@ -146,7 +146,8 @@ export function RepoDetailPage() {
       }
     }
     tick()
-    const interval = setInterval(tick, 2000)
+    // Poll fast (2s) while indexing, slow (30s) otherwise.
+    const interval = setInterval(tick, indexing ? 2000 : 30000)
     return () => {
       cancelled = true
       clearInterval(interval)

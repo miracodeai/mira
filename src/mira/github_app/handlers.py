@@ -16,8 +16,9 @@ from mira.core.engine import ReviewEngine
 from mira.dashboard.models_config import llm_config_for
 from mira.github_app.auth import GitHubAppAuth
 from mira.index.store import IndexStore
-from mira.llm.prompts.conversation import build_conversation_prompt
-from mira.llm.provider import SUBMIT_THREAD_REPLY_TOOL, LLMProvider
+from mira.llm import create_llm
+from mira.llm.prompts.review import build_conversation_prompt
+from mira.llm.provider import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import PRInfo
 from mira.providers import create_provider
@@ -90,9 +91,16 @@ async def handle_pull_request(
         config = load_config()
         from mira.dashboard.models_config import llm_config_for
 
-        llm = LLMProvider(llm_config_for("review", config.llm))
+        llm = create_llm(llm_config_for("review", config.llm))
+        indexing_llm = create_llm(llm_config_for("indexing", config.llm))
         provider = create_provider("github", token)
-        engine = ReviewEngine(config=config, llm=llm, provider=provider, bot_name=bot_name)
+        engine = ReviewEngine(
+            config=config,
+            llm=llm,
+            provider=provider,
+            bot_name=bot_name,
+            indexing_llm=indexing_llm,
+        )
 
         # Check if repo is indexed
         from mira.dashboard.api import _app_db
@@ -156,7 +164,8 @@ async def handle_comment(
         config = load_config()
         from mira.dashboard.models_config import llm_config_for
 
-        llm = LLMProvider(llm_config_for("review", config.llm))
+        llm = create_llm(llm_config_for("review", config.llm))
+        indexing_llm = create_llm(llm_config_for("indexing", config.llm))
         provider = create_provider("github", token)
 
         normalized = question.lower().strip()
@@ -183,7 +192,13 @@ async def handle_comment(
                     "PR has already been covered. 🎉",
                 )
                 return
-            engine = ReviewEngine(config=config, llm=llm, provider=provider, bot_name=bot_name)
+            engine = ReviewEngine(
+                config=config,
+                llm=llm,
+                provider=provider,
+                bot_name=bot_name,
+                indexing_llm=indexing_llm,
+            )
             engine._review_only_paths = set(progress.skipped_paths)  # type: ignore[attr-defined]
             logger.info(
                 "review-rest triggered for PR %s by @%s — %d remaining file(s)",
@@ -194,7 +209,13 @@ async def handle_comment(
             await engine.review_pr(pr_url)
             logger.info("review-rest complete for PR %s", pr_url)
         elif is_review:
-            engine = ReviewEngine(config=config, llm=llm, provider=provider, bot_name=bot_name)
+            engine = ReviewEngine(
+                config=config,
+                llm=llm,
+                provider=provider,
+                bot_name=bot_name,
+                indexing_llm=indexing_llm,
+            )
             logger.info("Re-review triggered for PR %s by @%s", pr_url, comment_user)
             await engine.review_pr(pr_url)
             logger.info("Re-review complete for PR %s", pr_url)
@@ -281,7 +302,7 @@ async def _handle_thread_freeform_reply(
         # Build prompt and call the cheap indexing model — this isn't a
         # review, just a short conversational classification.
         config = load_config()
-        llm = LLMProvider(llm_config_for("indexing", config.llm))
+        llm = create_llm(llm_config_for("indexing", config.llm))
         template = _THREAD_REPLY_TEMPLATE
         prompt = template.render(
             user_reply=user_reply or "(empty)",
@@ -618,7 +639,7 @@ async def handle_pr_merged(
                     config = load_config()
                     from mira.dashboard.models_config import llm_config_for
 
-                    indexing_llm = LLMProvider(llm_config_for("indexing", config.llm))
+                    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
                     llm_rules = await synthesize_from_human_reviews(store, indexing_llm)
                 except Exception as exc:
                     logger.warning("LLM rule synthesis failed for %s: %s", pr_url, exc)

@@ -1,13 +1,14 @@
-"""Relationship detection evaluation suite — runs against a real model.
+"""Relationship detection evaluation suite — offline static analysis.
 
-5 evals for external ref extraction and relationship resolution.
+5 evals for external ref extraction and relationship resolution. No LLM
+calls; the tests feed pre-built summaries to the store and assert the
+edges resolve correctly.
 
 Run with: pytest tests/evals/ -m eval
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -16,15 +17,7 @@ from mira.index.indexer import _build_file_summary
 from mira.index.relationships import RelationshipStore
 from mira.index.store import ExternalRef, FileSummary, IndexStore
 
-pytestmark = [
-    pytest.mark.eval,
-    pytest.mark.skipif(
-        not os.environ.get("OPENROUTER_API_KEY")
-        and not os.environ.get("OPENAI_API_KEY")
-        and not os.environ.get("ANTHROPIC_API_KEY"),
-        reason="No LLM API key set (need OPENROUTER_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY)",
-    ),
-]
+pytestmark = [pytest.mark.eval]
 
 
 class TestRelationshipEvals:
@@ -104,8 +97,12 @@ class TestRelationshipEvals:
         targets = [r.target for r in summary.external_refs]
         assert any("redis" in t for t in targets)
 
-    def test_eval_repo_grouping_dash_names(self, tmp_path: Path) -> None:
+    def test_eval_repo_grouping_dash_names(self, tmp_path: Path, monkeypatch) -> None:
         """Group repos with matching names AND shared dependencies."""
+        # _scan_repos short-circuits to the Postgres registry when DATABASE_URL
+        # is set. Force the on-disk fallback so the fixtures we write here are
+        # actually discovered.
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         org_dir = tmp_path / "myorg"
         org_dir.mkdir(parents=True, exist_ok=True)
 
@@ -156,8 +153,9 @@ class TestRelationshipEvals:
         assert "payments" in group_names
         rs.close()
 
-    def test_eval_repo_grouping_dot_names(self, tmp_path: Path) -> None:
+    def test_eval_repo_grouping_dot_names(self, tmp_path: Path, monkeypatch) -> None:
         """Group repos with dot-separated naming AND mutual references."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         org_dir = tmp_path / "solarco"
         org_dir.mkdir(parents=True, exist_ok=True)
 

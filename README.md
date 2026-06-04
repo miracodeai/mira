@@ -138,6 +138,36 @@ Set `OPENROUTER_API_KEY` once; one key works across every provider. See [`src/mi
 
 > **Coming soon:** direct adapters for **Anthropic**, **OpenAI**, **Google Vertex**, **Ollama**, and **vLLM**, for teams that already hold provider keys, run open-weights models in-house, or have data-residency rules that prevent traffic from flowing through OpenRouter.
 
+### AWS Bedrock
+
+For teams with data-residency requirements or existing AWS Bedrock access, Mira can call Bedrock's Converse API directly — no OpenRouter, no intermediary:
+
+```yaml
+# mira.yaml
+llm:
+  provider: "bedrock"
+  model: "us.anthropic.claude-sonnet-4-6-v1:0"
+  fallback_model: "us.anthropic.claude-haiku-4-5-v1:0"
+  region: "us-east-1"
+  # aws_profile: "my-profile"  # optional
+```
+
+Auth uses the standard AWS credential chain (env vars, instance profile, ECS task role, SSO). No API keys to manage.
+
+Available Bedrock models:
+
+| Model | `llm.model` | Use case |
+|-------|-------------|----------|
+| Claude Sonnet 4.6 | `us.anthropic.claude-sonnet-4-6-v1:0` | Review |
+| Claude Haiku 4.5 | `us.anthropic.claude-haiku-4-5-v1:0` | Indexing |
+| Claude Opus 4.6 | `us.anthropic.claude-opus-4-6-v1:0` | Review (premium) |
+
+Test locally without GitHub:
+
+```bash
+git diff HEAD~1 | mira review --stdin --dry-run --config mira.yaml
+```
+
 **3. Install the app** on your repos. Every PR gets auto-reviewed.
 
 **Chat with Mira:** Comment `@miracodeai <question>` on any PR to ask about the code.

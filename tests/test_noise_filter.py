@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from mira.analysis.noise_filter import _is_duplicate, _jaccard_similarity, filter_noise
 from mira.config import FilterConfig
+from mira.core.noise_filter import _is_duplicate, _jaccard_similarity, filter_noise
 from mira.models import ReviewComment, Severity
 
 

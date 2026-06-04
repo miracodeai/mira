@@ -207,7 +207,6 @@ class RelationshipStore:
     def __init__(self, index_dir: str | None = None) -> None:
         self._index_dir = index_dir or os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
         self._stores: dict[str, IndexStore] = {}
-        # Org-level overrides DB
         os.makedirs(self._index_dir, exist_ok=True)
         self._overrides_db = sqlite3.connect(os.path.join(self._index_dir, "_relationships.db"))
         self._overrides_db.execute("PRAGMA journal_mode=WAL")
@@ -216,8 +215,7 @@ class RelationshipStore:
         self._scan_repos()
 
     def _scan_repos(self) -> None:
-        """Discover all indexed repos (Postgres registry or SQLite files)."""
-        # First try the Postgres repos table (via app DB)
+        """Discover indexed repos via Postgres registry, falling back to SQLite files on disk."""
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
             try:
@@ -236,7 +234,6 @@ class RelationshipStore:
             except Exception as exc:
                 logger.warning("Failed to scan repos from DB, falling back to filesystem: %s", exc)
 
-        # Fallback: scan filesystem for SQLite .db files
         if not os.path.isdir(self._index_dir):
             return
         for owner_dir in os.listdir(self._index_dir):
@@ -270,7 +267,6 @@ class RelationshipStore:
             if len(parts) == 2:
                 short_to_full[parts[1]] = full_name
 
-        # Load denied overrides
         denied = {
             (o.source_repo, o.target_repo) for o in self.list_overrides() if o.status == "denied"
         }
@@ -287,7 +283,6 @@ class RelationshipStore:
             for target_str in all_targets:
                 matched_repo = self._match_target_to_repo(target_str, known, short_to_full)
                 if matched_repo and matched_repo != source_repo:
-                    # Skip denied edges
                     if (source_repo, matched_repo) in denied:
                         continue
                     key = (source_repo, matched_repo, "external_ref")
@@ -299,7 +294,6 @@ class RelationshipStore:
                         )
                     edges[key].refs.extend(all_refs_by_target.get(target_str, []))
 
-        # Add custom edges
         for ce in self.list_custom_edges():
             key = (ce.source_repo, ce.target_repo, "custom")
             if key not in edges and (ce.source_repo, ce.target_repo) not in denied:
@@ -333,7 +327,6 @@ class RelationshipStore:
                     result[key] = ("dependent", [])
                 result[key][1].append(edge)
 
-        # Also add same-group repos
         groups = self.group_repos(self.repos)
         for group in groups:
             if full_name in group.repos:
@@ -342,8 +335,6 @@ class RelationshipStore:
                         result[repo_name] = ("same_group", [])
 
         return [(k, v[0], v[1]) for k, v in sorted(result.items())]
-
-    # ── Content-aware repo grouping ──────────────────────────────────
 
     def group_repos(self, repo_names: list[str]) -> list[RepoGroup]:
         """Group repos using multiple content-aware signals.
@@ -359,13 +350,13 @@ class RelationshipStore:
         """
         edges = self.resolve_edges()
 
-        # Detect utility repos first — they must not bridge unrelated groups
+        # Utility repos can't bridge unrelated groups: shared-lib being a
+        # common dependency doesn't make its dependents related to each other.
         repo_deps: dict[str, set[str]] = {}
         for e in edges:
             repo_deps.setdefault(e.source_repo, set()).add(e.target_repo)
         utility_repos = self._detect_utility_repos(repo_names, repo_deps)
 
-        # Build per-pair evidence
         pair_evidence: dict[frozenset[str], list[str]] = {}
         pair_scores: dict[frozenset[str], float] = {}
 
@@ -373,13 +364,10 @@ class RelationshipStore:
             pair_evidence.setdefault(pair, []).append(evidence)
             pair_scores[pair] = pair_scores.get(pair, 0.0) + score
 
-        # Signal 1: Mutual edges (strongest — 0.5)
-        # Edges TO or FROM utility repos don't count for grouping —
-        # everyone depends on shared-lib, that doesn't make them related.
         edge_pairs: dict[frozenset[str], list[str]] = {}
         for e in edges:
             if e.source_repo in utility_repos or e.target_repo in utility_repos:
-                continue  # Skip utility repo edges for grouping
+                continue
             pair = frozenset([e.source_repo, e.target_repo])
             ref_kinds = {r.kind for r in e.refs}
             edge_pairs.setdefault(pair, []).extend(ref_kinds)
@@ -389,7 +377,6 @@ class RelationshipStore:
             kind_str = ", ".join(sorted(set(kinds)))
             _add(pair, f"direct dependency ({kind_str})", 0.4)
 
-            # Mutual edges are even stronger
             has_forward = any(
                 e.source_repo == repos[0] and e.target_repo == repos[1]
                 for e in edges
@@ -403,21 +390,17 @@ class RelationshipStore:
             if has_forward and has_reverse:
                 _add(pair, "mutual references (A↔B)", 0.2)
 
-        # Signal 2: Shared internal dependencies (0.3)
-        # Utility repos excluded from bridging — already detected above.
         repo_list = [r for r in repo_names if r in self._stores]
         for i, repo_a in enumerate(repo_list):
             for repo_b in repo_list[i + 1 :]:
                 deps_a = repo_deps.get(repo_a, set())
                 deps_b = repo_deps.get(repo_b, set())
-                # Only count shared deps that aren't utility repos
                 shared = (deps_a & deps_b) - {repo_a, repo_b} - utility_repos
                 if shared:
                     pair = frozenset([repo_a, repo_b])
                     shared_names = ", ".join(s.split("/")[-1] for s in sorted(shared))
                     _add(pair, f"shared dependencies: {shared_names}", 0.3)
 
-        # Signal 3: Content similarity via domain keyword overlap (0.3)
         repo_keywords = self._extract_repo_keywords()
         for i, repo_a in enumerate(repo_list):
             for repo_b in repo_list[i + 1 :]:
@@ -425,9 +408,9 @@ class RelationshipStore:
                 kw_b = repo_keywords.get(repo_b, set())
                 if kw_a and kw_b:
                     overlap = kw_a & kw_b
-                    union = kw_a | kw_b
-                    if union:
-                        jaccard = len(overlap) / len(union)
+                    merged = kw_a | kw_b
+                    if merged:
+                        jaccard = len(overlap) / len(merged)
                         if jaccard >= 0.20 and len(overlap) >= 3:
                             pair = frozenset([repo_a, repo_b])
                             top_shared = sorted(overlap)[:5]
@@ -437,7 +420,6 @@ class RelationshipStore:
                                 min(jaccard * 1.5, 0.3),
                             )
 
-        # Signal 4: Naming convention (weakest — 0.15)
         short_names: dict[str, str] = {}
         for full in repo_names:
             parts = full.split("/")
@@ -456,12 +438,9 @@ class RelationshipStore:
                         pair = frozenset([a, b])
                         _add(pair, f"naming pattern: '{prefix}-*'", 0.15)
 
-        # ── Merge pairs into groups using union-find ──
-        # Only include pairs that meet the threshold
         MIN_SCORE = 0.3  # Need more than just a name match
         qualified_pairs = {pair for pair, score in pair_scores.items() if score >= MIN_SCORE}
 
-        # Union-find to merge overlapping pairs into groups
         parent: dict[str, str] = {}
 
         def find(x: str) -> str:
@@ -480,16 +459,14 @@ class RelationshipStore:
             if len(repos) == 2:
                 union(repos[0], repos[1])
 
-        # Collect groups
         clusters: dict[str, list[str]] = {}
-        all_in_pairs = set()
+        all_in_pairs: set[str] = set()
         for pair in qualified_pairs:
             all_in_pairs.update(pair)
         for repo in all_in_pairs:
             root = find(repo)
             clusters.setdefault(root, []).append(repo)
 
-        # Build final groups
         result: list[RepoGroup] = []
         for members in clusters.values():
             if len(members) < 2:
@@ -497,7 +474,6 @@ class RelationshipStore:
 
             members = sorted(members)
 
-            # Collect all evidence and max score for this group
             all_evidence: list[str] = []
             total_score = 0.0
             for i, a in enumerate(members):
@@ -507,15 +483,13 @@ class RelationshipStore:
                         all_evidence.extend(pair_evidence[pair])
                     total_score = max(total_score, pair_scores.get(pair, 0.0))
 
-            # Deduplicate evidence
             seen: set[str] = set()
             unique_evidence: list[str] = []
-            for e in all_evidence:
-                if e not in seen:
-                    seen.add(e)
-                    unique_evidence.append(e)
+            for evidence in all_evidence:
+                if evidence not in seen:
+                    seen.add(evidence)
+                    unique_evidence.append(evidence)
 
-            # Derive group name from common keywords or naming prefix
             group_name = self._derive_group_name(members, repo_keywords)
 
             result.append(
@@ -541,7 +515,6 @@ class RelationshipStore:
         utility_names = {"shared", "common", "lib", "core", "infra", "utils", "tools", "platform"}
         utility_repos: set[str] = set()
 
-        # Count how many repos depend on each repo
         dependents_count: dict[str, int] = {}
         for _source, targets in repo_deps.items():
             for t in targets:
@@ -550,13 +523,12 @@ class RelationshipStore:
         for full_name in repo_names:
             short = full_name.split("/")[-1].lower()
 
-            # Check name
             name_parts = re.split(r"[-._]", short)
             if any(part in utility_names for part in name_parts):
                 utility_repos.add(full_name)
                 continue
 
-            # Check topology: many dependents, few dependencies
+            # Topology heuristic: many dependents, few dependencies.
             n_dependents = dependents_count.get(full_name, 0)
             n_deps = len(repo_deps.get(full_name, set()))
             if n_dependents >= 3 and n_deps <= 1:
@@ -576,16 +548,13 @@ class RelationshipStore:
                     for word in re.findall(r"[a-z]{3,}", summary.summary.lower()):
                         if word not in _STOP_WORDS:
                             words[word] += 1
-                    # Also include symbol names as domain signals
                     for sym in summary.symbols:
-                        # Split camelCase/snake_case symbol names into words
                         for part in re.findall(
                             r"[a-z]{3,}", re.sub(r"([A-Z])", r" \1", sym.name).lower()
                         ):
                             if part not in _STOP_WORDS:
                                 words[part] += 1
 
-            # Keep top keywords (frequency > 1 or strongly domain-specific)
             keywords[repo_name] = {
                 word for word, count in words.items() if count >= 1 and len(word) >= 4
             }
@@ -602,7 +571,6 @@ class RelationshipStore:
         """
         short_names = [m.split("/")[-1] for m in members]
 
-        # 1. Try naming prefix via component suffixes
         prefixes: Counter[str] = Counter()
         for short in short_names:
             prefix = self._extract_group_prefix(short)
@@ -614,14 +582,13 @@ class RelationshipStore:
             if count >= 2:
                 return best_prefix
 
-        # 2. Longest common substring of repo names
         if len(short_names) >= 2:
             common = _longest_common_prefix(short_names)
             common = common.rstrip("-._")
             if len(common) >= 3:
                 return common
 
-        # 3. Most common shared domain keyword — filter out adjectives/fluff
+        # Fall back to a shared domain keyword, filtered for marketing fluff.
         _FILLER_WORDS = {
             "comprehensive",
             "modern",
@@ -710,8 +677,6 @@ class RelationshipStore:
 
         return None
 
-    # ── Relationship overrides ──
-
     def set_override(self, source_repo: str, target_repo: str, status: str) -> RelationshipOverride:
         """Confirm or deny an edge. Status must be 'confirmed' or 'denied'."""
         now = time.time()
@@ -740,8 +705,6 @@ class RelationshipStore:
             RelationshipOverride(source_repo=r[0], target_repo=r[1], status=r[2], created_at=r[3])
             for r in rows
         ]
-
-    # ── Custom edges ──
 
     def add_custom_edge(self, source_repo: str, target_repo: str, reason: str) -> CustomEdge:
         now = time.time()

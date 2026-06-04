@@ -12,9 +12,9 @@ from mira.core.engine import (
     ReviewEngine,
     _clamp_confidence_to_findings,
     _drop_orphan_key_issues,
-    _extract_sections,
     _security_relevant_files,
 )
+from mira.core.threads import _extract_sections
 from mira.llm.provider import LLMProvider
 from mira.models import (
     FileChangeType,
@@ -1007,31 +1007,31 @@ class TestShortThreadDescription:
     for use as 'already addressed' context in follow-up rounds."""
 
     def test_extracts_bold_title(self):
-        from mira.core.engine import _short_thread_description
+        from mira.core.threads import short_thread_description as _short_thread_description
 
         body = "🐛 **Bug**\n⚠️ Warning\n\n**Resource leak in handler**\n\nLong body text."
         assert _short_thread_description(body) == "Resource leak in handler"
 
     def test_skips_badge_lines(self):
-        from mira.core.engine import _short_thread_description
+        from mira.core.threads import short_thread_description as _short_thread_description
 
         body = "⚠️ **Error Handling**\n💡 Suggestion\n\n**Catches every exception too broadly**"
         assert "Catches every exception" in _short_thread_description(body)
 
     def test_falls_back_to_first_line(self):
-        from mira.core.engine import _short_thread_description
+        from mira.core.threads import short_thread_description as _short_thread_description
 
         body = "Plain text comment without a bold title.\nMore detail follows."
         assert _short_thread_description(body) == "Plain text comment without a bold title."
 
     def test_truncates_long_descriptions(self):
-        from mira.core.engine import _short_thread_description
+        from mira.core.threads import short_thread_description as _short_thread_description
 
         body = "**" + ("very long title " * 20) + "**"
         assert len(_short_thread_description(body)) <= 160
 
     def test_empty_returns_empty(self):
-        from mira.core.engine import _short_thread_description
+        from mira.core.threads import short_thread_description as _short_thread_description
 
         assert _short_thread_description("") == ""
         assert _short_thread_description("   \n  \n") == ""
@@ -1356,8 +1356,6 @@ class TestSelfCritique:
         """LLM returns keep=false for one of two; that one gets dropped."""
         from unittest.mock import AsyncMock
 
-        from mira.core.engine import ReviewEngine
-
         comments = [
             self._make_comment(line=10, title="Real bug"),
             self._make_comment(line=20, title="False positive"),
@@ -1373,9 +1371,8 @@ class TestSelfCritique:
             }
         )
 
-        # Patch LLMProvider so the critic LLM returns our canned response.
-        # The engine instantiates the critic via load_config(); easier to
-        # patch complete_with_tools globally.
+        # self_critique instantiates its own critic LLM via load_config(),
+        # so patch complete_with_tools on the provider class globally.
         from mira.llm import provider as provider_mod
 
         async def fake_complete_with_tools(self, messages, tools, temperature=None):
@@ -1385,8 +1382,10 @@ class TestSelfCritique:
             provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
         )
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        kept = await engine._self_critique(comments)
+        from mira.core.passes import self_critique
+
+        llm = AsyncMock()
+        kept = await self_critique(llm, comments)
 
         assert len(kept) == 1
         assert kept[0].title == "Real bug"
@@ -1395,8 +1394,6 @@ class TestSelfCritique:
     async def test_critique_keeps_all_when_llm_fails(self, monkeypatch):
         """LLM call failure must NOT silently drop comments — keep them all."""
         from unittest.mock import AsyncMock
-
-        from mira.core.engine import ReviewEngine
 
         comments = [self._make_comment(line=10), self._make_comment(line=20, title="Two")]
 
@@ -1409,8 +1406,10 @@ class TestSelfCritique:
             provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
         )
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        kept = await engine._self_critique(comments)
+        from mira.core.passes import self_critique
+
+        llm = AsyncMock()
+        kept = await self_critique(llm, comments)
 
         # All originals retained on critic failure (fail-open, not fail-closed).
         assert len(kept) == 2
@@ -1420,10 +1419,9 @@ class TestSelfCritique:
         """Critic should not call the LLM if there are no comments to verify."""
         from unittest.mock import AsyncMock
 
-        from mira.core.engine import ReviewEngine
+        from mira.core.passes import self_critique
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        kept = await engine._self_critique([])
+        kept = await self_critique(AsyncMock(), [])
         assert kept == []
 
 
@@ -1432,17 +1430,15 @@ class TestSecurityReviewPass:
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_files(self):
-        from mira.core.engine import ReviewEngine
+        from mira.core.passes import security_review_pass
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        out = await engine._security_review_pass([], "title")
+        out = await security_review_pass(AsyncMock(), [], [], "title")
         assert out == []
 
     @pytest.mark.asyncio
     async def test_runs_llm_and_parses_comments(self, sample_diff_text):
         """Happy path: LLM returns a security finding, we get a ReviewComment."""
         from mira.core.diff_parser import parse_diff
-        from mira.core.engine import ReviewEngine
 
         files = parse_diff(sample_diff_text).files
         # Pick a verbatim line from the diff so the existing_code citation
@@ -1475,11 +1471,12 @@ class TestSecurityReviewPass:
                 "metadata": {"reviewed_files": 1},
             }
         )
+        from mira.core.passes import security_review_pass
+
         llm = MagicMock(spec=LLMProvider)
         llm.complete_with_tools = AsyncMock(return_value=canned)
 
-        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=None)
-        out = await engine._security_review_pass(files, "title")
+        out = await security_review_pass(llm, files, files, "title")
         assert len(out) == 1
         # Engine forces category=security regardless of what the LLM returned.
         assert out[0].category == "security"
@@ -1489,14 +1486,13 @@ class TestSecurityReviewPass:
     async def test_returns_empty_on_llm_failure(self, sample_diff_text):
         """LLM error must not crash — return empty so main review proceeds."""
         from mira.core.diff_parser import parse_diff
-        from mira.core.engine import ReviewEngine
+        from mira.core.passes import security_review_pass
 
         files = parse_diff(sample_diff_text).files
         llm = MagicMock(spec=LLMProvider)
         llm.complete_with_tools = AsyncMock(side_effect=RuntimeError("LLM down"))
 
-        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=None)
-        out = await engine._security_review_pass(files, "title")
+        out = await security_review_pass(llm, files, files, "title")
         assert out == []
 
 
@@ -1520,16 +1516,15 @@ class TestRegenerateSummary:
     @pytest.mark.asyncio
     async def test_returns_no_issues_when_nothing_filed(self):
         """Empty inputs short-circuit before any LLM call."""
-        from mira.core.engine import ReviewEngine
+        from mira.core.passes import regenerate_summary
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        out = await engine._regenerate_summary([], [], "title", "desc", fallback="x")
+        out = await regenerate_summary(AsyncMock(), [], [], "title", "desc", fallback="x")
         assert out == "No issues found."
 
     @pytest.mark.asyncio
     async def test_uses_cheap_llm_output(self, monkeypatch):
         """Successful regen returns the cheap LLM's prose, stripped."""
-        from mira.core.engine import ReviewEngine
+        from mira.core.passes import regenerate_summary
         from mira.llm import provider as provider_mod
 
         async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
@@ -1537,16 +1532,15 @@ class TestRegenerateSummary:
 
         monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        out = await engine._regenerate_summary(
-            [self._comment()], [], "title", "desc", fallback="old summary"
+        out = await regenerate_summary(
+            AsyncMock(), [self._comment()], [], "title", "desc", fallback="old summary"
         )
         assert out == "Fresh summary based on filed issues only."
 
     @pytest.mark.asyncio
     async def test_falls_back_on_llm_failure(self, monkeypatch):
         """LLM error must not crash the review — use the original summary."""
-        from mira.core.engine import ReviewEngine
+        from mira.core.passes import regenerate_summary
         from mira.llm import provider as provider_mod
 
         async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
@@ -1554,16 +1548,15 @@ class TestRegenerateSummary:
 
         monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        out = await engine._regenerate_summary(
-            [self._comment()], [], "t", "d", fallback="original prose"
+        out = await regenerate_summary(
+            AsyncMock(), [self._comment()], [], "t", "d", fallback="original prose"
         )
         assert out == "original prose"
 
     @pytest.mark.asyncio
     async def test_falls_back_when_llm_returns_empty(self, monkeypatch):
         """Empty LLM output → use fallback so summary is never blank."""
-        from mira.core.engine import ReviewEngine
+        from mira.core.passes import regenerate_summary
         from mira.llm import provider as provider_mod
 
         async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
@@ -1571,8 +1564,9 @@ class TestRegenerateSummary:
 
         monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
 
-        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
-        out = await engine._regenerate_summary([self._comment()], [], "t", "d", fallback="fallback")
+        out = await regenerate_summary(
+            AsyncMock(), [self._comment()], [], "t", "d", fallback="fallback"
+        )
         assert out == "fallback"
 
 

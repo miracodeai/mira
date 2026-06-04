@@ -103,11 +103,9 @@ def find_symbol_by_name(source: str, language: str, name: str) -> SymbolSpan | N
 
 
 def _detect_style(source: str, language: str) -> str:
-    """Detect whether to use indentation-based or brace-based extraction.
-
-    Bug fix: checks for def/class keywords before defaulting to brace-based,
-    so Python files with dict literals aren't misclassified.
-    """
+    """Pick indentation- or brace-based extraction; falls back to a
+    def/class keyword scan so unknown extensions on Python files don't
+    get misclassified as brace-style by dict literals."""
     lang = language.lower().strip()
 
     if lang in _INDENTATION_LANGUAGES:
@@ -133,7 +131,6 @@ def _extract_indentation_based(source: str) -> list[SymbolSpan]:
     while i < len(lines):
         line = lines[i]
 
-        # Check for def or class
         def_match = _PY_DEF.match(line)
         cls_match = _PY_CLASS.match(line)
         match = def_match or cls_match
@@ -148,20 +145,16 @@ def _extract_indentation_based(source: str) -> list[SymbolSpan]:
                 name = cls_match.group(2)
                 kind = "class"
 
-            # Look backward for decorators
             start = i
             while start > 0 and _PY_DECORATOR.match(lines[start - 1]):
                 start -= 1
 
-            # Find end of block by tracking indentation
             end = i + 1
             while end < len(lines):
                 next_line = lines[end]
-                # Skip empty lines
                 if not next_line.strip():
                     end += 1
                     continue
-                # Measure indentation
                 next_indent = len(next_line) - len(next_line.lstrip())
                 if next_indent <= indent:
                     break
@@ -178,8 +171,7 @@ def _extract_indentation_based(source: str) -> list[SymbolSpan]:
                 )
             )
 
-            # For classes, don't skip ahead — let methods inside be found too
-            # But for top-level, skip to end to avoid re-processing inner methods
+            # Stay on the class line so inner methods get found on the next iteration.
             if kind == "class":
                 i += 1
             else:
@@ -213,7 +205,6 @@ def _extract_js_ts(lines: list[str]) -> list[SymbolSpan]:
     while i < len(lines):
         line = lines[i]
 
-        # Check class
         cls_match = _JS_CLASS.match(line)
         if cls_match:
             end = _find_brace_end(lines, i)
@@ -229,7 +220,6 @@ def _extract_js_ts(lines: list[str]) -> list[SymbolSpan]:
             i = end + 1
             continue
 
-        # Check function declaration
         fn_match = _JS_FUNCTION.match(line)
         if fn_match:
             end = _find_brace_end(lines, i)
@@ -245,7 +235,6 @@ def _extract_js_ts(lines: list[str]) -> list[SymbolSpan]:
             i = end + 1
             continue
 
-        # Check arrow function
         arrow_match = _JS_ARROW.match(line)
         if arrow_match:
             end = _find_brace_end(lines, i)
@@ -274,7 +263,6 @@ def _extract_go(lines: list[str]) -> list[SymbolSpan]:
     while i < len(lines):
         line = lines[i]
 
-        # Check func
         fn_match = _GO_FUNC.match(line)
         if fn_match:
             end = _find_brace_end(lines, i)
@@ -290,7 +278,6 @@ def _extract_go(lines: list[str]) -> list[SymbolSpan]:
             i = end + 1
             continue
 
-        # Check type struct
         type_match = _GO_TYPE.match(line)
         if type_match:
             end = _find_brace_end(lines, i)
@@ -319,7 +306,6 @@ def _extract_rust(lines: list[str]) -> list[SymbolSpan]:
     while i < len(lines):
         line = lines[i]
 
-        # Check impl
         impl_match = _RUST_IMPL.match(line)
         if impl_match:
             end = _find_brace_end(lines, i)
@@ -335,7 +321,6 @@ def _extract_rust(lines: list[str]) -> list[SymbolSpan]:
             i = end + 1
             continue
 
-        # Check struct
         struct_match = _RUST_STRUCT.match(line)
         if struct_match:
             end = _find_brace_end(lines, i)
@@ -351,7 +336,6 @@ def _extract_rust(lines: list[str]) -> list[SymbolSpan]:
             i = end + 1
             continue
 
-        # Check fn
         fn_match = _RUST_FN.match(line)
         if fn_match:
             end = _find_brace_end(lines, i)
@@ -380,7 +364,6 @@ def _extract_java(lines: list[str]) -> list[SymbolSpan]:
     while i < len(lines):
         line = lines[i]
 
-        # Check class
         cls_match = _JAVA_CLASS.match(line)
         if cls_match:
             end = _find_brace_end(lines, i)
@@ -396,7 +379,6 @@ def _extract_java(lines: list[str]) -> list[SymbolSpan]:
             i = end + 1
             continue
 
-        # Check method
         method_match = _JAVA_METHOD.match(line)
         if method_match:
             end = _find_brace_end(lines, i)
@@ -427,7 +409,6 @@ def _find_brace_end(lines: list[str], start: int) -> int:
     depth = 0
     for i in range(start, len(lines)):
         line = lines[i]
-        # Skip single-line comments and strings (rough heuristic)
         for ch in line:
             if ch == "{":
                 depth += 1

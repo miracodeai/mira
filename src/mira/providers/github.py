@@ -39,10 +39,7 @@ _retry_transient = retry(
     reraise=True,
 )
 
-# GitHub Enterprise Server support: override via MIRA_GITHUB_API_URL.
-# Examples: "https://github.acme-corp.com/api/v3" (REST root), with the
-# corresponding GraphQL endpoint derived by appending "/graphql" if not set
-# explicitly via MIRA_GITHUB_GRAPHQL_URL.
+# GitHub Enterprise: set MIRA_GITHUB_API_URL (and MIRA_GITHUB_GRAPHQL_URL if non-default).
 _GITHUB_API_URL = os.environ.get(
     "MIRA_GITHUB_API_URL",
     "https://api.github.com",
@@ -261,7 +258,6 @@ class GitHubProvider(BaseProvider):
         if not result.comments:
             return
 
-        # Build inline comments (no retry needed for local formatting).
         review_comments: list[dict[str, str | int]] = []
         for comment in result.comments:
             body = _format_comment_body(comment, bot_name=bot_name)
@@ -269,7 +265,6 @@ class GitHubProvider(BaseProvider):
                 "path": comment.path,
                 "body": body,
             }
-            # PyGithub uses 'line' for single-line, 'start_line'+'line' for multi-line
             if comment.end_line and comment.end_line > comment.line:
                 rc["start_line"] = comment.line
                 rc["line"] = comment.end_line
@@ -294,7 +289,6 @@ class GitHubProvider(BaseProvider):
                 raise ProviderError("PR has no commits")
             latest_commit = commits[-1]
 
-            # Try posting all comments as a single review first
             try:
                 pr.create_review(
                     commit=latest_commit,
@@ -311,21 +305,9 @@ class GitHubProvider(BaseProvider):
                     exc.data,
                 )
 
-            # Fallback: post each comment individually via the standalone
-            # /comments endpoint (``create_review_comment``) rather than
-            # wrapping each in another /reviews call. The /reviews endpoint
-            # has stricter atomicity validation that returns vague 422s
-            # for some valid-looking requests; /comments accepts the same
-            # request shape with more lenient checking. We accept the
-            # tradeoff that the inlines aren't grouped under a single
-            # "review" object — they still appear as inline comments on
-            # the PR, which is what the user actually sees.
-            #
-            # We log the *full* 422 body for each skipped comment rather
-            # than assuming "line not in diff" — GitHub also returns 422
-            # with vague "internal error" bodies for things like stale
-            # commit refs and validation hiccups, and conflating those
-            # with line-mismatch loses important diagnostic info.
+            # Per-comment fallback via /comments — looser 422 validation
+            # than /reviews. Inlines aren't grouped under a review object,
+            # but they still show up on the PR.
             posted = 0
             for rc in review_comments:
                 try:
@@ -358,9 +340,7 @@ class GitHubProvider(BaseProvider):
                     else:
                         raise
 
-            # Always make sure SOMETHING posts. If every inline failed,
-            # post the summary + Key Issues table on its own so the user
-            # at least sees the review existed.
+            # If every inline failed, post the summary alone so the review still shows up.
             if posted == 0 and review_body:
                 try:
                     pr.create_review(
@@ -443,7 +423,6 @@ class GitHubProvider(BaseProvider):
         def _reply() -> None:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
-            # PyGithub exposes this as `create_review_comment_reply` on the PR.
             pr.create_review_comment_reply(comment_id, body)
 
         try:
@@ -480,8 +459,6 @@ class GitHubProvider(BaseProvider):
     async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
         @_retry_transient
         async def _resolve() -> int:
-            # Step 1: Paginate through review threads and collect bot-authored
-            # unresolved threads that GitHub has marked as outdated.
             bot_login: str | None = None
             thread_ids: list[str] = []
             total_unresolved = 0
@@ -527,7 +504,6 @@ class GitHubProvider(BaseProvider):
                 len(thread_ids),
             )
 
-            # Step 2: Resolve each collected outdated thread
             for thread_id in thread_ids:
                 await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
 
@@ -792,9 +768,6 @@ class GitHubProvider(BaseProvider):
                 return None
             cursor = page.get("endCursor")
             if cursor is None:
-                # Defensive: GitHub shouldn't ever return hasNextPage=True with
-                # a null endCursor, but a malformed response would otherwise
-                # send the same query forever.
                 logger.warning(
                     "hasNextPage=True but endCursor is None for comment %s; stopping pagination",
                     comment_node_id,
@@ -908,8 +881,6 @@ class GitHubProvider(BaseProvider):
                 commit = item.get("commit") or {}
                 author = commit.get("author") or {}
                 message = (commit.get("message") or "").strip()
-                # Trim multi-line messages — first paragraph is typically the
-                # imperative subject and is enough context for the LLM.
                 short_message = message.split("\n\n", 1)[0][:300]
                 entries.append(
                     FileHistoryEntry(
@@ -960,7 +931,6 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to fetch human review comments: {e}") from e
 
 
-# Reverse maps for parsing bot comment metadata
 _LABEL_TO_CATEGORY = {label: cat for cat, (_, label) in _CATEGORY_DISPLAY.items()}
 _CATEGORY_EMOJI_TO_NAME = {emoji: cat for cat, (emoji, _) in _CATEGORY_DISPLAY.items()}
 _SEVERITY_EMOJI_MAP: dict[str, str] = {
@@ -1059,14 +1029,10 @@ def _strip_suggestion_fences(text: str) -> str:
     - Any remaining triple-backtick-only lines in the middle
     """
     lines = text.split("\n")
-    # Strip leading fence
     if lines and _FENCE_RE.match(lines[0].strip()):
         lines = lines[1:]
-    # Strip trailing fence
     if lines and _FENCE_RE.match(lines[-1].strip()):
         lines = lines[:-1]
-    # Remove any remaining triple-backtick-only lines (shouldn't appear in
-    # real code, but LLMs sometimes produce them)
     lines = [ln for ln in lines if not re.fullmatch(r"`{3,}\s*", ln.strip())]
     return "\n".join(lines)
 
@@ -1102,15 +1068,12 @@ def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -
     parts.append(comment.body)
 
     if comment.suggestion:
-        # Unescape HTML entities that LLMs sometimes produce in code suggestions
         import html
 
         clean_suggestion = html.unescape(comment.suggestion)
-        # Strip triple-backtick fences the LLM may have wrapped around the code
         clean_suggestion = _strip_suggestion_fences(clean_suggestion)
 
-        # Ensure the body has balanced code fences so an unclosed fence
-        # doesn't swallow the suggestion block.
+        # Close any unbalanced fence in the body so it doesn't swallow the suggestion.
         _close_open_fences(parts)
 
         parts.append("")
@@ -1126,17 +1089,8 @@ def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -
             clean = _html_mod.unescape(comment.suggestion)
             prompt_text += f"\n\nApply this code change:\n\n{clean}"
 
-        # Use a markdown fence inside the ``<details>`` block (not
-        # ``<pre>``). GitHub's review-comment endpoint silently rejects
-        # comment bodies containing certain raw-HTML constructs — a
-        # ``<pre>{escaped}</pre>`` block on PR#41 produced 422 "internal
-        # error" responses with no useful diagnostics. The format that
-        # actually posts (and was used successfully on PR#40 et al.) is
-        # a fenced code block with blank lines separating it from the
-        # surrounding ``<details>`` HTML, so GitHub parses the inner
-        # text as markdown rather than raw HTML. _html_mod stays
-        # imported above for parity with the previous unescape on
-        # ``comment.suggestion`` if it ever needs to grow.
+        # GitHub returned 422 "internal error" for <pre>-wrapped agent_prompt
+        # on PR#41; use a fenced code block with surrounding blank lines instead.
         max_run = 0
         run = 0
         for ch in prompt_text:

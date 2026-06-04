@@ -115,7 +115,8 @@ export function SetupModal({
       <DialogContent className="sm:max-w-md [&>button]:hidden">
         <DialogHeader>
           <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="Mira" className="h-8 w-8" />
+            <img src="/logo.png" alt="Mira" className="hidden h-8 w-8 dark:block" />
+            <img src="/logo-light.png" alt="Mira" className="h-8 w-8 dark:hidden" />
             <div>
               <DialogTitle>Set up {orgName}</DialogTitle>
               <DialogDescription>

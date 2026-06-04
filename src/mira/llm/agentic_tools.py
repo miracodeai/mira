@@ -23,10 +23,6 @@ from mira.index.context import SourceFetcher
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas (OpenAI function-calling format)
-# ---------------------------------------------------------------------------
-
 READ_FILE_TOOL = {
     "type": "function",
     "function": {
@@ -95,10 +91,6 @@ GREP_REPO_TOOL = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Executor
-# ---------------------------------------------------------------------------
 
 # Hard caps to keep tool output from blowing up the prompt or the API budget.
 _MAX_FILE_BYTES = 12_000  # ~3k tokens of source; truncate larger files
@@ -187,7 +179,6 @@ class AgenticToolExecutor:
         if not self.repo_tree:
             return "[grep unavailable: repo tree not loaded]"
 
-        # Path filter
         candidates: list[str]
         if path_glob:
             candidates = [p for p in self.repo_tree if fnmatch.fnmatch(p, path_glob)]
@@ -199,12 +190,12 @@ class AgenticToolExecutor:
                 rx = re.compile(pattern)
             except re.error:
                 # Treat as substring on regex error.
-                hits = [p for p in candidates if pattern in p][:_MAX_GREP_HITS]
+                path_hits = [p for p in candidates if pattern in p][:_MAX_GREP_HITS]
             else:
-                hits = [p for p in candidates if rx.search(p)][:_MAX_GREP_HITS]
-            if not hits:
+                path_hits = [p for p in candidates if rx.search(p)][:_MAX_GREP_HITS]
+            if not path_hits:
                 return f"[no path matches for `{pattern}`]"
-            return "Path matches:\n" + "\n".join(f"- `{p}`" for p in hits)
+            return "Path matches:\n" + "\n".join(f"- `{p}`" for p in path_hits)
 
         try:
             rx = re.compile(pattern)
@@ -234,9 +225,7 @@ class AgenticToolExecutor:
 
         hits: list[str] = []
         files_scanned = 0
-        # Keep this small — we're scanning files via the source_fetcher so
-        # each file is a network call. The intent is to find a known signal,
-        # not crawl the whole repo.
+        # Each scanned file is a network round-trip via source_fetcher; keep tight.
         max_files_to_scan = 15
 
         for cand in candidates:

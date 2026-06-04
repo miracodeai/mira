@@ -423,7 +423,7 @@ def parse_manifest(path: str, content: str) -> list[ParsedPackage]:
     for pattern, fn in _PARSERS:
         if pattern.search(path):
             try:
-                return fn(content, path)  # type: ignore[misc]
+                return fn(content, path)  # type: ignore[operator]
             except Exception as exc:
                 logger.warning("Parser failed on %s: %s", path, exc)
                 return []

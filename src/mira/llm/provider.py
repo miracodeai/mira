@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import ClassVar
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -23,10 +24,6 @@ def _is_openrouter(base_url: str) -> bool:
     portable OpenAI-compatible request shape."""
     return base_url.rstrip("/") == _OPENROUTER_BASE_URL.rstrip("/")
 
-
-# ---------------------------------------------------------------------------
-# Tool schemas for structured output via function/tool calling
-# ---------------------------------------------------------------------------
 
 SUBMIT_REVIEW_TOOL = {
     "type": "function",
@@ -286,12 +283,10 @@ def _get_api_key(config: LLMConfig) -> str:
     that don't require auth.
     """
     if config.api_key_env == "":
-        # Explicit opt-out — local endpoint with no auth.
         return ""
     key = os.environ.get(config.api_key_env, "")
     if not key:
-        # Back-compat fallback so existing OPENROUTER_API_KEY / OPENAI_API_KEY
-        # setups keep working without changes.
+        # Back-compat with pre-`api_key_env` setups.
         key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
     if not key:
         raise LLMError(
@@ -323,6 +318,9 @@ def _strip_model_prefix(model: str, base_url: str) -> str:
 
 class LLMProvider:
     """Direct OpenRouter API client for LLM completions."""
+
+    supports_json_mode: ClassVar[bool] = True
+    supports_tool_calling: ClassVar[bool] = True
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
@@ -385,7 +383,6 @@ class LLMProvider:
 
         content = data["choices"][0]["message"].get("content") or ""
 
-        # Track usage
         usage = data.get("usage")
         if usage:
             self.total_prompt_tokens += usage.get("prompt_tokens", 0)
@@ -430,13 +427,11 @@ class LLMProvider:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
 
-        # Track usage
         usage = data.get("usage")
         if usage:
             self.total_prompt_tokens += usage.get("prompt_tokens", 0)
             self.total_completion_tokens += usage.get("completion_tokens", 0)
 
-        # Extract tool call arguments
         message = data["choices"][0]["message"]
         tool_calls = message.get("tool_calls")
 

@@ -505,7 +505,7 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
             }
         )
     )
-    monkeypatch.setattr(handlers, "LLMProvider", lambda *a, **kw: fake_llm)
+    monkeypatch.setattr(handlers, "create_llm", lambda *a, **kw: fake_llm)
 
     payload = {
         "action": "closed",

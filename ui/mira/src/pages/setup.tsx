@@ -61,7 +61,8 @@ export function SetupPage() {
   return (
     <div className="mx-auto max-w-lg space-y-6 px-4 py-16">
       <div className="text-center">
-        <img src="/logo.png" alt="Mira" className="mx-auto mb-4 h-12 w-12" />
+        <img src="/logo.png" alt="Mira" className="mx-auto mb-4 hidden h-12 w-12 dark:block" />
+        <img src="/logo-light.png" alt="Mira" className="mx-auto mb-4 h-12 w-12 dark:hidden" />
         <h1 className="text-2xl font-semibold tracking-tight">
           Welcome to Mira
         </h1>

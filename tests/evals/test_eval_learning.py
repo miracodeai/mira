@@ -188,7 +188,7 @@ class TestRulesInfluenceReview:
         # least once across N trials.
         engine._pr_info = _fake_pr_info(owner, repo)
         all_comments: list[list[str]] = []
-        for _ in range(3):
+        for _ in range(5):
             result = await engine.review_diff(scenario.target_diff)
             comments_text = [(c.title + " " + c.body).lower() for c in result.comments]
             all_comments.append([c.title for c in result.comments])
