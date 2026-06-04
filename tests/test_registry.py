@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from mira.llm import registry
 
 
@@ -43,7 +41,7 @@ class TestMiniMaxInRegistry:
         assert out == 2.50
 
     def test_minimax_max_output_tokens(self):
-        assert registry.max_output_tokens("minimax/MiniMax-M2.7") == 16384
+        assert registry.max_output_tokens("minimax/MiniMax-M2.7") == 131072
 
 
 class TestRegistryRegression:

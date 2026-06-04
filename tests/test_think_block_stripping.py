@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from mira.llm.prompts.verify_fixes import parse_verify_fixes_response
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 
@@ -11,7 +9,7 @@ from mira.llm.utils import strip_code_fences, strip_think_blocks
 class TestStripThinkBlocks:
     def test_think_block_with_closing_tag(self):
         """Full <think>… block with both tags — stripped to bare JSON."""
-        raw = "<think> Thinking process here.  ```json\n{\"summary\": \"ok\"}\n```"
+        raw = '<think> Thinking process here.  ```json\n{"summary": "ok"}\n```'
         result = strip_think_blocks(raw)
         assert "<think>" not in result
         assert "<think>" not in result
@@ -27,21 +25,21 @@ class TestStripThinkBlocks:
 
     def test_think_block_in_middle(self):
         """<think> in middle with newlines — stripped to expose JSON."""
-        raw = "prefix <think> thinking\n\n{\"key\":\"value\"}"
+        raw = 'prefix <think> thinking\n\n{"key":"value"}'
         result = strip_think_blocks(raw)
         assert "<think>" not in result
         assert "key" in result
 
     def test_think_block_with_multiline_content(self):
         """Multi-line think block content followed by bare JSON — stripped."""
-        raw = "<think> line1\nline2\nline3\n\n{\"summary\":\"ok\"}"
+        raw = '<think> line1\nline2\nline3\n\n{"summary":"ok"}'
         result = strip_think_blocks(raw)
         assert "<think>" not in result
         assert "summary" in result
 
     def test_think_block_with_code_fences_extracts_json(self):
         """Think blocks with backticks — the JSON inside the fence is extracted and re-serialized."""
-        raw = "<think> analyzing...\n```json\n{\"summary\":\"ok\"}\n```"
+        raw = '<think> analyzing...\n```json\n{"summary":"ok"}\n```'
         result = strip_think_blocks(raw)
         assert "<think>" not in result
         assert "```json" not in result

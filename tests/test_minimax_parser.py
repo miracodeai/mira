@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
-from mira.exceptions import ResponseParseError
 from mira.llm.response_parser import (
     parse_llm_response,
     parse_walkthrough_response,
@@ -34,7 +31,7 @@ class TestParseWithThinkBlocks:
     def test_llm_response_with_think_no_fences_no_truncation(self):
         """Think block without fences — preamble has no backticks but also no newlines
         before the JSON, so no truncation happens. JSON starts immediately after text."""
-        raw = "<think> Summarizing the changes.{\"comments\":[],\"summary\":\"ok\",\"metadata\":{\"reviewed_files\":1}}"
+        raw = '<think> Summarizing the changes.{"comments":[],"summary":"ok","metadata":{"reviewed_files":1}}'
         result = parse_llm_response(raw)
         assert result.comments == []
 
@@ -53,7 +50,7 @@ class TestParseWithThinkBlocks:
 
     def test_walkthrough_response_no_fences_no_truncation(self):
         """Think block without fences and no newlines in preamble — JSON starts after text."""
-        raw = "<think> Summarizing.{\"summary\":\"All good\",\"change_groups\":[]}"
+        raw = '<think> Summarizing.{"summary":"All good","change_groups":[]}'
         result = parse_walkthrough_response(raw)
         assert result.summary == "All good"
 

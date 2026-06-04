@@ -21,7 +21,7 @@ from mira.config import MiraConfig, load_config
 from mira.index.manifests import is_manifest, parse_manifest
 from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
 from mira.llm.provider import LLMProvider
-from mira.llm.utils import strip_code_fences, strip_think_blocks
+from mira.llm.utils import strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
