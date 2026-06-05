@@ -16,7 +16,7 @@ from mira.core.chunker import chunk_files
 from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
 from mira.core.file_filter import filter_files
-from mira.core.noise_filter import filter_noise
+from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
     agentic_review_loop,
     regenerate_summary,
@@ -958,6 +958,17 @@ class ReviewEngine:
             self.config.filter,
             review_round=review_round,
         )
+
+        # Dedupe against still-open threads before self-critique, so we don't
+        # spend critique calls on comments we'd discard anyway.
+        if existing_comments:
+            before = len(final_comments)
+            final_comments = drop_already_posted(final_comments, existing_comments)
+            if before != len(final_comments):
+                logger.info(
+                    "Dropped %d comment(s) duplicating existing open threads",
+                    before - len(final_comments),
+                )
 
         # Self-critique catches confident-but-wrong claims that the noise
         # filter can't, since confidence scores are LLM-generated too. Pass

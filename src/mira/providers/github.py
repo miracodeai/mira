@@ -701,11 +701,12 @@ class GitHubProvider(BaseProvider):
             try:
                 await self._graphql_request(_RESOLVE_THREAD_MUTATION, {"threadId": tid})
                 resolved += 1
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "Failed to resolve thread %s on PR %s",
+                    "Failed to resolve thread %s on PR %s: %s",
                     tid,
                     pr_info.url,
+                    exc,
                 )
         if resolved < len(thread_ids):
             logger.warning(

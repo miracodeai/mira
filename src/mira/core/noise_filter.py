@@ -122,3 +122,33 @@ def filter_noise(
     urgent = [c for c in result if c.severity >= Severity.WARNING]
     low_priority = [c for c in result if c.severity < Severity.WARNING]
     return urgent + low_priority[: config.max_comments]
+
+
+def drop_already_posted(
+    comments: list[ReviewComment],
+    existing_threads: list,
+) -> list[ReviewComment]:
+    """Drop comments that overlap an open bot thread from an earlier round.
+
+    filter_noise dedupes within one review; this dedupes across rounds, so a
+    re-review on the next push doesn't re-post a finding that still has an open
+    thread. Threads with a non-positive line (outdated) can't be located, so
+    they never suppress.
+    """
+    if not existing_threads:
+        return comments
+
+    open_lines: dict[str, list[int]] = {}
+    for t in existing_threads:
+        if t.line > 0:
+            open_lines.setdefault(t.path, []).append(t.line)
+    if not open_lines:
+        return comments
+
+    kept: list[ReviewComment] = []
+    for c in comments:
+        end = c.end_line or c.line
+        if any(c.line <= ln <= end for ln in open_lines.get(c.path, [])):
+            continue
+        kept.append(c)
+    return kept
