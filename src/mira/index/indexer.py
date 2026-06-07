@@ -387,26 +387,36 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
     """Convert LLM output for a single file into a FileSummary."""
     symbols = []
     for sym in file_data.get("symbols", []):
+        if not isinstance(sym, dict):
+            continue
         symbols.append(
             SymbolInfo(
-                name=sym.get("name", ""),
-                kind=sym.get("kind", "function"),
-                signature=sym.get("signature", ""),
-                description=sym.get("description", ""),
+                name=sym.get("name") or "",
+                kind=sym.get("kind") or "function",
+                signature=sym.get("signature") or "",
+                description=sym.get("description") or "",
             )
         )
 
     symbol_refs = []
     for ref in file_data.get("symbol_references", []):
+        if not isinstance(ref, dict):
+            continue
         source_sym = ref.get("source", "")
         for call in ref.get("calls", []):
+            if not isinstance(call, dict):
+                continue
             target_path = call.get("path", "")
             target_sym = call.get("symbol", "")
-            if source_sym and target_path and target_sym:
-                symbol_refs.append((source_sym, target_path, target_sym))
+            if isinstance(source_sym, str) and isinstance(target_path, str) \
+               and isinstance(target_sym, str):
+                if source_sym and target_path and target_sym:
+                    symbol_refs.append((source_sym, target_path, target_sym))
 
     external_refs = []
     for eref in file_data.get("external_refs", []):
+        if not isinstance(eref, dict):
+            continue
         kind = eref.get("kind", "")
         target = eref.get("target", "")
         if kind and target:
@@ -415,7 +425,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
                     file_path=path,
                     kind=kind,
                     target=target,
-                    description=eref.get("description", ""),
+                    description=eref.get("description") or "",
                 )
             )
 
@@ -424,7 +434,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
         language=file_data.get("language", ""),
         summary=file_data.get("summary", ""),
         symbols=symbols,
-        imports=file_data.get("imports", []),
+        imports=[i for i in file_data.get("imports", []) if isinstance(i, str)],
         symbol_refs=symbol_refs,
         external_refs=external_refs,
         content_hash=_content_hash(content),
@@ -474,7 +484,7 @@ async def _summarize_batch(
     parsed = _parse_summarize_response(raw)
 
     results = []
-    parsed_by_path = {d.get("path", ""): d for d in parsed}
+    parsed_by_path = {d.get("path", ""): d for d in parsed if isinstance(d, dict)}
     for path, content in files:
         if path in parsed_by_path:
             results.append((path, content, parsed_by_path[path]))
@@ -620,6 +630,9 @@ async def index_repo(
                 raise IndexingCancelled(indexed_count)
             results = await fut
             for path, content, data in results:
+                if not isinstance(data, dict):
+                    logger.warning("Skipping %s: LLM returned non-dict summary", path)
+                    continue
                 summary = _build_file_summary(path, content, data)
                 store.upsert_summary(summary)
                 indexed_count += 1
@@ -955,6 +968,9 @@ async def index_diff(
         )
         for results in all_results:
             for path, content, data in results:
+                if not isinstance(data, dict):
+                    logger.warning("Skipping %s: LLM returned non-dict summary", path)
+                    continue
                 summary = _build_file_summary(path, content, data)
                 store.upsert_summary(summary)
                 indexed_count += 1

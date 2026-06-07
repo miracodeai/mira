@@ -453,7 +453,7 @@ class PgIndexStore(_StoreSharedMixin):
             for sym in summary.symbols:
                 cur.execute(
                     "INSERT INTO symbols (owner, repo, file_path, name, kind, signature, description) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                     (
                         self._owner,
                         self._repo,
