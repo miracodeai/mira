@@ -67,7 +67,10 @@ async def handle_installation(
     if not repos:
         try:
             repos_from_api = await app_auth.list_installation_repos(installation_id)
-            repos = [{"full_name": r.get("full_name", "")} for r in repos_from_api]
+            repos = [
+                {"full_name": r.get("full_name", ""), "private": r.get("private", False)}
+                for r in repos_from_api
+            ]
         except Exception as exc:
             logger.warning("Failed to list repos via API: %s", exc)
 
@@ -81,6 +84,8 @@ async def handle_installation(
                 continue
             owner, repo = full_name.split("/", 1)
             app_db.register_repo(owner, repo, installation_id)
+            if "private" in repo_info:
+                app_db.set_repo_visibility(owner, repo, bool(repo_info["private"]))
             logger.info("Registered repo %s (pending indexing)", full_name)
 
         # Count files in background — no LLM, just GitHub API
@@ -170,6 +175,8 @@ async def handle_repos_added(
                 continue
             owner, repo = full_name.split("/", 1)
             app_db.register_repo(owner, repo, installation_id)
+            if "private" in repo_info:
+                app_db.set_repo_visibility(owner, repo, bool(repo_info["private"]))
             logger.info("Registered repo %s (pending indexing)", full_name)
 
         import asyncio
@@ -377,6 +384,9 @@ async def backfill_missing_indexes(
                     continue
                 owner, repo = full_name.split("/", 1)
                 app_db.register_repo(owner, repo, installation_id)
+                # Refresh visibility every startup so the blast-radius privacy
+                # filter has current data — backfills existing rows after upgrade.
+                app_db.set_repo_visibility(owner, repo, bool(repo_info.get("private", False)))
                 registered += 1
 
             # Count files in background

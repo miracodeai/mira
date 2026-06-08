@@ -30,6 +30,11 @@ export function LearnedRulesPage() {
     () => api.listLearnedRules().catch(() => []),
     [],
   )
+  const { data: version } = useAsync(
+    () => api.getVersion().catch(() => null),
+    [],
+  )
+  const botName = version?.bot_name ?? "miracodeai"
 
   // Group by (owner/repo) so the page reads "what Mira learned about each repo"
   const grouped = useMemo(() => {
@@ -62,7 +67,7 @@ export function LearnedRulesPage() {
             <Brain className="mx-auto h-8 w-8 text-muted-foreground" />
             <p className="text-sm font-medium">No learnings yet</p>
             <p className="mx-auto max-w-md text-sm text-muted-foreground">
-              Mira learns from <code className="font-mono">@mira-bot reject</code>{" "}
+              Mira learns from <code className="font-mono">@{botName} reject</code>{" "}
               dismissals and from human review comments on merged PRs. Reach
               ~3 reject signals or merge a PR with substantive review comments to
               see synthesized patterns appear here.

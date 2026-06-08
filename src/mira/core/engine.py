@@ -252,6 +252,24 @@ def _drop_orphan_key_issues(
     return [ki for ki in key_issues if _matches(ki)]
 
 
+def filter_blast_radius_for_visibility(
+    dependents: list[dict],
+    reviewed_private: bool | None,
+    dependent_private: Callable[[str], bool | None],
+) -> list[dict]:
+    """Keep blast-radius dependents safe to name in the reviewed repo's review.
+
+    A public review is world-readable, so it must only name repos already
+    known to be public. If the reviewed repo is *known* private, keep all
+    dependents; otherwise (public or unknown) keep only dependents that are
+    *known* public. ``dependent_private`` maps "owner/repo" → True/False/None,
+    where None (unknown) is treated as private.
+    """
+    if reviewed_private is True:
+        return dependents
+    return [d for d in dependents if dependent_private(d["repo"]) is False]
+
+
 class ReviewEngine:
     """Orchestrates the full PR review pipeline."""
 
@@ -471,9 +489,37 @@ class ReviewEngine:
                                 for e in edges
                                 if e.target_repo == full_name
                             ]
+                            rs.close()
+
+                            # Privacy: a public repo's review is world-readable,
+                            # so it must not name dependents that aren't known
+                            # public. Filter unless the reviewed repo is *known*
+                            # private; keep only dependents known public. Unknown
+                            # visibility (NULL) is treated as private — safe until
+                            # a sync records the real value.
+                            from mira.dashboard.api import _app_db
+
+                            def _dep_private(name: str) -> bool | None:
+                                parts = name.split("/", 1)
+                                rec = _app_db.get_repo(*parts) if len(parts) == 2 else None
+                                return rec.private if rec else None
+
+                            reviewed = _app_db.get_repo(pr_info.owner, pr_info.repo)
+                            kept = filter_blast_radius_for_visibility(
+                                dependents,
+                                reviewed.private if reviewed else None,
+                                _dep_private,
+                            )
+                            if len(kept) != len(dependents):
+                                logger.info(
+                                    "Blast radius: hid %d dependent(s) not known-public from %s",
+                                    len(dependents) - len(kept),
+                                    full_name,
+                                )
+                            dependents = kept
+
                             if dependents:
                                 cross_repo_blast = dependents
-                            rs.close()
                         except Exception:
                             pass
 

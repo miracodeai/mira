@@ -264,6 +264,9 @@ async function patchJson<T>(path: string): Promise<T> {
 // ── API functions ──
 
 export const api = {
+  getVersion: () =>
+    fetchJson<{ version: string; bot_name: string }>("/api/version"),
+
   getSetupStatus: () =>
     fetchJson<{ setup_complete: boolean; repo_count: number }>("/api/setup/status"),
 

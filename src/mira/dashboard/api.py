@@ -266,11 +266,17 @@ class IndexStatusModel(BaseModel):
 
 @router.get("/api/version")
 def get_version() -> dict[str, str]:
-    """Return the running Mira version. The dashboard renders this next to
-    the logo so self-hosters can see at a glance which release they're on."""
+    """Return the running Mira version and the bot's @mention handle. The
+    dashboard renders the version next to the logo, and uses bot_name so help
+    text shows the real handle instead of a hardcoded placeholder. bot_name is
+    persisted by `mira serve` (env override, else the App's auto-detected slug);
+    falls back to "miracodeai" before the server has recorded it."""
     from mira import __version__
 
-    return {"version": __version__}
+    return {
+        "version": __version__,
+        "bot_name": _app_db.get_setting("bot_name") or "miracodeai",
+    }
 
 
 @router.get("/api/indexing/status", response_model=list[IndexStatusModel])
@@ -609,6 +615,7 @@ async def sync_repos() -> dict:
                     owner, repo = full_name.split("/", 1)
                     actual_repos.add((owner, repo))
                     _app_db.register_repo(owner, repo, inst_id)
+                    _app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
             # Count files in background
             _asyncio.create_task(_count_files_for_repos(auth, inst_id, repos_list))
     except Exception as exc:
@@ -661,6 +668,7 @@ async def get_setup_status() -> dict:
                         if "/" in full_name:
                             owner, repo = full_name.split("/", 1)
                             _app_db.register_repo(owner, repo, inst_id)
+                            _app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
                             repo_count += 1
                     # Count files in background
                     _asyncio.create_task(_count_files_for_repos(auth, inst_id, repos_list))

@@ -315,6 +315,15 @@ def serve(
         bot_name = asyncio.run(app_auth.get_app_slug()) or "miracodeai"
         click.echo(f"Detected bot @mention: @{bot_name}")
 
+    # Persist the resolved name so the dashboard UI can show the real handle
+    # (it reads this via /api/version) instead of a hardcoded placeholder.
+    try:
+        from mira.dashboard.api import _app_db
+
+        _app_db.set_setting("bot_name", bot_name)
+    except Exception as exc:
+        click.echo(f"Warning: could not persist bot_name for the dashboard: {exc}")
+
     app = create_app(
         app_auth=app_auth,
         webhook_secret=webhook_secret,

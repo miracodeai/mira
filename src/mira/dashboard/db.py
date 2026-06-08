@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS repos (
     -- etc. at indexing time; injected into review prompts so Mira flags
     -- team-specific violations (not just generic best-practices).
     conventions TEXT NOT NULL DEFAULT '',
+    -- GitHub repo visibility; keeps private repo names out of the blast-radius
+    -- section of a public repo's review. NULL = not yet known (treated as
+    -- private until a sync/PR/install event records the real value).
+    private INTEGER,
     PRIMARY KEY (owner, repo)
 );
 
@@ -126,6 +130,9 @@ CREATE TABLE IF NOT EXISTS repos (
     last_indexed_at TIMESTAMPTZ,
     -- Team coding conventions extracted at indexing time.
     conventions TEXT NOT NULL DEFAULT '',
+    -- GitHub repo visibility; keeps private repo names out of a public review.
+    -- NULL = not yet known (treated as private until a sync records it).
+    private BOOLEAN,
     PRIMARY KEY (owner, repo)
 );
 
@@ -226,6 +233,7 @@ class RepoRecord:
     updated_at: float = 0.0
     last_indexed_at: float = 0.0  # 0.0 means never
     conventions: str = ""
+    private: bool | None = None  # None = visibility not yet known
 
 
 def _hash_password(password: str) -> str:
@@ -277,6 +285,11 @@ class AppDatabase:
             self._sqlite_conn.execute(
                 "ALTER TABLE repos ADD COLUMN conventions TEXT NOT NULL DEFAULT ''"
             )
+        if "private" not in cols:
+            # Nullable, no default — existing rows become NULL ("unknown"),
+            # which the blast-radius filter treats as private until a sync
+            # records the real visibility.
+            self._sqlite_conn.execute("ALTER TABLE repos ADD COLUMN private INTEGER")
         progress_cols = {
             r[1]
             for r in self._sqlite_conn.execute("PRAGMA table_info(pr_review_progress)").fetchall()
@@ -304,6 +317,7 @@ class AppDatabase:
                 cur.execute(
                     "ALTER TABLE repos ADD COLUMN IF NOT EXISTS conventions TEXT NOT NULL DEFAULT ''"
                 )
+                cur.execute("ALTER TABLE repos ADD COLUMN IF NOT EXISTS private BOOLEAN")
                 cur.execute(
                     "ALTER TABLE pr_review_progress ADD COLUMN IF NOT EXISTS "
                     "last_reviewed_sha TEXT NOT NULL DEFAULT ''"
@@ -676,7 +690,7 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             rows = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
                 "FROM repos ORDER BY owner, repo"
             ).fetchall()
             return [
@@ -693,6 +707,7 @@ class AppDatabase:
                     updated_at=r[9],
                     last_indexed_at=r[10] or 0.0,
                     conventions=r[11] or "",
+                    private=(None if r[12] is None else bool(r[12])),
                 )
                 for r in rows
             ]
@@ -700,7 +715,7 @@ class AppDatabase:
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
                 "FROM repos ORDER BY owner, repo"
             )
             return [
@@ -717,6 +732,7 @@ class AppDatabase:
                     updated_at=r[9].timestamp() if r[9] else 0.0,
                     last_indexed_at=r[10].timestamp() if r[10] else 0.0,
                     conventions=r[11] or "",
+                    private=(None if r[12] is None else bool(r[12])),
                 )
                 for r in cur.fetchall()
             ]
@@ -726,7 +742,7 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
                 "FROM repos WHERE owner=? AND repo=?",
                 (owner, repo),
             ).fetchone()
@@ -744,13 +760,14 @@ class AppDatabase:
                     updated_at=row[9],
                     last_indexed_at=row[10] or 0.0,
                     conventions=row[11] or "",
+                    private=(None if row[12] is None else bool(row[12])),
                 )
             return None
         assert self._pg_conn is not None
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
                 "FROM repos WHERE owner=%s AND repo=%s",
                 (owner, repo),
             )
@@ -771,6 +788,7 @@ class AppDatabase:
                     updated_at=row[9].timestamp() if row[9] else 0.0,
                     last_indexed_at=row[10].timestamp() if row[10] else 0.0,
                     conventions=row[11] or "",
+                    private=(None if row[12] is None else bool(row[12])),
                 )
             return None
 
@@ -791,6 +809,27 @@ class AppDatabase:
                     "UPDATE repos SET conventions=%s WHERE owner=%s AND repo=%s",
                     (conventions, owner, repo),
                 )
+
+    def set_repo_visibility(self, owner: str, repo: str, private: bool) -> None:
+        """Record a repo's GitHub visibility. Updates the existing row only;
+        no-op if the repo isn't registered yet (it'll be set on next sync)."""
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(
+                "UPDATE repos SET private=? WHERE owner=? AND repo=?",
+                (1 if private else 0, owner, repo),
+            )
+            self._sqlite_conn.commit()
+        else:
+            assert self._pg_conn is not None
+            with self._pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE repos SET private=%s WHERE owner=%s AND repo=%s",
+                    (private, owner, repo),
+                )
+            # Explicit commit mirrors set_last_reviewed_sha — the connection is
+            # autocommit today, but this keeps the write safe if that changes.
+            self._pg_conn.commit()
 
     # ── Settings ──
 

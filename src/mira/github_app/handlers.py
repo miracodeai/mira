@@ -104,6 +104,10 @@ async def handle_pull_request(
         # Check if repo is indexed
         from mira.dashboard.api import _app_db
 
+        # Keep visibility current — the blast-radius filter relies on it to
+        # avoid naming private repos in a public repo's review.
+        _app_db.set_repo_visibility(owner, repo, bool(payload["repository"].get("private", False)))
+
         repo_record = _app_db.get_repo(owner, repo)
         is_indexed = bool(repo_record and repo_record.status == "ready")
 
