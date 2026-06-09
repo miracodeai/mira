@@ -2,11 +2,11 @@ import { Plus, Trash2, Users as UsersIcon } from "lucide-react"
 import { useState } from "react"
 import { useNavigate } from "react-router"
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { ConfirmButton } from "@/components/ui/confirm-button"
+import { UserAvatar } from "@/components/ui/user-avatar"
 import {
   Table,
   TableBody,
@@ -96,11 +96,7 @@ export function UsersPage() {
                 <TableRow key={u.id}>
                   <TableCell>
                     <div className="flex items-center gap-3">
-                      <Avatar className="h-8 w-8">
-                        <AvatarFallback>
-                          {u.username.slice(0, 2).toUpperCase()}
-                        </AvatarFallback>
-                      </Avatar>
+                      <UserAvatar seed={u.username} className="h-8 w-8" />
                       <span className="font-medium">{u.username}</span>
                       {u.id === currentUser.id && (
                         <span className="text-xs text-muted-foreground">

@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Brain,
+  ChevronsUpDown,
   Database,
   GitFork,
   LayoutDashboard,
@@ -29,6 +30,14 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
@@ -44,6 +53,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
+import { UserAvatar } from "@/components/ui/user-avatar"
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
@@ -227,12 +237,37 @@ function UserMenu() {
   const { user, logout } = useAuth()
   if (!user) return null
 
+  const role = user.is_admin ? "Admin" : "User"
+
   return (
     <SidebarMenuItem>
-      <SidebarMenuButton size="sm" onClick={logout}>
-        <LogOut className="h-4 w-4" />
-        <span className="text-xs">{user.username}</span>
-      </SidebarMenuButton>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <SidebarMenuButton size="lg">
+            <UserAvatar seed={user.username} className="size-7" />
+            <div className="flex flex-col leading-tight">
+              <span className="text-xs font-medium">{user.username}</span>
+              <span className="text-[10px] text-muted-foreground">{role}</span>
+            </div>
+            <ChevronsUpDown className="ml-auto size-4" />
+          </SidebarMenuButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="top" align="start" className="min-w-52">
+          <DropdownMenuLabel>
+            <div className="flex items-center gap-2">
+              <UserAvatar seed={user.username} className="size-7" />
+              <div className="flex flex-col leading-tight">
+                <span className="text-sm font-medium">{user.username}</span>
+                <span className="text-xs text-muted-foreground">{role}</span>
+              </div>
+            </div>
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem variant="destructive" onClick={logout}>
+            <LogOut /> Log out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </SidebarMenuItem>
   )
 }
