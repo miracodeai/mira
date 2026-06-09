@@ -20,7 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { api, type OrgVulnerabilityModel } from "@/lib/api"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 const SEVERITY_LABELS: Record<string, string> = {
   critical: "Critical",
@@ -117,6 +117,7 @@ function groupVulns(vulns: OrgVulnerabilityModel[]): VulnGroup[] {
 }
 
 export function VulnerabilitiesPage() {
+  useDocumentTitle("Vulnerabilities")
   const { data: vulns, loading } = useAsync<OrgVulnerabilityModel[]>(
     () => api.listOrgVulnerabilities().catch(() => []),
     [],

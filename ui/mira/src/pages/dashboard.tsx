@@ -27,9 +27,10 @@ import {
 } from "@/components/ui/chart"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api } from "@/lib/api"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function DashboardPage() {
+  useDocumentTitle("Dashboard")
   const [period, setPeriod] = useState<"day" | "week" | "month">("day")
 
   const { data: stats, loading: statsLoading } = useAsync(() => api.getOrgStats(), [])

@@ -19,8 +19,10 @@ import {
 } from "@/components/ui/select"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { useDocumentTitle } from "@/lib/hooks"
 
 export function SettingsPage() {
+  useDocumentTitle("Settings")
   const { user: currentUser } = useAuth()
 
   const [indexingModel, setIndexingModel] = useState("")

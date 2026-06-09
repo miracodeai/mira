@@ -27,3 +27,21 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
 
   return { data, loading, error }
 }
+
+const APP_NAME = "Mira"
+
+/**
+ * Sets the browser tab title to `${title} · Mira` for the lifetime of the
+ * calling page, restoring the previous title on unmount. Pass `null` (e.g.
+ * while data is still loading) to leave the bare app name in place rather than
+ * flashing a placeholder.
+ */
+export function useDocumentTitle(title: string | null) {
+  useEffect(() => {
+    const previous = document.title
+    document.title = title ? `${title} · ${APP_NAME}` : APP_NAME
+    return () => {
+      document.title = previous
+    }
+  }, [title])
+}
