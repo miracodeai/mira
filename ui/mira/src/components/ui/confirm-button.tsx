@@ -2,6 +2,11 @@ import { useState, type ComponentProps } from "react"
 
 import { Button } from "@/components/ui/button"
 import { ConfirmDialog } from "@/components/ui/confirm-dialog"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 /**
  * A button that asks for confirmation before running its action. Drop it in
@@ -17,6 +22,7 @@ export function ConfirmButton({
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   destructive = false,
+  tooltip,
   children,
   ...buttonProps
 }: {
@@ -26,6 +32,7 @@ export function ConfirmButton({
   confirmLabel?: string
   cancelLabel?: string
   destructive?: boolean
+  tooltip?: string
 } & ComponentProps<typeof Button>) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -40,19 +47,30 @@ export function ConfirmButton({
     }
   }
 
+  const trigger = (
+    <Button
+      type="button"
+      {...buttonProps}
+      onClick={(e) => {
+        // Don't let the click bubble to a clickable row/card behind it.
+        e.stopPropagation()
+        setOpen(true)
+      }}
+    >
+      {children}
+    </Button>
+  )
+
   return (
     <>
-      <Button
-        type="button"
-        {...buttonProps}
-        onClick={(e) => {
-          // Don't let the click bubble to a clickable row/card behind it.
-          e.stopPropagation()
-          setOpen(true)
-        }}
-      >
-        {children}
-      </Button>
+      {tooltip ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+          <TooltipContent>{tooltip}</TooltipContent>
+        </Tooltip>
+      ) : (
+        trigger
+      )}
       <ConfirmDialog
         open={open}
         onOpenChange={setOpen}
