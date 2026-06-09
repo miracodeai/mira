@@ -15,7 +15,6 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
-import { Separator } from "@/components/ui/separator"
 import {
   Sidebar,
   SidebarContent,
@@ -156,8 +155,16 @@ export function DashboardLayout() {
             <SidebarGroupContent>
               <SidebarMenu>
                 {visibleNav.map((item) => (
+                  // Active state is driven entirely by NavLink: it sets
+                  // aria-current="page" on the active link (with the same
+                  // prefix matching `end` controls), so styling off
+                  // aria-current keeps a single source of truth instead of
+                  // recomputing the match here.
                   <SidebarMenuItem key={item.to}>
-                    <SidebarMenuButton asChild>
+                    <SidebarMenuButton
+                      asChild
+                      className="aria-[current=page]:bg-sidebar-accent aria-[current=page]:font-semibold aria-[current=page]:text-sidebar-accent-foreground"
+                    >
                       <NavLink to={item.to} end={item.to === "/"}>
                         <item.icon />
                         <span>{item.label}</span>
@@ -185,7 +192,6 @@ export function DashboardLayout() {
       <SidebarInset>
         <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
           <SidebarTrigger className="-ml-1" />
-          <Separator orientation="vertical" className="mr-2 h-4" />
           <AppBreadcrumb />
         </header>
         <main className="flex-1 overflow-auto">
