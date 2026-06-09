@@ -207,6 +207,7 @@ class WalkthroughResult:
         total_paths: list[str] | None = None,
         index_was_empty: bool = False,
         dashboard_url: str = "",
+        overlaps: list[OverlapFinding] | None = None,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -244,6 +245,30 @@ class WalkthroughResult:
                     parts.append(f"- `{ki.path}:{ki.line}` — {ki.issue}")
             parts.append("")
             parts.append("</details>")
+
+        if overlaps:
+            _kind_label = {
+                "merge_conflict": "merge-conflict risk",
+                "duplicate_effort": "duplicate effort",
+                "both": "duplicate effort + merge-conflict risk",
+            }
+            parts.append("")
+            parts.append(
+                "> **⚠️ Potential overlap with other open PRs** — "
+                "these may be stepping on this one:"
+            )
+            parts.append(">")
+            for ov in overlaps:
+                label = _kind_label.get(ov.kind, ov.kind)
+                link = f"[#{ov.pr_number}]({ov.url})" if ov.url else f"#{ov.pr_number}"
+                line = f"> - {link} ({label}) — {ov.reason}"
+                if ov.shared_files:
+                    shown = ", ".join(f"`{p}`" for p in ov.shared_files[:3])
+                    if len(ov.shared_files) > 3:
+                        shown += f" +{len(ov.shared_files) - 3} more"
+                    line += f" Shared: {shown}"
+                parts.append(line)
+            parts.append("")
 
         if blast_radius:
             parts.append("")
@@ -371,6 +396,59 @@ class PRInfo:
     repo: str
     # Round 2+ reviews diff against last_reviewed_sha → head_sha; empty falls back to full diff.
     head_sha: str = ""
+
+
+@dataclass
+class OpenPRRef:
+    """Lightweight handle on another open PR in the same repo.
+
+    Built from the GitHub "list pull requests" API — just enough to decide
+    whether the PR is worth comparing against the one under review (without
+    fetching its full diff up front).
+    """
+
+    number: int
+    title: str
+    body: str
+    head_sha: str
+    author: str
+    draft: bool = False
+    base_ref: str = ""
+    head_ref: str = ""
+    url: str = ""
+
+
+@dataclass
+class PRFingerprint:
+    """A compact signature of a PR's changes, cached per repo.
+
+    Populated for a PR the moment Mira reviews it (the diff is already in
+    hand), so a later review of a *different* PR can compare against it with a
+    cheap DB read instead of re-fetching this PR's files from GitHub.
+    """
+
+    pr_number: int
+    head_sha: str
+    title: str
+    body: str
+    paths: list[str] = field(default_factory=list)
+    symbols: list[str] = field(default_factory=list)
+    updated_at: float = 0.0
+
+
+@dataclass
+class OverlapFinding:
+    """A confirmed overlap between the PR under review and another open PR."""
+
+    pr_number: int
+    url: str
+    title: str
+    # 'merge_conflict' (touch the same code) | 'duplicate_effort' (same goal)
+    # | 'both'.
+    kind: str
+    reason: str
+    confidence: float
+    shared_files: list[str] = field(default_factory=list)
 
 
 @dataclass

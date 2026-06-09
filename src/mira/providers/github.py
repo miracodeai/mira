@@ -19,6 +19,7 @@ from mira.models import (
     FileHistoryEntry,
     HumanReviewComment,
     KeyIssue,
+    OpenPRRef,
     PRInfo,
     ReviewComment,
     ReviewResult,
@@ -248,6 +249,74 @@ class GitHubProvider(BaseProvider):
             return await _fetch()
         except Exception as e:
             raise ProviderError(f"Failed to fetch compare diff: {e}") from e
+
+    async def list_open_prs(
+        self,
+        owner: str,
+        repo: str,
+        limit: int = 20,
+    ) -> list[OpenPRRef]:
+        """List the most recently updated open PRs in a repo.
+
+        Returns lightweight refs (no diff fetched) used by cross-PR overlap
+        detection to decide which PRs are worth comparing in depth. Capped at
+        ``limit`` to bound the work on busy repos.
+        """
+
+        @_retry_transient
+        def _fetch() -> list[OpenPRRef]:
+            gh_repo = self._github.get_repo(f"{owner}/{repo}")
+            pulls = gh_repo.get_pulls(state="open", sort="updated", direction="desc")
+            out: list[OpenPRRef] = []
+            for pr in pulls[:limit]:
+                out.append(
+                    OpenPRRef(
+                        number=pr.number,
+                        title=pr.title or "",
+                        body=pr.body or "",
+                        head_sha=pr.head.sha or "",
+                        author=(pr.user.login if pr.user else ""),
+                        draft=bool(pr.draft),
+                        base_ref=pr.base.ref if pr.base else "",
+                        head_ref=pr.head.ref if pr.head else "",
+                        url=pr.html_url,
+                    )
+                )
+            return out
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception as e:
+            raise ProviderError(f"Failed to list open PRs: {e}") from e
+
+    async def get_pr_files(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        limit: int = 300,
+    ) -> list[str]:
+        """Return the file paths changed by a PR (filenames only).
+
+        Far cheaper than fetching the full diff — used as the fallback when a
+        candidate PR has no cached fingerprint (or it's stale). Returns an empty
+        list if the PR has vanished (closed/merged mid-review).
+        """
+
+        @_retry_transient
+        def _fetch() -> list[str]:
+            gh_repo = self._github.get_repo(f"{owner}/{repo}")
+            pr = gh_repo.get_pull(number)
+            return [f.filename for f in pr.get_files()[:limit]]
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except GithubException as e:
+            if getattr(e, "status", None) == 404:
+                return []
+            raise ProviderError(f"Failed to fetch PR files: {e}") from e
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch PR files: {e}") from e
 
     async def post_review(
         self,

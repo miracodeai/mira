@@ -80,6 +80,26 @@ class FilterConfig(BaseModel):
     max_files: int = 50
 
 
+class OverlapConfig(BaseModel):
+    """Cross-PR overlap detection ("stepping on each other's toes").
+
+    While reviewing a PR, Mira compares it against other open PRs in the repo
+    and flags ones that touch the same code (merge-conflict risk) or pursue the
+    same goal (duplicate effort). A cheap deterministic pre-filter runs first;
+    only the survivors cost an LLM call.
+    """
+
+    enabled: bool = True
+    # Cap on how many recently-updated open PRs to compare against, to bound
+    # GitHub API calls and LLM cost on busy repos.
+    max_candidates: int = Field(default=20, ge=1, le=100)
+    # Verdicts below this confidence are dropped (LLM-scored, 0..1).
+    confidence_floor: float = Field(default=0.6, ge=0.0, le=1.0)
+    # Pre-filter keeps a candidate with no shared files/symbols only if its
+    # title is at least this Jaccard-similar — the duplicate-effort lane.
+    title_similarity_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+
+
 class ReviewConfig(BaseModel):
     context_lines: int = Field(default=3, ge=0)
     # Total diff size cap. Above this, the diff is *not* truncated arbitrarily —
@@ -139,6 +159,10 @@ class ReviewConfig(BaseModel):
     # Lists dependent repos that import code touched by this PR. Disable to
     # skip the relationship-store lookup and trim the walkthrough.
     blast_radius: bool = True
+
+    # Cross-PR overlap detection — flag other open PRs that step on this one
+    # (same files = merge-conflict risk, or same goal = duplicate effort).
+    overlap: OverlapConfig = Field(default_factory=OverlapConfig)
 
 
 class ProviderConfig(BaseModel):

@@ -41,6 +41,8 @@ from mira.llm.response_parser import (
 from mira.models import (
     WALKTHROUGH_MARKER,
     KeyIssue,
+    OverlapFinding,
+    PRFingerprint,
     PRInfo,
     ReviewChunk,
     ReviewComment,
@@ -312,6 +314,83 @@ class ReviewEngine:
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
 
+    async def _detect_overlaps_safe(
+        self,
+        pr_info: PRInfo,
+        diff_text: str,
+    ) -> list[OverlapFinding]:
+        """Detect other open PRs stepping on this one. Best-effort; never raises.
+
+        Also caches this PR's change fingerprint so later reviews of *other*
+        PRs can compare against it without re-fetching its files. Runs in
+        parallel with the main review (see review_pr).
+        """
+        if not self.config.review.overlap.enabled:
+            return []
+        provider = self.provider
+        if provider is None or not hasattr(provider, "list_open_prs"):
+            return []
+        try:
+            from mira.core.overlap import detect_overlaps
+
+            patch = parse_diff(diff_text)
+            filtered = filter_files(patch.files, self.config.filter)
+            current_paths = sorted({f.path for f in filtered})
+            if not current_paths:
+                return []
+
+            store = IndexStore.open(pr_info.owner, pr_info.repo)
+            try:
+                symbols: set[str] = set()
+                for path in current_paths:
+                    summary = store.get_summary(path)
+                    if summary:
+                        symbols.update(s.name for s in summary.symbols)
+                current_fp = PRFingerprint(
+                    pr_number=pr_info.number,
+                    head_sha=pr_info.head_sha,
+                    title=pr_info.title,
+                    body=pr_info.description,
+                    paths=current_paths,
+                    symbols=sorted(symbols),
+                )
+                store.upsert_pr_fingerprint(current_fp)
+                cached = {
+                    fp.pr_number: fp
+                    for fp in store.list_pr_fingerprints()
+                    if fp.pr_number != pr_info.number
+                }
+            finally:
+                store.close()
+
+            cfg = self.config.review.overlap
+            candidates = await provider.list_open_prs(
+                pr_info.owner, pr_info.repo, limit=cfg.max_candidates
+            )
+            bot = (self.bot_name or "").removesuffix("[bot]").lower()
+            candidates = [
+                c
+                for c in candidates
+                if c.number != pr_info.number
+                and not c.draft
+                and c.author.removesuffix("[bot]").lower() != bot
+            ]
+            if not candidates:
+                return []
+
+            return await detect_overlaps(
+                provider=provider,
+                llm=self.llm,
+                config=self.config,
+                pr_info=pr_info,
+                current=current_fp,
+                cached=cached,
+                candidates=candidates,
+            )
+        except Exception as exc:
+            logger.warning("Overlap detection failed, continuing: %s", exc)
+            return []
+
     async def review_pr(self, pr_url: str) -> ReviewResult:
         """Full pipeline: fetch PR -> review -> post results.
 
@@ -447,6 +526,12 @@ class ReviewEngine:
         except Exception:
             pass
 
+        # Cross-PR overlap detection runs alongside the main review — it only
+        # needs the diff + GitHub, not the review output.
+        overlap_task = _asyncio.create_task(
+            self._detect_overlaps_safe(pr_info, diff_text)
+        )
+
         result = await self._review_diff_internal(
             diff_text,
             pr_title=pr_info.title,
@@ -464,6 +549,10 @@ class ReviewEngine:
         if notify_task is not None:
             with contextlib.suppress(Exception):
                 await notify_task
+
+        overlaps: list[OverlapFinding] = []
+        with contextlib.suppress(Exception):
+            overlaps = await overlap_task
 
         if result.walkthrough:
             _clamp_confidence_to_findings(result.walkthrough, result.comments)
@@ -537,6 +626,7 @@ class ReviewEngine:
                         total_paths=result.total_paths or None,
                         index_was_empty=getattr(self, "_index_was_empty", False),
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
+                        overlaps=overlaps or None,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
