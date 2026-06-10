@@ -15,12 +15,27 @@ import {
 import { DataTable, DataTablePagination } from "@/components/ui/data-table"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { type Column, useDataTable } from "@/components/ui/use-data-table"
 import { useAuth } from "@/lib/auth"
 import { api, type ReviewerStat } from "@/lib/api"
 import { useAsync } from "@/lib/hooks"
 
 // ── formatting helpers ──
+
+/** A column header with a dotted underline that reveals an explainer on hover. */
+function HeaderTip({ label, tip }: { label: string; tip: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="underline decoration-dotted decoration-muted-foreground/60 underline-offset-4">
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{tip}</TooltipContent>
+    </Tooltip>
+  )
+}
 
 function fmtDuration(secs: number | null): string {
   if (secs == null) return "—"
@@ -139,7 +154,12 @@ function ReviewersCard() {
     },
     {
       key: "median_response_secs",
-      header: "Median response",
+      header: (
+        <HeaderTip
+          label="Median response"
+          tip="Approximate for backfilled PRs (request time estimated from PR creation); it sharpens as live review events come in."
+        />
+      ),
       align: "right",
       sortable: true,
       sortValue: (r) => r.median_response_secs,
@@ -164,7 +184,12 @@ function ReviewersCard() {
     },
     {
       key: "rubber_stamp_rate",
-      header: "Rubber-stamps",
+      header: (
+        <HeaderTip
+          label="Rubber-stamps"
+          tip="Approvals with no substantive review — empty/“LGTM” body and no real inline comments."
+        />
+      ),
       align: "right",
       sortable: true,
       sortValue: (r) => r.rubber_stamp_rate,
@@ -224,14 +249,6 @@ function ReviewersCard() {
               emptyMessage="No review activity yet."
             />
             <DataTablePagination table={table} />
-            <p className="text-xs text-muted-foreground">
-              ~ Median response is approximate for backfilled PRs (request time estimated from PR
-              creation); it sharpens as live review events come in.
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Rubber-stamps are approvals with no substantive review — empty/&ldquo;LGTM&rdquo; body
-              and no real inline comments.
-            </p>
           </>
         )}
       </CardContent>
@@ -272,7 +289,7 @@ export function ContributorsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Reviewers</h1>
           <p className="text-sm text-muted-foreground">
-            Who&apos;s reviewing, where the bottlenecks are, and which PRs are stuck
+            Who&apos;s reviewing, how responsive they are, and where approvals get rubber-stamped
           </p>
         </div>
         {user?.is_admin && (
