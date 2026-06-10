@@ -196,14 +196,12 @@ function ReviewersCard() {
       cell: (r) =>
         r.approvals > 0 ? (
           <div className="flex items-center justify-end gap-2">
-            <span className="tabular-nums">
-              {r.rubber_stamps}/{r.approvals}
-            </span>
+            <span className="tabular-nums">{Math.round(r.rubber_stamp_rate)}%</span>
             <BarGauge
               value={r.rubber_stamp_rate}
               max={100}
               tone="heat"
-              label={`${r.rubber_stamp_rate}% of approvals were rubber-stamps`}
+              label={`${r.rubber_stamps} of ${r.approvals} approvals were rubber-stamps (${Math.round(r.rubber_stamp_rate)}%)`}
             />
           </div>
         ) : (
