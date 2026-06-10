@@ -201,7 +201,7 @@ function ReviewersCard() {
       header: (
         <HeaderTip
           label="Rubber-stamps"
-          tip="Approvals with no substantive review — empty/“LGTM” body and no real inline comments."
+          tip="Approvals with no substantive review: an empty or “LGTM” body and no real inline comments."
         />
       ),
       align: "right",
@@ -335,7 +335,7 @@ export function ContributorsPage() {
         />
         <StatCard
           label="Rubber-stamps"
-          tip="Approvals with no substantive review — empty/“LGTM” body and no real inline comments."
+          tip="Approvals with no substantive review: an empty or “LGTM” body and no real inline comments."
           value={summary?.rubber_stamps ?? 0}
           footer={
             summary && summary.approvals > 0
