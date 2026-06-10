@@ -1,15 +1,7 @@
 import { AlertTriangle, ArrowDown, ArrowUp, ExternalLink, RefreshCw, Search } from "lucide-react"
 import { type ReactNode, useState } from "react"
 import { useNavigate } from "react-router"
-import { PolarAngleAxis, RadialBar, RadialBarChart } from "recharts"
-
 import { BarGauge } from "@/components/dashboard/bar-gauge"
-import {
-  type ChartConfig,
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "@/components/ui/chart"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -26,7 +18,7 @@ import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { type Column, useDataTable } from "@/components/ui/use-data-table"
 import { useAuth } from "@/lib/auth"
-import { api, type OpenPr, type ReviewerStat, type ReviewSummary } from "@/lib/api"
+import { api, type OpenPr, type ReviewerStat } from "@/lib/api"
 import { useAsync } from "@/lib/hooks"
 
 // ── formatting helpers ──
@@ -92,64 +84,6 @@ function StatCard({
       </CardHeader>
       <CardFooter className="text-sm text-muted-foreground">
         {loading ? <Skeleton className="h-4 w-32" /> : footer}
-      </CardFooter>
-    </Card>
-  )
-}
-
-function scoreText(pct: number): string {
-  if (pct >= 80) return "text-emerald-600 dark:text-emerald-500"
-  if (pct >= 60) return "text-amber-600 dark:text-amber-500"
-  return "text-red-600 dark:text-red-500"
-}
-
-// One concentric ring per health component, each its own colour.
-const HEALTH_CHART_CONFIG = {
-  value: { label: "Score" },
-  approvals: { label: "Approved merges", color: "var(--chart-1)" },
-  responsiveness: { label: "Responsiveness", color: "var(--chart-2)" },
-  backlog: { label: "Backlog health", color: "var(--chart-3)" },
-} satisfies ChartConfig
-
-function HealthCard({ summary, loading }: { summary: ReviewSummary | null; loading: boolean }) {
-  const score = summary?.health_score ?? null
-  const data = (summary?.health ?? []).map((c) => ({
-    metric: c.key,
-    value: Math.round(c.score * 100),
-    fill: `var(--color-${c.key})`,
-  }))
-
-  return (
-    <Card className="flex flex-col">
-      <CardHeader className="items-center pb-0">
-        <CardTitle>Review health</CardTitle>
-        <CardDescription>Reviewing · approving · merging</CardDescription>
-      </CardHeader>
-      <CardContent className="flex-1 pb-0">
-        {loading ? (
-          <Skeleton className="mx-auto aspect-square max-h-[220px] w-full rounded-full" />
-        ) : (
-          <ChartContainer config={HEALTH_CHART_CONFIG} className="mx-auto aspect-square max-h-[220px]">
-            <RadialBarChart data={data} innerRadius={30} outerRadius={110}>
-              <PolarAngleAxis type="number" domain={[0, 100]} tick={false} axisLine={false} />
-              <ChartTooltip
-                cursor={false}
-                content={<ChartTooltipContent hideLabel nameKey="metric" />}
-              />
-              <RadialBar dataKey="value" background cornerRadius={4} />
-            </RadialBarChart>
-          </ChartContainer>
-        )}
-      </CardContent>
-      <CardFooter className="flex-col gap-1 pt-3 text-sm">
-        <div className="font-medium">
-          Health score{" "}
-          <span className={score != null ? scoreText(score) : "text-muted-foreground"}>
-            {score ?? "—"}
-          </span>{" "}
-          / 100
-        </div>
-        <div className="text-muted-foreground">Are humans still reviewing and merging?</div>
       </CardFooter>
     </Card>
   )
@@ -461,10 +395,7 @@ export function ContributorsPage() {
 
       {refreshError && <p className="text-sm text-destructive">{refreshError}</p>}
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <HealthCard summary={summary ?? null} loading={summaryLoading} />
-
-        <div className="grid gap-4 sm:grid-cols-2 lg:col-span-2">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <StatCard
           label="Open PRs"
           value={summary?.open_prs ?? 0}
@@ -505,7 +436,6 @@ export function ContributorsPage() {
           }
           loading={summaryLoading}
         />
-        </div>
       </div>
 
       <ReviewersCard />
