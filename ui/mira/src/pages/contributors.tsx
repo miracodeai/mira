@@ -380,7 +380,7 @@ export function ContributorsPage() {
     <div className="space-y-6 p-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Review health</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Reviewers</h1>
           <p className="text-sm text-muted-foreground">
             Who&apos;s reviewing, where the bottlenecks are, and which PRs are stuck
           </p>

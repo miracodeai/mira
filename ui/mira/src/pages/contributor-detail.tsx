@@ -63,7 +63,7 @@ export function ContributorDetailPage() {
           className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
         >
           <ChevronLeft className="h-4 w-4" />
-          Review
+          Reviewers
         </Link>
         <p className="text-sm text-destructive">{error ?? "Contributor not found"}</p>
       </div>
@@ -83,7 +83,7 @@ export function ContributorDetailPage() {
         className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
       >
         <ChevronLeft className="h-4 w-4" />
-        Review
+        Reviewers
       </Link>
 
       {/* Header */}
