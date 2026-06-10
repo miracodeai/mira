@@ -155,6 +155,39 @@ CREATE TABLE IF NOT EXISTS contribution_days (
     total INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (contributor_id, day)
 );
+
+-- ── Review insights ──
+-- One row per PR, tracking its review lifecycle for stale/throughput insights.
+CREATE TABLE IF NOT EXISTS pull_requests (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'open',   -- open | closed | merged
+    draft INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,   -- last activity; drives "stale"
+    first_review_at REAL NOT NULL DEFAULT 0,  -- 0 = not yet reviewed
+    merged_at REAL NOT NULL DEFAULT 0,
+    closed_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner, repo, number)
+);
+CREATE INDEX IF NOT EXISTS idx_pr_state ON pull_requests(state);
+
+-- One row per (PR, reviewer): when they were asked, when they first responded,
+-- and their latest review state. Powers reviewer responsiveness + waiting-on.
+CREATE TABLE IF NOT EXISTS pr_reviewers (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    reviewer TEXT NOT NULL,
+    requested_at REAL NOT NULL DEFAULT 0,   -- 0 = not formally requested
+    responded_at REAL NOT NULL DEFAULT 0,   -- 0 = hasn't reviewed yet
+    state TEXT NOT NULL DEFAULT '',          -- approved | changes_requested | commented
+    PRIMARY KEY (owner, repo, pr_number, reviewer)
+);
 """
 
 _PG_SCHEMA = """
@@ -272,6 +305,36 @@ CREATE TABLE IF NOT EXISTS contribution_days (
     reviews INTEGER NOT NULL DEFAULT 0,
     total INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (contributor_id, day)
+);
+
+-- ── Review insights ── (see SQLite schema above for column rationale)
+CREATE TABLE IF NOT EXISTS pull_requests (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'open',
+    draft INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0,
+    first_review_at REAL NOT NULL DEFAULT 0,
+    merged_at REAL NOT NULL DEFAULT 0,
+    closed_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner, repo, number)
+);
+CREATE INDEX IF NOT EXISTS idx_pr_state ON pull_requests(state);
+
+CREATE TABLE IF NOT EXISTS pr_reviewers (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    reviewer TEXT NOT NULL,
+    requested_at REAL NOT NULL DEFAULT 0,
+    responded_at REAL NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (owner, repo, pr_number, reviewer)
 );
 """
 
@@ -1364,6 +1427,18 @@ class AppDatabase:
             cur.execute(sql.replace("?", "%s"), params)
             return cur.fetchall()
 
+    def _exec(self, sql: str, params: tuple = ()) -> None:
+        """Run a write written with ``?`` placeholders + lowercase ``excluded``
+        (both work on either backend) against the active backend."""
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(sql, params)
+            self._sqlite_conn.commit()
+            return
+        assert self._pg_conn is not None
+        with self._pg_conn.cursor() as cur:
+            cur.execute(sql.replace("?", "%s"), params)
+
     def upsert_contributor(
         self,
         provider: str,
@@ -1620,6 +1695,37 @@ class AppDatabase:
             for r in rows
         ]
 
+    def aggregate_contributions(
+        self, start: float, end: float, include_bots: bool = False
+    ) -> dict[str, Any]:
+        """Org-wide contribution counts in the half-open window [start, end).
+
+        Powers period-over-period trend widgets (this week vs last week)."""
+        where = "WHERE co.event_at >= ? AND co.event_at < ?"
+        if not include_bots:
+            where += f" AND c.is_bot = {self._false_sql}"
+        rows = self._rows(
+            "SELECT "
+            "SUM(CASE WHEN co.kind='commit' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN co.kind='pr_opened' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN co.kind='pr_merged' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN co.kind='review' THEN 1 ELSE 0 END), "
+            "COALESCE(SUM(co.additions), 0), "
+            "COUNT(DISTINCT co.contributor_id) "
+            "FROM contributions co JOIN contributors c ON c.id = co.contributor_id "
+            f"{where}",
+            (start, end),
+        )
+        r = rows[0] if rows else (0, 0, 0, 0, 0, 0)
+        return {
+            "commits": int(r[0] or 0),
+            "prs_opened": int(r[1] or 0),
+            "prs_merged": int(r[2] or 0),
+            "reviews": int(r[3] or 0),
+            "additions": int(r[4] or 0),
+            "contributors": int(r[5] or 0),
+        }
+
     def get_contributor_days(
         self, contributor_id: int, start_day: str, end_day: str
     ) -> list[ContributionDay]:
@@ -1703,6 +1809,145 @@ class AppDatabase:
             "last_active": (float(r[6]) if r[6] else None),
             "repos_touched": int(r[7] or 0),
         }
+
+    # ── Review insights (pull_requests + pr_reviewers) ──
+
+    def upsert_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        author: str = "",
+        title: str = "",
+        url: str = "",
+        state: str = "open",
+        draft: bool = False,
+        created_at: float = 0.0,
+        updated_at: float = 0.0,
+        merged_at: float = 0.0,
+        closed_at: float = 0.0,
+    ) -> None:
+        """Insert/update a PR's lifecycle row. Never clears first_review_at
+        (set separately) or an earlier created_at."""
+        self._exec(
+            "INSERT INTO pull_requests "
+            "(owner, repo, number, author, title, url, state, draft, "
+            "created_at, updated_at, merged_at, closed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(owner, repo, number) DO UPDATE SET "
+            "author=CASE WHEN excluded.author!='' THEN excluded.author ELSE pull_requests.author END, "
+            "title=CASE WHEN excluded.title!='' THEN excluded.title ELSE pull_requests.title END, "
+            "url=CASE WHEN excluded.url!='' THEN excluded.url ELSE pull_requests.url END, "
+            "state=excluded.state, draft=excluded.draft, updated_at=excluded.updated_at, "
+            "created_at=CASE WHEN pull_requests.created_at=0 THEN excluded.created_at ELSE pull_requests.created_at END, "
+            "merged_at=CASE WHEN excluded.merged_at>0 THEN excluded.merged_at ELSE pull_requests.merged_at END, "
+            "closed_at=CASE WHEN excluded.closed_at>0 THEN excluded.closed_at ELSE pull_requests.closed_at END",
+            (
+                owner, repo, number, author, title, url, state, int(draft),
+                created_at, updated_at, merged_at, closed_at,
+            ),
+        )
+
+    def set_pr_first_review(self, owner: str, repo: str, number: int, ts: float) -> None:
+        """Record the earliest review time on a PR (no-op if an earlier one exists)."""
+        if ts <= 0:
+            return
+        self._exec(
+            "UPDATE pull_requests SET first_review_at=? "
+            "WHERE owner=? AND repo=? AND number=? AND (first_review_at=0 OR ?<first_review_at)",
+            (ts, owner, repo, number, ts),
+        )
+
+    def upsert_pr_reviewer(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        reviewer: str,
+        *,
+        requested_at: float = 0.0,
+        responded_at: float = 0.0,
+        state: str = "",
+    ) -> None:
+        """Merge a review request and/or a review into the (PR, reviewer) row:
+        keeps the earliest request + earliest response, and the latest state."""
+        self._exec(
+            "INSERT INTO pr_reviewers "
+            "(owner, repo, pr_number, reviewer, requested_at, responded_at, state) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(owner, repo, pr_number, reviewer) DO UPDATE SET "
+            "requested_at=CASE "
+            "  WHEN pr_reviewers.requested_at=0 THEN excluded.requested_at "
+            "  WHEN excluded.requested_at>0 AND excluded.requested_at<pr_reviewers.requested_at THEN excluded.requested_at "
+            "  ELSE pr_reviewers.requested_at END, "
+            "responded_at=CASE "
+            "  WHEN excluded.responded_at=0 THEN pr_reviewers.responded_at "
+            "  WHEN pr_reviewers.responded_at=0 OR excluded.responded_at<pr_reviewers.responded_at THEN excluded.responded_at "
+            "  ELSE pr_reviewers.responded_at END, "
+            "state=CASE WHEN excluded.state!='' THEN excluded.state ELSE pr_reviewers.state END",
+            (owner, repo, number, reviewer, requested_at, responded_at, state),
+        )
+
+    def remove_pr_reviewer(self, owner: str, repo: str, number: int, reviewer: str) -> None:
+        """Drop a review request (review_request_removed) only if unanswered."""
+        self._exec(
+            "DELETE FROM pr_reviewers WHERE owner=? AND repo=? AND pr_number=? "
+            "AND reviewer=? AND responded_at=0",
+            (owner, repo, number, reviewer),
+        )
+
+    def get_open_pull_requests(self) -> list[dict[str, Any]]:
+        rows = self._rows(
+            "SELECT owner, repo, number, author, title, url, draft, "
+            "created_at, updated_at, first_review_at "
+            "FROM pull_requests WHERE state='open' ORDER BY created_at ASC"
+        )
+        return [
+            {
+                "owner": r[0], "repo": r[1], "number": r[2], "author": r[3], "title": r[4],
+                "url": r[5], "draft": bool(r[6]), "created_at": r[7] or 0.0,
+                "updated_at": r[8] or 0.0, "first_review_at": r[9] or 0.0,
+            }
+            for r in rows
+        ]
+
+    def get_open_pr_reviewers(self) -> list[dict[str, Any]]:
+        rows = self._rows(
+            "SELECT r.owner, r.repo, r.pr_number, r.reviewer, r.requested_at, r.responded_at, r.state "
+            "FROM pr_reviewers r JOIN pull_requests p "
+            "ON p.owner=r.owner AND p.repo=r.repo AND p.number=r.pr_number "
+            "WHERE p.state='open'"
+        )
+        return [
+            {
+                "owner": r[0], "repo": r[1], "number": r[2], "reviewer": r[3],
+                "requested_at": r[4] or 0.0, "responded_at": r[5] or 0.0, "state": r[6] or "",
+            }
+            for r in rows
+        ]
+
+    def get_reviewer_activity_rows(self) -> list[dict[str, Any]]:
+        """All (reviewer, request/response times, PR state) rows — for the
+        responsiveness/bottleneck stats, aggregated in Python."""
+        rows = self._rows(
+            "SELECT r.reviewer, r.requested_at, r.responded_at, p.state "
+            "FROM pr_reviewers r JOIN pull_requests p "
+            "ON p.owner=r.owner AND p.repo=r.repo AND p.number=r.pr_number"
+        )
+        return [
+            {"reviewer": r[0], "requested_at": r[1] or 0.0, "responded_at": r[2] or 0.0, "pr_state": r[3]}
+            for r in rows
+        ]
+
+    def get_throughput_rows(self) -> list[dict[str, Any]]:
+        """(created_at, first_review_at, merged_at) for every PR — medians
+        computed in Python so it works the same on SQLite and Postgres."""
+        rows = self._rows("SELECT created_at, first_review_at, merged_at FROM pull_requests")
+        return [
+            {"created_at": r[0] or 0.0, "first_review_at": r[1] or 0.0, "merged_at": r[2] or 0.0}
+            for r in rows
+        ]
 
     def close(self) -> None:
         if self._sqlite_conn:

@@ -315,8 +315,75 @@ export interface ContributorDetail {
   quality: ReviewQuality
 }
 
+export interface ContributionWindow {
+  commits: number
+  prs_opened: number
+  prs_merged: number
+  reviews: number
+  additions: number
+  contributors: number
+}
+
+export interface ContributorSummary {
+  days: number
+  current: ContributionWindow
+  previous: ContributionWindow
+}
+
 export type ContributorSort = "commits" | "prs" | "reviews" | "recent" | "additions"
 export type StatsPeriod = "day" | "week" | "month"
+
+// ── Review insights ──
+
+export interface ThroughputWindow {
+  time_to_first_review_secs: number | null
+  time_to_first_review_count: number
+  time_to_merge_secs: number | null
+  time_to_merge_count: number
+}
+
+export interface ReviewSummary {
+  days: number
+  open_prs: number
+  stale_prs: number
+  awaiting_review: number
+  current: ThroughputWindow
+  previous: ThroughputWindow
+}
+
+export interface ReviewerStat {
+  reviewer: string
+  avatar_url: string
+  pending: number
+  reviews: number
+  median_response_secs: number | null
+}
+
+export interface OpenPrReviewer {
+  reviewer: string
+  state: string
+  requested: boolean
+  responded: boolean
+}
+
+export interface OpenPr {
+  owner: string
+  repo: string
+  number: number
+  author: string
+  title: string
+  url: string
+  draft: boolean
+  created_at: number
+  updated_at: number
+  age_secs: number
+  idle_secs: number
+  reviewed: boolean
+  stale: boolean
+  status: string
+  waiting_on: string[]
+  reviewers: OpenPrReviewer[]
+}
 
 // ── API functions ──
 
@@ -593,9 +660,22 @@ export const api = {
     return fetchJson<ContributorDetail>(`/api/contributors/${encodeURIComponent(login)}${qs}`)
   },
 
+  getContributorsSummary: (days = 7) =>
+    fetchJson<ContributorSummary>(`/api/contributors/summary?days=${days}`),
+
   refreshContributors: () =>
     postJson<{ status: string }>("/api/contributors/refresh", {}),
 
   refreshContributorsRepo: (owner: string, repo: string) =>
     postJson<{ status: string }>(`/api/contributors/${owner}/${repo}/refresh`, {}),
+
+  // Review insights
+  getReviewSummary: (days = 7, staleDays = 3) =>
+    fetchJson<ReviewSummary>(`/api/review-insights/summary?days=${days}&stale_days=${staleDays}`),
+
+  getOpenPrs: (staleDays = 3) =>
+    fetchJson<OpenPr[]>(`/api/review-insights/open-prs?stale_days=${staleDays}`),
+
+  getReviewers: (days = 30) =>
+    fetchJson<ReviewerStat[]>(`/api/review-insights/reviewers?days=${days}`),
 }

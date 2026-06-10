@@ -29,9 +29,21 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   )
 }
 
+function fmtDuration(secs: number | null): string {
+  if (secs == null) return "—"
+  if (secs < 60) return "<1m"
+  const mins = Math.floor(secs / 60)
+  if (mins < 60) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
 export function ContributorDetailPage() {
   const { login } = useParams<{ login: string }>()
   const { data, loading, error } = useAsync(() => api.getContributor(login!), [login])
+  // Review responsiveness for this person (leads the page).
+  const { data: reviewers } = useAsync(() => api.getReviewers(30).catch(() => []), [login])
 
   if (loading) {
     return (
@@ -51,7 +63,7 @@ export function ContributorDetailPage() {
           className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
         >
           <ChevronLeft className="h-4 w-4" />
-          Contributors
+          Review
         </Link>
         <p className="text-sm text-destructive">{error ?? "Contributor not found"}</p>
       </div>
@@ -62,6 +74,7 @@ export function ContributorDetailPage() {
   const initials = c.login.slice(0, 2).toUpperCase()
   const acceptPct = Math.round(quality.accept_rate * 100)
   const maxRepoCommits = Math.max(1, ...repos.map((r) => r.commits))
+  const me = (reviewers ?? []).find((r) => r.reviewer === c.login)
 
   return (
     <div className="space-y-6 p-6">
@@ -70,7 +83,7 @@ export function ContributorDetailPage() {
         className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
       >
         <ChevronLeft className="h-4 w-4" />
-        Contributors
+        Review
       </Link>
 
       {/* Header */}
@@ -88,14 +101,31 @@ export function ContributorDetailPage() {
         </div>
       </div>
 
-      {/* Totals */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-        <Stat label="Commits" value={c.commits.toLocaleString()} />
-        <Stat label="PRs opened" value={c.prs_opened.toLocaleString()} />
-        <Stat label="PRs merged" value={c.prs_merged.toLocaleString()} />
-        <Stat label="Reviews given" value={c.reviews.toLocaleString()} />
-        <Stat label="Lines added" value={c.additions.toLocaleString()} />
-        <Stat label="Repos" value={c.repos_touched} />
+      {/* Review responsiveness — leads the page */}
+      <div className="space-y-2">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Reviewing
+        </p>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Stat label="Pending reviews" value={me?.pending ?? 0} />
+          <Stat label="Median response" value={fmtDuration(me?.median_response_secs ?? null)} />
+          <Stat label="Reviews given (30d)" value={me?.reviews ?? 0} />
+          <Stat label="Reviews given (all time)" value={c.reviews.toLocaleString()} />
+        </div>
+      </div>
+
+      {/* Authoring — secondary */}
+      <div className="space-y-2">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Authoring
+        </p>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+          <Stat label="Commits" value={c.commits.toLocaleString()} />
+          <Stat label="PRs opened" value={c.prs_opened.toLocaleString()} />
+          <Stat label="PRs merged" value={c.prs_merged.toLocaleString()} />
+          <Stat label="Lines added" value={c.additions.toLocaleString()} />
+          <Stat label="Repos" value={c.repos_touched} />
+        </div>
       </div>
 
       {/* Heatmap */}

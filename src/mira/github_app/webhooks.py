@@ -25,7 +25,9 @@ from mira.github_app.handlers import (
     handle_comment,
     handle_pause_resume,
     handle_pr_merged,
+    handle_pr_review_meta,
     handle_pull_request,
+    handle_pull_request_review,
     handle_thread_reject,
 )
 from mira.github_app.index_handlers import (
@@ -110,6 +112,23 @@ def create_app(
         event = request.headers.get("X-GitHub-Event", "")
         payload: dict[str, Any] = await request.json()
         action = payload.get("action", "")
+
+        # Track PR review lifecycle for every pull_request event (open/close/
+        # ready/review_requested/...), independent of the review-trigger logic
+        # below — so review-insights data stays current even for paused/ignored
+        # PRs. Doesn't return; falls through to the review-trigger branches.
+        if event == "pull_request" and payload.get("sender", {}).get("login", "") != f"{bot_name}[bot]":
+            background_tasks.add_task(handle_pr_review_meta, payload, app_auth, bot_name)
+
+        # A human submitted a review — capture responsiveness + the review event.
+        if event == "pull_request_review" and action == "submitted":
+            if payload.get("sender", {}).get("login", "") != f"{bot_name}[bot]":
+                background_tasks.add_task(handle_pull_request_review, payload, app_auth, bot_name)
+            return Response(
+                content='{"status": "processing"}',
+                status_code=200,
+                media_type="application/json",
+            )
 
         if (
             event == "pull_request"

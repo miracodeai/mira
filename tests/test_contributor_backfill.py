@@ -40,6 +40,11 @@ def _pr(number: int, author: str, merged: bool = False, reviews=None) -> MagicMo
     pr.created_at = datetime(2024, 1, 1, tzinfo=UTC)
     pr.updated_at = datetime(2024, 1, 2, tzinfo=UTC)
     pr.merged_at = datetime(2024, 1, 3, tzinfo=UTC) if merged else None
+    pr.closed_at = pr.merged_at
+    pr.state = "closed" if merged else "open"
+    pr.draft = False
+    pr.html_url = f"https://github.com/o/r/pull/{number}"
+    pr.requested_reviewers = []
     pr.get_reviews.return_value = reviews or []
     return pr
 
@@ -49,6 +54,7 @@ def _review(review_id: int, reviewer: str) -> MagicMock:
     r.id = review_id
     r.user = _user(reviewer, uid=99)
     r.submitted_at = datetime(2024, 1, 4, tzinfo=UTC)
+    r.state = "approved"
     return r
 
 

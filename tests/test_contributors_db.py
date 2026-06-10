@@ -233,3 +233,49 @@ def test_api_contributors_requires_admin(patched_api: AppDatabase) -> None:
     with pytest.raises(HTTPException) as exc2:
         api.get_contributor("anyone", _viewer_request())
     assert exc2.value.status_code == 403
+
+
+def test_aggregate_contributions_window(db: AppDatabase) -> None:
+    now = time.time()
+    db.record_contribution_for_login(
+        "github", "alice", "o", "r", "commit", "commit:recent", event_at=now - 1 * 86400
+    )
+    db.record_contribution_for_login(
+        "github", "alice", "o", "r", "commit", "commit:older", event_at=now - 10 * 86400
+    )
+    current = db.aggregate_contributions(now - 7 * 86400, now)
+    previous = db.aggregate_contributions(now - 14 * 86400, now - 7 * 86400)
+    assert current["commits"] == 1
+    assert current["contributors"] == 1
+    assert previous["commits"] == 1
+
+
+def test_aggregate_contributions_excludes_bots(db: AppDatabase) -> None:
+    now = time.time()
+    db.record_contribution_for_login(
+        "github", "ci[bot]", "o", "r", "commit", "commit:b", event_at=now - 86400, is_bot=True
+    )
+    assert db.aggregate_contributions(now - 7 * 86400, now)["commits"] == 0
+    assert db.aggregate_contributions(now - 7 * 86400, now, include_bots=True)["commits"] == 1
+
+
+def test_api_contributors_summary(patched_api: AppDatabase) -> None:
+    now = time.time()
+    patched_api.record_contribution_for_login(
+        "github", "alice", "o", "r", "pr_merged", "prm:1", event_at=now - 86400, merged=True
+    )
+    patched_api.record_contribution_for_login(
+        "github", "alice", "o", "r", "pr_merged", "prm:2", event_at=now - 10 * 86400, merged=True
+    )
+    s = api.contributors_summary(_admin_request(), days=7)
+    assert s.days == 7
+    assert s.current.prs_merged == 1
+    assert s.previous.prs_merged == 1
+
+
+def test_api_summary_requires_admin(patched_api: AppDatabase) -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        api.contributors_summary(_viewer_request())
+    assert exc.value.status_code == 403

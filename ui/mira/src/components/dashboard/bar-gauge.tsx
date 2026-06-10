@@ -1,22 +1,26 @@
-import { CONTRIB_CELL_RING, CONTRIB_GAUGE_FILL, CONTRIB_LEVELS, contribLevel } from "./contrib-colors"
+import { CONTRIB_CELL_RING, CONTRIB_GAUGE_HEAT, CONTRIB_GAUGE_LEVELS, contribLevel } from "./contrib-colors"
 
 // Ascending bar heights — a compact signal-strength-style gauge.
 const HEIGHTS = ["h-1.5", "h-2", "h-2.5", "h-3", "h-3.5"]
 
 /**
- * A tiny 5-bar gauge. Magnitude is encoded purely by how many bars light up
- * (and their rising height) — every lit bar is the SAME green, so there's no
- * "does light or dark mean more?" ambiguity. Unlit bars use the empty shade.
+ * A tiny 5-bar gauge. The number of lit bars (and their rising height) encodes
+ * `value` relative to `max`; lit bars ramp through a theme-aware scale. `tone`
+ * picks the ramp: "green" (more is good) or "heat" (more is worse, e.g. a
+ * backlog). Unlit bars use the empty shade.
  */
 export function BarGauge({
   value,
   max,
   label,
+  tone = "green",
 }: {
   value: number
   max: number
   label?: string
+  tone?: "green" | "heat"
 }) {
+  const levels = tone === "heat" ? CONTRIB_GAUGE_HEAT : CONTRIB_GAUGE_LEVELS
   const filled = contribLevel(value, max)
   const title = label ?? `${value.toLocaleString()}`
   return (
@@ -25,7 +29,7 @@ export function BarGauge({
         <span
           key={i}
           className={`w-1 rounded-[1px] ${h} ${CONTRIB_CELL_RING} ${
-            i < filled ? CONTRIB_GAUGE_FILL : CONTRIB_LEVELS[0]
+            i < filled ? levels[Math.min(i + 1, 4)] : levels[0]
           }`}
         />
       ))}

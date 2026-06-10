@@ -135,6 +135,43 @@ def _record_pr(db: Any, owner: str, repo: str, pr: Any, counts: dict[str, int]) 
         counts["merges"] += 1
 
 
+def _pr_state(pr: Any) -> str:
+    if pr.merged_at:
+        return "merged"
+    if pr.state == "closed":
+        return "closed"
+    return "open"
+
+
+def _record_pr_insights(db: Any, owner: str, repo: str, pr: Any) -> None:
+    """Upsert the PR lifecycle row + currently-requested reviewers for the
+    review-insights views. No extra API calls (all fields are on `pr`)."""
+    db.upsert_pull_request(
+        owner,
+        repo,
+        pr.number,
+        author=(pr.user.login if pr.user else ""),
+        title=pr.title or "",
+        url=pr.html_url or "",
+        state=_pr_state(pr),
+        draft=bool(pr.draft),
+        created_at=_dt_to_epoch(pr.created_at),
+        updated_at=_dt_to_epoch(pr.updated_at),
+        merged_at=_dt_to_epoch(pr.merged_at) if pr.merged_at else 0.0,
+        closed_at=_dt_to_epoch(pr.closed_at) if pr.closed_at else 0.0,
+    )
+    # Currently-pending reviewers. No timeline call, so approximate the request
+    # time with PR creation (webhooks record the precise time going forward).
+    try:
+        for ru in pr.requested_reviewers or []:
+            if ru and ru.login:
+                db.upsert_pr_reviewer(
+                    owner, repo, pr.number, ru.login, requested_at=_dt_to_epoch(pr.created_at)
+                )
+    except Exception as exc:
+        logger.debug("requested_reviewers backfill failed for PR #%s: %s", pr.number, exc)
+
+
 def _record_reviews(db: Any, owner: str, repo: str, pr: Any, counts: dict[str, int]) -> None:
     author_login = pr.user.login if pr.user else ""
     try:
@@ -145,19 +182,27 @@ def _record_reviews(db: Any, owner: str, repo: str, pr: Any, counts: dict[str, i
     for review in reviews:
         r_user = review.user
         r_login = r_user.login if r_user else ""
-        # Skip self-reviews and authorless events; they aren't "reviews given".
-        if not r_login or r_login == author_login:
+        # Skip self-reviews, authorless events, and bots (e.g. Mira).
+        if not r_login or r_login == author_login or _is_bot(r_user):
             continue
+        submitted = _dt_to_epoch(review.submitted_at)
         db.record_contribution_for_login(
             "github", r_login, owner, repo, "review", f"review:{review.id}",
-            event_at=_dt_to_epoch(review.submitted_at),
+            event_at=submitted,
             external_id=(r_user.id or 0),
             avatar_url=(r_user.avatar_url or ""),
-            is_bot=_is_bot(r_user),
+            is_bot=False,
             pr_number=pr.number,
             title=pr.title or "",
         )
         counts["reviews"] += 1
+        # Review-insights: responsiveness + first-review timing.
+        db.upsert_pr_reviewer(
+            owner, repo, pr.number, r_login,
+            responded_at=submitted,
+            state=(review.state or "").lower(),
+        )
+        db.set_pr_first_review(owner, repo, pr.number, submitted)
 
 
 def _backfill_commits(
@@ -226,6 +271,7 @@ def _backfill_sync(
         if since and _dt_to_epoch(pr.updated_at) < since:
             continue
         _record_pr(db, owner, repo, pr, counts)
+        _record_pr_insights(db, owner, repo, pr)
         _record_reviews(db, owner, repo, pr, counts)
         if progress_cb:
             progress_cb(done, total)

@@ -98,6 +98,128 @@ def _record_pr_contribution(payload: dict[str, Any], kind: str) -> None:
         logger.debug("Failed to record %s contribution: %s", kind, exc)
 
 
+def _pr_state(pr: dict[str, Any]) -> str:
+    if pr.get("merged"):
+        return "merged"
+    if pr.get("state") == "closed":
+        return "closed"
+    return "open"
+
+
+def _record_pr_lifecycle(payload: dict[str, Any]) -> None:
+    """Upsert a PR's review-insights lifecycle row from any pull_request-shaped
+    payload (pull_request, pull_request_review). Best-effort."""
+    try:
+        pr = payload.get("pull_request", {})
+        repo = payload.get("repository", {})
+        owner = repo.get("owner", {}).get("login", "")
+        name = repo.get("name", "")
+        number = pr.get("number")
+        if not owner or not name or not number:
+            return
+        from mira.dashboard.api import _app_db
+
+        _app_db.upsert_pull_request(
+            owner,
+            name,
+            number,
+            author=(pr.get("user") or {}).get("login", ""),
+            title=pr.get("title") or "",
+            url=pr.get("html_url") or f"https://github.com/{owner}/{name}/pull/{number}",
+            state=_pr_state(pr),
+            draft=bool(pr.get("draft")),
+            created_at=_parse_iso(pr.get("created_at") or ""),
+            updated_at=_parse_iso(pr.get("updated_at") or "") or time.time(),
+            merged_at=_parse_iso(pr["merged_at"]) if pr.get("merged_at") else 0.0,
+            closed_at=_parse_iso(pr["closed_at"]) if pr.get("closed_at") else 0.0,
+        )
+    except Exception as exc:
+        logger.debug("PR lifecycle record failed: %s", exc)
+
+
+async def handle_pr_review_meta(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+) -> None:
+    """Track PR review lifecycle for any pull_request event: keep the PR row
+    current and record review_requested / review_request_removed."""
+    try:
+        _record_pr_lifecycle(payload)
+        action = payload.get("action", "")
+        if action not in ("review_requested", "review_request_removed"):
+            return
+        pr = payload.get("pull_request", {})
+        repo = payload.get("repository", {})
+        owner = repo.get("owner", {}).get("login", "")
+        name = repo.get("name", "")
+        number = pr.get("number")
+        reviewer = (payload.get("requested_reviewer") or {}).get("login", "")
+        if not reviewer or not number:
+            return  # team requests (requested_team) have no single login — skip
+        from mira.dashboard.api import _app_db
+
+        if action == "review_requested":
+            _app_db.upsert_pr_reviewer(owner, name, number, reviewer, requested_at=time.time())
+        else:
+            _app_db.remove_pr_reviewer(owner, name, number, reviewer)
+    except Exception:
+        logger.exception("Error handling PR review meta")
+
+
+async def handle_pull_request_review(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+) -> None:
+    """Handle a submitted human review: record responsiveness + the review
+    contribution, and stamp the PR's first-review time."""
+    try:
+        if payload.get("action") != "submitted":
+            return
+        review = payload.get("review", {})
+        user = review.get("user") or {}
+        reviewer = user.get("login", "")
+        if not reviewer or _is_bot_user(user):
+            return  # ignore Mira's own and other bot reviews
+        pr = payload.get("pull_request", {})
+        author = (pr.get("user") or {}).get("login", "")
+        if reviewer == author:
+            return  # a self-review isn't a review of someone else's work
+        repo = payload.get("repository", {})
+        owner = repo.get("owner", {}).get("login", "")
+        name = repo.get("name", "")
+        number = pr.get("number")
+        if not number:
+            return
+        submitted = _parse_iso(review.get("submitted_at") or "")
+        state = (review.get("state") or "").lower()
+
+        from mira.dashboard.api import _app_db
+
+        _record_pr_lifecycle(payload)
+        _app_db.upsert_pr_reviewer(
+            owner, name, number, reviewer, responded_at=submitted, state=state
+        )
+        _app_db.set_pr_first_review(owner, name, number, submitted)
+        # Also count it as a review contribution for the heatmap.
+        _app_db.record_contribution_for_login(
+            "github",
+            reviewer,
+            owner,
+            name,
+            "review",
+            f"review:{review.get('id')}",
+            event_at=submitted,
+            external_id=int(user.get("id") or 0),
+            avatar_url=user.get("avatar_url") or "",
+            pr_number=number,
+            title=pr.get("title") or "",
+        )
+    except Exception:
+        logger.exception("Error handling pull_request_review")
+
+
 _REVIEW_KEYWORDS = {"review", "review this", "review this pr"}
 _REJECT_KEYWORDS = {"reject", "dismiss", "resolve", "ignore"}
 _REVIEW_REST_KEYWORDS = {"review-rest", "review rest", "rest", "continue"}

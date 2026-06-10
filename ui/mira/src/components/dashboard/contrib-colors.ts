@@ -12,9 +12,27 @@ export const CONTRIB_LEVELS = [
   "bg-[#216e3a]",
 ]
 
-// Single solid green for lit gauge bars — magnitude is shown by how many bars
-// light up, not by shade, so there's no light-vs-dark "which means more?" doubt.
-export const CONTRIB_GAUGE_FILL = "bg-[#2da44e]"
+// Gauge ramp — graduated AND theme-aware (its own `dark:` variants). Bars ramp
+// light→dark in light mode and dark→bright in dark mode, so "more" reads as the
+// deeper end on light backgrounds and the brighter end on dark ones. Index 0 is
+// the empty/unlit shade.
+export const CONTRIB_GAUGE_LEVELS = [
+  "bg-[#ebedf0] dark:bg-[#2d333b]",
+  "bg-[#9be9a8] dark:bg-[#0e4429]",
+  "bg-[#40c463] dark:bg-[#006d32]",
+  "bg-[#30a14e] dark:bg-[#26a641]",
+  "bg-[#216e3a] dark:bg-[#39d353]",
+]
+
+// Heat ramp (yellow → red) for gauges where "more is worse" — e.g. a reviewer's
+// pending backlog. Same shape + theme-awareness as the green ramp.
+export const CONTRIB_GAUGE_HEAT = [
+  "bg-[#ebedf0] dark:bg-[#2d333b]",
+  "bg-[#fde68a] dark:bg-[#854d0e]",
+  "bg-[#fdba74] dark:bg-[#b45309]",
+  "bg-[#fb923c] dark:bg-[#ea580c]",
+  "bg-[#ef4444] dark:bg-[#f87171]",
+]
 
 // A faint inset ring gives every square/bar a crisp edge against either
 // background — without it, low-intensity cells melt into the page in dark mode.

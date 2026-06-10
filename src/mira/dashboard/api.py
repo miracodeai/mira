@@ -1745,6 +1745,24 @@ class ContributorDetailModel(BaseModel):
     quality: ReviewQuality
 
 
+class ContributionWindow(BaseModel):
+    commits: int = 0
+    prs_opened: int = 0
+    prs_merged: int = 0
+    reviews: int = 0
+    additions: int = 0
+    contributors: int = 0
+
+
+class ContributorSummary(BaseModel):
+    """Org-wide totals for the trailing window plus the window before it, so the
+    UI can show up/down deltas."""
+
+    days: int
+    current: ContributionWindow
+    previous: ContributionWindow
+
+
 def _require_admin(request: Request) -> None:
     """Raise 403 unless the request is from an authenticated admin."""
     user = getattr(request.state, "user", None)
@@ -1772,6 +1790,23 @@ def list_contributors(
     since = _period_to_since(period) if period else None
     rows = _app_db.list_contributors(sort=sort, since=since, include_bots=include_bots)
     return [ContributorListItem(**r) for r in rows]
+
+
+@router.get("/api/contributors/summary", response_model=ContributorSummary)
+def contributors_summary(request: Request, days: int = 7) -> ContributorSummary:
+    """Org-wide totals for the trailing `days` window and the window before it,
+    so the UI can show up/down trends. Admin only."""
+    _require_admin(request)
+    days = max(1, min(days, 365))
+    now = datetime.now(tz=UTC).timestamp()
+    window = days * 86400
+    current = _app_db.aggregate_contributions(now - window, now)
+    previous = _app_db.aggregate_contributions(now - 2 * window, now - window)
+    return ContributorSummary(
+        days=days,
+        current=ContributionWindow(**current),
+        previous=ContributionWindow(**previous),
+    )
 
 
 @router.get("/api/contributors/backfill/status")
@@ -1902,6 +1937,218 @@ def get_contributor(login: str, request: Request, period: str = "") -> Contribut
     )
 
     return ContributorDetailModel(contributor=item, heatmap=heatmap, repos=repos, quality=quality)
+
+
+# ── Review insights ────────────────────────────────────────────────
+
+
+class ThroughputWindow(BaseModel):
+    time_to_first_review_secs: float | None = None
+    time_to_first_review_count: int = 0
+    time_to_merge_secs: float | None = None
+    time_to_merge_count: int = 0
+
+
+class ReviewSummary(BaseModel):
+    days: int
+    open_prs: int
+    stale_prs: int
+    awaiting_review: int
+    current: ThroughputWindow
+    previous: ThroughputWindow
+
+
+class ReviewerStat(BaseModel):
+    reviewer: str
+    avatar_url: str = ""
+    pending: int = 0  # PRs currently waiting on this person's review
+    reviews: int = 0  # reviews submitted in the window
+    median_response_secs: float | None = None  # requested → first review
+
+
+class OpenPrReviewer(BaseModel):
+    reviewer: str
+    state: str = ""
+    requested: bool = False
+    responded: bool = False
+
+
+class OpenPr(BaseModel):
+    owner: str
+    repo: str
+    number: int
+    author: str
+    title: str
+    url: str
+    draft: bool
+    created_at: float
+    updated_at: float
+    age_secs: float
+    idle_secs: float
+    reviewed: bool
+    stale: bool
+    status: str  # awaiting_review | commented | changes_requested | approved
+    waiting_on: list[str]
+    reviewers: list[OpenPrReviewer]
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _now() -> float:
+    return datetime.now(tz=UTC).timestamp()
+
+
+@router.get("/api/review-insights/summary", response_model=ReviewSummary)
+def review_summary(request: Request, days: int = 7, stale_days: int = 3) -> ReviewSummary:
+    """Throughput medians (this window vs previous) + open/stale/awaiting counts. Admin."""
+    _require_admin(request)
+    days = max(1, min(days, 365))
+    now = _now()
+    window = days * 86400
+
+    rows = _app_db.get_throughput_rows()
+
+    def window_throughput(start: float, end: float) -> ThroughputWindow:
+        ttfr = [
+            r["first_review_at"] - r["created_at"]
+            for r in rows
+            if r["first_review_at"] > 0
+            and start <= r["first_review_at"] < end
+            and r["created_at"] > 0
+            and r["first_review_at"] >= r["created_at"]
+        ]
+        ttm = [
+            r["merged_at"] - r["created_at"]
+            for r in rows
+            if r["merged_at"] > 0
+            and start <= r["merged_at"] < end
+            and r["created_at"] > 0
+            and r["merged_at"] >= r["created_at"]
+        ]
+        return ThroughputWindow(
+            time_to_first_review_secs=_median(ttfr),
+            time_to_first_review_count=len(ttfr),
+            time_to_merge_secs=_median(ttm),
+            time_to_merge_count=len(ttm),
+        )
+
+    open_prs = _app_db.get_open_pull_requests()
+    stale_cutoff = stale_days * 86400
+    active = [p for p in open_prs if not p["draft"]]
+    stale = sum(1 for p in active if now - p["updated_at"] > stale_cutoff)
+    awaiting = sum(1 for p in active if p["first_review_at"] == 0)
+
+    return ReviewSummary(
+        days=days,
+        open_prs=len(active),
+        stale_prs=stale,
+        awaiting_review=awaiting,
+        current=window_throughput(now - window, now),
+        previous=window_throughput(now - 2 * window, now - window),
+    )
+
+
+@router.get("/api/review-insights/open-prs", response_model=list[OpenPr])
+def review_open_prs(request: Request, stale_days: int = 3) -> list[OpenPr]:
+    """Open PRs as a status board: age, idle time, who they're waiting on,
+    reviewer states, and a stale flag. Sorted oldest-first. Admin."""
+    _require_admin(request)
+    now = _now()
+    stale_cutoff = stale_days * 86400
+
+    by_pr: dict[tuple[str, str, int], list[dict]] = {}
+    for r in _app_db.get_open_pr_reviewers():
+        by_pr.setdefault((r["owner"], r["repo"], r["number"]), []).append(r)
+
+    out: list[OpenPr] = []
+    for p in _app_db.get_open_pull_requests():
+        revs = by_pr.get((p["owner"], p["repo"], p["number"]), [])
+        reviewers = [
+            OpenPrReviewer(
+                reviewer=r["reviewer"],
+                state=r["state"],
+                requested=r["requested_at"] > 0,
+                responded=r["responded_at"] > 0,
+            )
+            for r in revs
+        ]
+        waiting_on = [r.reviewer for r in reviewers if r.requested and not r.responded]
+        responded_states = [r.state for r in reviewers if r.responded]
+        if "changes_requested" in responded_states:
+            status = "changes_requested"
+        elif "approved" in responded_states:
+            status = "approved"
+        elif p["first_review_at"] > 0 or responded_states:
+            status = "commented"
+        else:
+            status = "awaiting_review"
+        idle = now - p["updated_at"]
+        out.append(
+            OpenPr(
+                owner=p["owner"],
+                repo=p["repo"],
+                number=p["number"],
+                author=p["author"],
+                title=p["title"],
+                url=p["url"],
+                draft=p["draft"],
+                created_at=p["created_at"],
+                updated_at=p["updated_at"],
+                age_secs=now - p["created_at"],
+                idle_secs=idle,
+                reviewed=p["first_review_at"] > 0,
+                stale=(not p["draft"]) and idle > stale_cutoff,
+                status=status,
+                waiting_on=waiting_on,
+                reviewers=reviewers,
+            )
+        )
+    out.sort(key=lambda o: o.age_secs, reverse=True)
+    return out
+
+
+@router.get("/api/review-insights/reviewers", response_model=list[ReviewerStat])
+def review_reviewers(request: Request, days: int = 30) -> list[ReviewerStat]:
+    """Per-reviewer responsiveness: current pending queue + median response time
+    + reviews in the window. The bottleneck floats to the top. Admin."""
+    _require_admin(request)
+    since = _now() - max(1, days) * 86400
+
+    pending: dict[str, int] = {}
+    latencies: dict[str, list[float]] = {}
+    reviews: dict[str, int] = {}
+    for r in _app_db.get_reviewer_activity_rows():
+        who = r["reviewer"]
+        req, resp = r["requested_at"], r["responded_at"]
+        if req > 0 and resp == 0 and r["pr_state"] == "open":
+            pending[who] = pending.get(who, 0) + 1
+        if resp > 0 and resp >= since:
+            reviews[who] = reviews.get(who, 0) + 1
+            if req > 0 and resp >= req:
+                latencies.setdefault(who, []).append(resp - req)
+
+    avatars = {c["login"]: c["avatar_url"] for c in _app_db.list_contributors(include_bots=True)}
+    everyone = set(pending) | set(reviews)
+    stats = [
+        ReviewerStat(
+            reviewer=who,
+            avatar_url=avatars.get(who, ""),
+            pending=pending.get(who, 0),
+            reviews=reviews.get(who, 0),
+            median_response_secs=_median(latencies.get(who, [])),
+        )
+        for who in everyone
+    ]
+    # Bottleneck first: biggest pending queue, then slowest median response.
+    stats.sort(key=lambda s: (s.pending, s.median_response_secs or 0), reverse=True)
+    return stats
 
 
 @router.get("/api/stats", response_model=OrgStatsModel)

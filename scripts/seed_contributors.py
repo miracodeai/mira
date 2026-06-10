@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import random
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -54,7 +54,7 @@ CATEGORIES = ["bug", "security", "performance", "style", "testing"]
 def _day_epoch() -> float:
     """A weekday-biased, recency-biased timestamp within the last year."""
     days_ago = int(random.triangular(0, 364, 45))  # mode ~45 days ago
-    d = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    d = datetime.now(UTC) - timedelta(days=days_ago)
     if d.weekday() >= 5 and random.random() < 0.75:  # mostly skip weekends
         d -= timedelta(days=2)
     d = d.replace(hour=random.randint(8, 19), minute=random.randint(0, 59))
@@ -151,13 +151,122 @@ def seed() -> None:
     for store in stores.values():
         store.close()
 
+    rev = seed_review_insights(db)
+
     print(f"Seeded contributors into {DB_URL or os.path.join(INDEX_DIR, '_app.db')}")
     print(
         f"  {len(CONTRIBUTORS)} contributors across {len(REPOS)} repos — "
         f"{totals['commits']} commits, {totals['prs']} PRs "
         f"({totals['merges']} merged), {totals['reviews']} reviews"
     )
-    print("Start the app (scripts/start_local.sh) and open the Contributors page.")
+    print(
+        f"  review insights: {rev['open']} open PRs ({rev['stale']} stale), "
+        f"{rev['merged']} merged for throughput"
+    )
+    print("Start the app (scripts/start_local.sh) and open the Review page.")
+
+
+def seed_review_insights(db) -> dict:  # type: ignore[no-untyped-def]
+    """Seed pull_requests + pr_reviewers for the Review-health page: open/stale
+    PRs with pending + answered reviewers, and recent merged PRs for throughput."""
+    import time
+
+    now = time.time()
+    DAY = 86400
+    HOUR = 3600
+    humans = [(login, name) for login, name, _ in CONTRIBUTORS if not login.endswith("[bot]")]
+    logins = [h[0] for h in humans]
+    # jonas-k is the deliberate bottleneck: slow + a deep pending queue.
+    bottleneck = "jonas-k"
+
+    counts = {"open": 0, "stale": 0, "merged": 0}
+    pr_no = 5000
+
+    # ── Open PRs (some stale, some fresh) ──
+    for _ in range(26):
+        pr_no += 1
+        repo = random.choice(REPOS)
+        author = random.choice(logins)
+        age_days = random.choices([1, 2, 4, 7, 12, 20], weights=[4, 4, 3, 2, 2, 1])[0]
+        created = now - age_days * DAY
+        idle_days = random.choice([0, 1, 2, 4, 6, 9])
+        updated = min(now, created + (age_days - idle_days) * DAY)
+        db.upsert_pull_request(
+            OWNER, repo, pr_no, author=author, title=random.choice(_PR_TITLES),
+            url=f"https://github.com/{OWNER}/{repo}/pull/{pr_no}", state="open",
+            draft=random.random() < 0.1, created_at=created, updated_at=updated,
+        )
+        counts["open"] += 1
+        if now - updated > 3 * DAY:
+            counts["stale"] += 1
+        # Assign 1–2 reviewers (not the author).
+        candidates = [r for r in logins if r != author]
+        for reviewer in random.sample(candidates, k=random.randint(1, 2)):
+            requested = created + random.randint(0, 6 * HOUR)
+            slow = reviewer == bottleneck
+            responds = random.random() < (0.25 if slow else 0.65)
+            if responds:
+                latency = random.randint(2 * DAY, 5 * DAY) if slow else random.randint(HOUR, DAY)
+                responded = min(now, requested + latency)
+                state = random.choice(["approved", "approved", "changes_requested", "commented"])
+                db.upsert_pr_reviewer(
+                    OWNER, repo, pr_no, reviewer, requested_at=requested,
+                    responded_at=responded, state=state,
+                )
+                db.set_pr_first_review(OWNER, repo, pr_no, responded)
+            else:
+                db.upsert_pr_reviewer(OWNER, repo, pr_no, reviewer, requested_at=requested)
+
+    # Stack extra pending requests on the bottleneck so they top the leaderboard.
+    for _ in range(5):
+        pr_no += 1
+        repo = random.choice(REPOS)
+        author = random.choice([r for r in logins if r != bottleneck])
+        created = now - random.randint(2, 8) * DAY
+        db.upsert_pull_request(
+            OWNER, repo, pr_no, author=author, title=random.choice(_PR_TITLES),
+            url=f"https://github.com/{OWNER}/{repo}/pull/{pr_no}", state="open",
+            created_at=created, updated_at=created,
+        )
+        counts["open"] += 1
+        if now - created > 3 * DAY:
+            counts["stale"] += 1
+        db.upsert_pr_reviewer(OWNER, repo, pr_no, bottleneck, requested_at=created + HOUR)
+
+    # ── Recent merged PRs for throughput medians (this week vs last week) ──
+    for week in (0, 1):
+        # Make the recent week a bit faster, so trends show an improvement.
+        ttfr_hi = 18 * HOUR if week == 0 else 30 * HOUR
+        for _ in range(22):
+            pr_no += 1
+            repo = random.choice(REPOS)
+            author = random.choice(logins)
+            merged = now - (week * 7 + random.randint(0, 6)) * DAY
+            ttfr = random.randint(HOUR, ttfr_hi)
+            ttm = ttfr + random.randint(2 * HOUR, 3 * DAY)
+            created = merged - ttm
+            db.upsert_pull_request(
+                OWNER, repo, pr_no, author=author, title=random.choice(_PR_TITLES),
+                url=f"https://github.com/{OWNER}/{repo}/pull/{pr_no}", state="merged",
+                created_at=created, updated_at=merged, merged_at=merged,
+            )
+            db.set_pr_first_review(OWNER, repo, pr_no, created + ttfr)
+            counts["merged"] += 1
+    return counts
+
+
+_PR_TITLES = [
+    "Fix flaky checkout test",
+    "Add retry to webhook delivery",
+    "Refactor auth middleware",
+    "Bump dependencies",
+    "Improve query performance on dashboard",
+    "Handle null avatar URLs",
+    "Add pagination to packages page",
+    "Cache installation tokens",
+    "Tidy up error handling",
+    "Support draft PRs in review",
+]
 
 
 if __name__ == "__main__":
