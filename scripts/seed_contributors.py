@@ -183,6 +183,13 @@ def seed_review_insights(db) -> dict:  # type: ignore[no-untyped-def]
     logins = [h[0] for h in humans]
     # jonas-k is the deliberate bottleneck: slow + a deep pending queue.
     bottleneck = "jonas-k"
+    # diego-mendez is the deliberate rubber-stamper: approves without real review.
+    stamper = "diego-mendez"
+
+    def _bare(reviewer: str, state: str) -> int:
+        if state != "approved":
+            return 0
+        return 1 if random.random() < (0.8 if reviewer == stamper else 0.2) else 0
 
     counts = {"open": 0, "stale": 0, "merged": 0}
     pr_no = 5000
@@ -216,7 +223,7 @@ def seed_review_insights(db) -> dict:  # type: ignore[no-untyped-def]
                 state = random.choice(["approved", "approved", "changes_requested", "commented"])
                 db.upsert_pr_reviewer(
                     OWNER, repo, pr_no, reviewer, requested_at=requested,
-                    responded_at=responded, state=state,
+                    responded_at=responded, state=state, bare_approval=_bare(reviewer, state),
                 )
                 db.set_pr_first_review(OWNER, repo, pr_no, responded)
             else:
@@ -263,6 +270,7 @@ def seed_review_insights(db) -> dict:  # type: ignore[no-untyped-def]
             db.upsert_pr_reviewer(
                 OWNER, repo, pr_no, reviewer,
                 requested_at=created, responded_at=first_review, state=state,
+                bare_approval=_bare(reviewer, state),
             )
             counts["merged"] += 1
     return counts

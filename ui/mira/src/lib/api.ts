@@ -356,6 +356,8 @@ export interface ReviewSummary {
   awaiting_review: number
   merged: number
   approved_merged: number
+  approvals: number
+  rubber_stamps: number
   health_score: number | null
   health: HealthComponent[]
   current: ThroughputWindow
@@ -368,6 +370,9 @@ export interface ReviewerStat {
   pending: number
   reviews: number
   median_response_secs: number | null
+  approvals: number
+  rubber_stamps: number
+  rubber_stamp_rate: number
 }
 
 export interface OpenPrReviewer {

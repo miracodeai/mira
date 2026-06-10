@@ -1963,6 +1963,8 @@ class ReviewSummary(BaseModel):
     awaiting_review: int
     merged: int = 0
     approved_merged: int = 0
+    approvals: int = 0  # approvals submitted in the window (org-wide)
+    rubber_stamps: int = 0  # of those, approvals with no substantive review
     health_score: int | None = None  # 0–100
     health: list[HealthComponent] = []
     current: ThroughputWindow
@@ -1975,6 +1977,9 @@ class ReviewerStat(BaseModel):
     pending: int = 0  # PRs currently waiting on this person's review
     reviews: int = 0  # reviews submitted in the window
     median_response_secs: float | None = None  # requested → first review
+    approvals: int = 0  # approvals submitted in the window
+    rubber_stamps: int = 0  # approvals with no substantive review
+    rubber_stamp_rate: float = 0.0  # rubber_stamps / approvals × 100
 
 
 class OpenPrReviewer(BaseModel):
@@ -2119,6 +2124,15 @@ def review_summary(request: Request, days: int = 7, stale_days: int = 3) -> Revi
         else None
     )
 
+    # ── Org-wide rubber-stamps ── approvals (in window) with no substantive review.
+    org_approvals = 0
+    org_rubber_stamps = 0
+    for r in _app_db.get_reviewer_activity_rows():
+        if r["responded_at"] >= now - window and r["review_state"] == "approved":
+            org_approvals += 1
+            if r["bare_approval"]:
+                org_rubber_stamps += 1
+
     return ReviewSummary(
         days=days,
         open_prs=len(active),
@@ -2126,6 +2140,8 @@ def review_summary(request: Request, days: int = 7, stale_days: int = 3) -> Revi
         awaiting_review=awaiting,
         merged=merged_n,
         approved_merged=approved_n,
+        approvals=org_approvals,
+        rubber_stamps=org_rubber_stamps,
         health_score=health_score,
         health=components,
         current=current,
@@ -2202,6 +2218,8 @@ def review_reviewers(request: Request, days: int = 30) -> list[ReviewerStat]:
     pending: dict[str, int] = {}
     latencies: dict[str, list[float]] = {}
     reviews: dict[str, int] = {}
+    approvals: dict[str, int] = {}
+    rubber_stamps: dict[str, int] = {}
     for r in _app_db.get_reviewer_activity_rows():
         who = r["reviewer"]
         req, resp = r["requested_at"], r["responded_at"]
@@ -2211,6 +2229,10 @@ def review_reviewers(request: Request, days: int = 30) -> list[ReviewerStat]:
             reviews[who] = reviews.get(who, 0) + 1
             if req > 0 and resp >= req:
                 latencies.setdefault(who, []).append(resp - req)
+            if r["review_state"] == "approved":
+                approvals[who] = approvals.get(who, 0) + 1
+                if r["bare_approval"]:
+                    rubber_stamps[who] = rubber_stamps.get(who, 0) + 1
 
     avatars = {c["login"]: c["avatar_url"] for c in _app_db.list_contributors(include_bots=True)}
     everyone = set(pending) | set(reviews)
@@ -2221,6 +2243,13 @@ def review_reviewers(request: Request, days: int = 30) -> list[ReviewerStat]:
             pending=pending.get(who, 0),
             reviews=reviews.get(who, 0),
             median_response_secs=_median(latencies.get(who, [])),
+            approvals=approvals.get(who, 0),
+            rubber_stamps=rubber_stamps.get(who, 0),
+            rubber_stamp_rate=(
+                round(rubber_stamps.get(who, 0) / approvals[who] * 100, 1)
+                if approvals.get(who)
+                else 0.0
+            ),
         )
         for who in everyone
     ]

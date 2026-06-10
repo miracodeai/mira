@@ -167,6 +167,44 @@ async def handle_pr_review_meta(
         logger.exception("Error handling PR review meta")
 
 
+async def _classify_bare_approval(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    owner: str,
+    name: str,
+    number: int,
+    review: dict[str, Any],
+) -> int:
+    """1 if this approval is a rubber-stamp (no substantive body or inline
+    comments), else 0. Best-effort — any failure returns 0 and the next backfill
+    reclassifies."""
+    from mira.github_app.review_signals import is_bare_approval, is_substantive
+
+    body = review.get("body") or ""
+    # A substantive summary already disqualifies it — no API call needed.
+    if is_substantive(body):
+        return 0
+    try:
+        installation_id = payload.get("installation", {}).get("id", 0)
+        token = await app_auth.get_installation_token(installation_id)
+        provider = create_provider("github", token)
+        pr_info = PRInfo(
+            title="",
+            description="",
+            base_branch="",
+            head_branch="",
+            url=f"https://github.com/{owner}/{name}/pull/{number}",
+            number=number,
+            owner=owner,
+            repo=name,
+        )
+        comments = await provider.get_review_inline_comments(pr_info, int(review.get("id") or 0))
+    except Exception as exc:
+        logger.debug("Could not fetch review comments for bare-approval check: %s", exc)
+        comments = []
+    return int(is_bare_approval("approved", body, comments))
+
+
 async def handle_pull_request_review(
     payload: dict[str, Any],
     app_auth: GitHubAppAuth,
@@ -197,9 +235,16 @@ async def handle_pull_request_review(
 
         from mira.dashboard.api import _app_db
 
+        # Classify rubber-stamp approvals (best-effort; backfill is the source of
+        # truth). Only approvals can be bare, and a substantive body short-circuits
+        # before we spend an API call fetching inline comments.
+        bare = 0
+        if state == "approved":
+            bare = await _classify_bare_approval(payload, app_auth, owner, name, number, review)
+
         _record_pr_lifecycle(payload)
         _app_db.upsert_pr_reviewer(
-            owner, name, number, reviewer, responded_at=submitted, state=state
+            owner, name, number, reviewer, responded_at=submitted, state=state, bare_approval=bare
         )
         _app_db.set_pr_first_review(owner, name, number, submitted)
         # Also count it as a review contribution for the heatmap.

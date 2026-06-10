@@ -55,6 +55,7 @@ def _review(review_id: int, reviewer: str) -> MagicMock:
     r.user = _user(reviewer, uid=99)
     r.submitted_at = datetime(2024, 1, 4, tzinfo=UTC)
     r.state = "approved"
+    r.body = "Looks great, thanks for the thorough tests on this change"
     return r
 
 

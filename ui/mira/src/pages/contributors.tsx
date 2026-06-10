@@ -162,6 +162,29 @@ function ReviewersCard() {
         </div>
       ),
     },
+    {
+      key: "rubber_stamp_rate",
+      header: "Rubber-stamps",
+      align: "right",
+      sortable: true,
+      sortValue: (r) => r.rubber_stamp_rate,
+      cell: (r) =>
+        r.approvals > 0 ? (
+          <div className="flex items-center justify-end gap-2">
+            <span className="tabular-nums">
+              {r.rubber_stamps}/{r.approvals}
+            </span>
+            <BarGauge
+              value={r.rubber_stamp_rate}
+              max={100}
+              tone="heat"
+              label={`${r.rubber_stamp_rate}% of approvals were rubber-stamps`}
+            />
+          </div>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
+    },
   ]
 
   const table = useDataTable({
@@ -204,6 +227,10 @@ function ReviewersCard() {
             <p className="text-xs text-muted-foreground">
               ~ Median response is approximate for backfilled PRs (request time estimated from PR
               creation); it sharpens as live review events come in.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Rubber-stamps are approvals with no substantive review — empty/&ldquo;LGTM&rdquo; body
+              and no real inline comments.
             </p>
           </>
         )}
@@ -258,7 +285,7 @@ export function ContributorsPage() {
 
       {refreshError && <p className="text-sm text-destructive">{refreshError}</p>}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard
           label="Open PRs"
           value={summary?.open_prs ?? 0}
@@ -275,6 +302,16 @@ export function ContributorsPage() {
           label="Approved & merged"
           value={summary?.approved_merged ?? 0}
           footer={`of ${summary?.merged ?? 0} merged this week`}
+          loading={summaryLoading}
+        />
+        <StatCard
+          label="Rubber-stamps"
+          value={summary?.rubber_stamps ?? 0}
+          footer={
+            summary && summary.approvals > 0
+              ? `${Math.round((summary.rubber_stamps / summary.approvals) * 100)}% of ${summary.approvals} approvals`
+              : "approvals with no real review"
+          }
           loading={summaryLoading}
         />
         <StatCard

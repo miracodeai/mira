@@ -93,6 +93,45 @@ def test_review_summary(patched_api: AppDatabase) -> None:
     assert s.current.time_to_first_review_secs == HOUR
 
 
+def test_is_bare_approval() -> None:
+    from mira.github_app.review_signals import is_bare_approval
+
+    assert is_bare_approval("approved", "", []) is True
+    assert is_bare_approval("approved", "LGTM!", []) is True
+    assert is_bare_approval("approved", "LGTM", ["nice"]) is True  # trivial comment doesn't save it
+    assert is_bare_approval("approved", "Please add a null check before the deref on line 40", []) is False
+    assert is_bare_approval("approved", "LGTM", ["This will crash on an empty list — guard it"]) is False
+    assert is_bare_approval("changes_requested", "", []) is False  # only approvals can be bare
+
+
+def test_bare_approval_persists_and_is_guarded(db: AppDatabase) -> None:
+    db.upsert_pull_request("o", "r", 1, state="open", created_at=1, updated_at=1)
+    db.upsert_pr_reviewer("o", "r", 1, "alice", responded_at=5, state="approved", bare_approval=1)
+    [row] = db.get_reviewer_activity_rows()
+    assert row["bare_approval"] == 1 and row["review_state"] == "approved"
+    # A later request-only upsert (no responded_at) must NOT clobber the flag.
+    db.upsert_pr_reviewer("o", "r", 1, "alice", requested_at=1)
+    assert db.get_reviewer_activity_rows()[0]["bare_approval"] == 1
+
+
+def test_reviewer_rubber_stamp_rate(patched_api: AppDatabase) -> None:
+    now = time.time()
+    # diego: 2 approvals, both bare → 100%. eve: 2 approvals, 1 bare → 50%.
+    for n, (who, bare) in enumerate(
+        [("diego", 1), ("diego", 1), ("eve", 1), ("eve", 0)], start=1
+    ):
+        patched_api.upsert_pull_request("o", "r", n, state="open", created_at=now - DAY, updated_at=now - DAY)
+        patched_api.upsert_pr_reviewer(
+            "o", "r", n, who, responded_at=now - HOUR, state="approved", bare_approval=bare
+        )
+    stats = {s.reviewer: s for s in api.review_reviewers(_admin(), days=30)}
+    assert stats["diego"].rubber_stamps == 2 and stats["diego"].approvals == 2
+    assert stats["diego"].rubber_stamp_rate == 100.0
+    assert stats["eve"].rubber_stamp_rate == 50.0
+    summary = api.review_summary(_admin(), days=7)
+    assert summary.approvals == 4 and summary.rubber_stamps == 3
+
+
 def test_review_health_score(patched_api: AppDatabase) -> None:
     now = time.time()
     # Two PRs merged this week — one approved by a human, one not.

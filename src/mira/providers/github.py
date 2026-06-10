@@ -932,6 +932,26 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to fetch human review comments: {e}") from e
 
+    async def get_review_inline_comments(self, pr_info: PRInfo, review_id: int) -> list[str]:
+        """Return the bodies of the inline comments that belong to one review
+        (matched via ``pull_request_review_id``). Used to classify whether an
+        approval was a substantive review or a rubber-stamp."""
+
+        @_retry_transient
+        def _fetch() -> list[str]:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            pr = gh_repo.get_pull(pr_info.number)
+            return [
+                c.body or ""
+                for c in pr.get_review_comments()
+                if getattr(c, "pull_request_review_id", None) == review_id
+            ]
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch review inline comments: {e}") from e
+
 
 _LABEL_TO_CATEGORY = {label: cat for cat, (_, label) in _CATEGORY_DISPLAY.items()}
 _CATEGORY_EMOJI_TO_NAME = {emoji: cat for cat, (emoji, _) in _CATEGORY_DISPLAY.items()}

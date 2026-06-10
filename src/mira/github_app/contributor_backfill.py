@@ -173,12 +173,24 @@ def _record_pr_insights(db: Any, owner: str, repo: str, pr: Any) -> None:
 
 
 def _record_reviews(db: Any, owner: str, repo: str, pr: Any, counts: dict[str, int]) -> None:
+    from mira.github_app.review_signals import is_bare_approval
+
     author_login = pr.user.login if pr.user else ""
     try:
         reviews = pr.get_reviews()
     except GithubException as exc:
         logger.debug("Review fetch failed for PR #%s: %s", pr.number, exc)
         return
+    # Inline comments, grouped by the review they belong to — for rubber-stamp
+    # classification. One extra call per PR; tolerate failure.
+    comments_by_review: dict[int, list[str]] = {}
+    try:
+        for c in pr.get_review_comments():
+            rid = getattr(c, "pull_request_review_id", None)
+            if rid is not None:
+                comments_by_review.setdefault(rid, []).append(c.body or "")
+    except GithubException as exc:
+        logger.debug("Review-comment fetch failed for PR #%s: %s", pr.number, exc)
     for review in reviews:
         r_user = review.user
         r_login = r_user.login if r_user else ""
@@ -186,6 +198,7 @@ def _record_reviews(db: Any, owner: str, repo: str, pr: Any, counts: dict[str, i
         if not r_login or r_login == author_login or _is_bot(r_user):
             continue
         submitted = _dt_to_epoch(review.submitted_at)
+        state = (review.state or "").lower()
         db.record_contribution_for_login(
             "github", r_login, owner, repo, "review", f"review:{review.id}",
             event_at=submitted,
@@ -196,11 +209,13 @@ def _record_reviews(db: Any, owner: str, repo: str, pr: Any, counts: dict[str, i
             title=pr.title or "",
         )
         counts["reviews"] += 1
-        # Review-insights: responsiveness + first-review timing.
+        # Review-insights: responsiveness, first-review timing, rubber-stamp flag.
+        bare = is_bare_approval(state, review.body or "", comments_by_review.get(review.id, []))
         db.upsert_pr_reviewer(
             owner, repo, pr.number, r_login,
             responded_at=submitted,
-            state=(review.state or "").lower(),
+            state=state,
+            bare_approval=int(bare),
         )
         db.set_pr_first_review(owner, repo, pr.number, submitted)
 

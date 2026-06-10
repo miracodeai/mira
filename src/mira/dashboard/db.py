@@ -186,6 +186,8 @@ CREATE TABLE IF NOT EXISTS pr_reviewers (
     requested_at REAL NOT NULL DEFAULT 0,   -- 0 = not formally requested
     responded_at REAL NOT NULL DEFAULT 0,   -- 0 = hasn't reviewed yet
     state TEXT NOT NULL DEFAULT '',          -- approved | changes_requested | commented
+    -- 1 = "rubber-stamp": an approval with no substantive body or inline comments
+    bare_approval INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (owner, repo, pr_number, reviewer)
 );
 """
@@ -509,6 +511,14 @@ class AppDatabase:
             self._sqlite_conn.execute(
                 "ALTER TABLE pr_review_progress ADD COLUMN last_reviewed_sha TEXT NOT NULL DEFAULT ''"
             )
+        # bare_approval (rubber-stamp flag) added to pr_reviewers post-launch.
+        reviewer_cols = {
+            r[1] for r in self._sqlite_conn.execute("PRAGMA table_info(pr_reviewers)").fetchall()
+        }
+        if reviewer_cols and "bare_approval" not in reviewer_cols:
+            self._sqlite_conn.execute(
+                "ALTER TABLE pr_reviewers ADD COLUMN bare_approval INTEGER NOT NULL DEFAULT 0"
+            )
         self._sqlite_conn.commit()
         logger.info("App database: SQLite at %s", db_path)
 
@@ -532,6 +542,10 @@ class AppDatabase:
                 cur.execute(
                     "ALTER TABLE pr_review_progress ADD COLUMN IF NOT EXISTS "
                     "last_reviewed_sha TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
+                    "ALTER TABLE pr_reviewers ADD COLUMN IF NOT EXISTS "
+                    "bare_approval INTEGER NOT NULL DEFAULT 0"
                 )
             logger.info("App database: PostgreSQL")
         except ImportError:
@@ -1869,13 +1883,18 @@ class AppDatabase:
         requested_at: float = 0.0,
         responded_at: float = 0.0,
         state: str = "",
+        bare_approval: int = 0,
     ) -> None:
         """Merge a review request and/or a review into the (PR, reviewer) row:
-        keeps the earliest request + earliest response, and the latest state."""
+        keeps the earliest request + earliest response, and the latest state.
+
+        ``bare_approval`` (rubber-stamp flag) is only updated on a review-
+        recording call (``responded_at>0``), so a later bare review-*request*
+        upsert never clobbers a recorded classification."""
         self._exec(
             "INSERT INTO pr_reviewers "
-            "(owner, repo, pr_number, reviewer, requested_at, responded_at, state) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "(owner, repo, pr_number, reviewer, requested_at, responded_at, state, bare_approval) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(owner, repo, pr_number, reviewer) DO UPDATE SET "
             "requested_at=CASE "
             "  WHEN pr_reviewers.requested_at=0 THEN excluded.requested_at "
@@ -1885,8 +1904,9 @@ class AppDatabase:
             "  WHEN excluded.responded_at=0 THEN pr_reviewers.responded_at "
             "  WHEN pr_reviewers.responded_at=0 OR excluded.responded_at<pr_reviewers.responded_at THEN excluded.responded_at "
             "  ELSE pr_reviewers.responded_at END, "
-            "state=CASE WHEN excluded.state!='' THEN excluded.state ELSE pr_reviewers.state END",
-            (owner, repo, number, reviewer, requested_at, responded_at, state),
+            "state=CASE WHEN excluded.state!='' THEN excluded.state ELSE pr_reviewers.state END, "
+            "bare_approval=CASE WHEN excluded.responded_at>0 THEN excluded.bare_approval ELSE pr_reviewers.bare_approval END",
+            (owner, repo, number, reviewer, requested_at, responded_at, state, bare_approval),
         )
 
     def remove_pr_reviewer(self, owner: str, repo: str, number: int, reviewer: str) -> None:
@@ -1931,12 +1951,19 @@ class AppDatabase:
         """All (reviewer, request/response times, PR state) rows — for the
         responsiveness/bottleneck stats, aggregated in Python."""
         rows = self._rows(
-            "SELECT r.reviewer, r.requested_at, r.responded_at, p.state "
+            "SELECT r.reviewer, r.requested_at, r.responded_at, p.state, r.state, r.bare_approval "
             "FROM pr_reviewers r JOIN pull_requests p "
             "ON p.owner=r.owner AND p.repo=r.repo AND p.number=r.pr_number"
         )
         return [
-            {"reviewer": r[0], "requested_at": r[1] or 0.0, "responded_at": r[2] or 0.0, "pr_state": r[3]}
+            {
+                "reviewer": r[0],
+                "requested_at": r[1] or 0.0,
+                "responded_at": r[2] or 0.0,
+                "pr_state": r[3],
+                "review_state": r[4] or "",
+                "bare_approval": int(r[5] or 0),
+            }
             for r in rows
         ]
 
