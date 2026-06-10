@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, RefreshCw, Search } from "lucide-react"
+import { ArrowDown, ArrowUp, Info, RefreshCw, Search } from "lucide-react"
 import { type ReactNode, useState } from "react"
 import { useNavigate } from "react-router"
 import { BarGauge } from "@/components/dashboard/bar-gauge"
@@ -82,16 +82,30 @@ function StatCard({
   value,
   footer,
   loading,
+  tip,
 }: {
   label: string
   value: string | number
   footer?: ReactNode
   loading: boolean
+  tip?: string
 }) {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardDescription>{label}</CardDescription>
+        <CardDescription className="flex items-center gap-1">
+          {label}
+          {tip && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button type="button" className="text-muted-foreground hover:text-foreground">
+                  <Info className="h-3.5 w-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>{tip}</TooltipContent>
+            </Tooltip>
+          )}
+        </CardDescription>
         <CardTitle className="text-4xl tabular-nums">
           {loading ? <Skeleton className="h-9 w-20" /> : value}
         </CardTitle>
@@ -321,6 +335,7 @@ export function ContributorsPage() {
         />
         <StatCard
           label="Rubber-stamps"
+          tip="Approvals with no substantive review — empty/“LGTM” body and no real inline comments."
           value={summary?.rubber_stamps ?? 0}
           footer={
             summary && summary.approvals > 0
