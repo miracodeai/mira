@@ -13,7 +13,10 @@ import logging
 from mira.config import load_config
 from mira.dashboard.models_config import llm_config_for
 from mira.exceptions import ResponseParseError
-from mira.llm.prompts.review import build_security_review_prompt
+from mira.llm.prompts.review import (
+    build_dependency_review_prompt,
+    build_security_review_prompt,
+)
 from mira.llm.provider import (
     SUBMIT_CRITIQUE_TOOL,
     SUBMIT_REVIEW_TOOL,
@@ -186,6 +189,76 @@ async def security_review_pass(
             c.category = "security"
     if comments:
         logger.info("Security pass produced %d candidate comment(s)", len(comments))
+    return comments
+
+
+async def dependency_review_pass(
+    llm: LLMProvider,
+    manifest_files: list,
+    existing_packages: list[str] | None = None,
+    pr_title: str = "",
+    indexing_llm: LLMProvider | None = None,
+) -> list[ReviewComment]:
+    """Flag newly-added dependencies that duplicate an existing one.
+
+    Runs in parallel with the main review over only the changed manifest files
+    (caller filters those out). ``existing_packages`` is the set of dependency
+    names already declared in the repo (from the index) so the model can spot a
+    new package that overlaps one already present.
+
+    Returns ``[]`` when no manifest changed or on any failure, so a transient
+    LLM/API error doesn't kill the main review. Mirrors ``security_review_pass``.
+    """
+    if not manifest_files:
+        return []
+
+    dep_llm = indexing_llm or _indexing_llm(llm)
+
+    messages = build_dependency_review_prompt(
+        files=manifest_files,
+        existing_packages=existing_packages,
+        pr_title=pr_title,
+    )
+    try:
+        raw = await dep_llm.complete_with_tools(
+            messages=messages,
+            tools=[SUBMIT_REVIEW_TOOL],
+            temperature=0.0,
+        )
+    except Exception as exc:
+        # Retry on the main LLM rather than drop the pass entirely.
+        if dep_llm is not llm:
+            logger.debug(
+                "Dependency pass on indexing tier failed (%s); retrying on review LLM",
+                exc,
+            )
+            try:
+                raw = await llm.complete_with_tools(
+                    messages=messages,
+                    tools=[SUBMIT_REVIEW_TOOL],
+                    temperature=0.0,
+                )
+            except Exception as exc2:
+                logger.warning("Dependency review pass failed: %s", exc2)
+                return []
+        else:
+            logger.warning("Dependency review pass failed: %s", exc)
+            return []
+
+    try:
+        parsed = parse_llm_response(raw)
+        comments = convert_to_review_comments(parsed, diff_files=manifest_files)
+    except ResponseParseError as exc:
+        logger.warning("Dependency review pass parse error: %s", exc)
+        return []
+    except Exception as exc:
+        logger.warning("Dependency review pass conversion failed: %s", exc)
+        return []
+
+    for c in comments:
+        c.category = "dependency"
+    if comments:
+        logger.info("Dependency pass produced %d candidate comment(s)", len(comments))
     return comments
 
 

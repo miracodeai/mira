@@ -19,6 +19,7 @@ from mira.core.file_filter import filter_files
 from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
     agentic_review_loop,
+    dependency_review_pass,
     regenerate_summary,
     security_review_pass,
     self_critique,
@@ -27,6 +28,7 @@ from mira.core.priority import rank_files
 from mira.core.threads import resolve_verified_threads, short_thread_description
 from mira.exceptions import ResponseParseError
 from mira.index.context import build_code_context
+from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
 from mira.llm.prompts.review import (
     build_review_prompt,
@@ -40,6 +42,7 @@ from mira.llm.response_parser import (
 )
 from mira.models import (
     WALKTHROUGH_MARKER,
+    FileChangeType,
     KeyIssue,
     PRInfo,
     ReviewChunk,
@@ -170,6 +173,25 @@ def _security_relevant_files(files: list) -> list:
         if any(lower.endswith(s) for s in _SECURITY_TEST_SUFFIXES):
             continue
         keep.append(f)
+    return keep
+
+
+def _manifest_files(files: list) -> list:
+    """Return changed dependency-manifest files for the dependency pass.
+
+    Keeps package.json / pyproject.toml / requirements.txt / go.mod / Dockerfile
+    that were added or modified. Lockfiles are excluded — they record resolved
+    transitive deps that churn constantly and would only add noise; we only care
+    about human-declared dependencies. Deleted manifests add nothing to check.
+    """
+    keep = []
+    for f in files:
+        if (
+            f.change_type in (FileChangeType.ADDED, FileChangeType.MODIFIED)
+            and is_manifest(f.path)
+            and not _is_lockfile_path(f.path)
+        ):
+            keep.append(f)
     return keep
 
 
@@ -985,7 +1007,41 @@ class ReviewEngine:
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])
         )
-        chunk_results, security_comments = await _asyncio.gather(review_task, security_task)
+
+        # Dependency-overlap pass: only when the PR touches a manifest file, so
+        # most PRs pay nothing. When it does, fetch the repo's existing package
+        # names from the index so the pass can spot a duplicate of one already
+        # present (empty list on an unindexed repo — pass falls back to the diff).
+        manifest_files = (
+            _manifest_files(filtered) if self.config.review.dependency_overlap else []
+        )
+        existing_packages: list[str] = []
+        if manifest_files:
+            pr_info = getattr(self, "_pr_info", None)
+            if pr_info is not None:
+                try:
+                    _pkg_store = IndexStore.open(pr_info.owner, pr_info.repo)
+                    existing_packages = sorted(
+                        {p.name for p in _pkg_store.list_manifest_packages()}
+                    )
+                    _pkg_store.close()
+                except Exception as exc:
+                    logger.debug("Manifest package lookup failed: %s", exc)
+        dependency_task = _asyncio.create_task(
+            dependency_review_pass(
+                self.llm,
+                manifest_files,
+                existing_packages,
+                pr_title,
+                indexing_llm=self.indexing_llm,
+            )
+            if manifest_files
+            else _asyncio.sleep(0, result=[])
+        )
+
+        chunk_results, security_comments, dependency_comments = await _asyncio.gather(
+            review_task, security_task, dependency_task
+        )
 
         all_comments: list[ReviewComment] = []
         all_key_issues: list[KeyIssue] = []
@@ -996,6 +1052,7 @@ class ReviewEngine:
             if summary_text:
                 summaries.append(summary_text)
         all_comments.extend(security_comments)
+        all_comments.extend(dependency_comments)
 
         all_comments = [classify_severity(c) for c in all_comments]
 

@@ -441,6 +441,12 @@ export function SettingsPage() {
                 "Blast radius",
                 "Lists dependent repositories that import code touched by this PR in the walkthrough comment."
               )}
+              {boolField(
+                "review",
+                "dependency_overlap",
+                "Duplicate dependency check",
+                "Warns when a PR adds a dependency that duplicates an existing one (e.g. a second table or HTTP-client library)."
+              )}
               {numField(
                 "review",
                 "max_concurrent_chunks",
