@@ -236,7 +236,7 @@ function ReviewersCard() {
       <CardHeader>
         <CardTitle>Reviewer responsiveness</CardTitle>
         <CardDescription>
-          Who&apos;s the bottleneck — pending review queue and how fast people respond once asked
+          Each reviewer&apos;s current queue and how quickly they respond once asked
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
