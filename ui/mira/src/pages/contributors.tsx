@@ -1,8 +1,10 @@
 import { AlertTriangle, ArrowDown, ArrowUp, ExternalLink, RefreshCw, Search } from "lucide-react"
 import { type ReactNode, useState } from "react"
 import { useNavigate } from "react-router"
+import { Label, PolarAngleAxis, PolarRadiusAxis, RadialBar, RadialBarChart } from "recharts"
 
 import { BarGauge } from "@/components/dashboard/bar-gauge"
+import { type ChartConfig, ChartContainer } from "@/components/ui/chart"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -90,16 +92,53 @@ function StatCard({
   )
 }
 
-function scoreTone(pct: number): string {
-  if (pct >= 80) return "text-emerald-600 dark:text-emerald-500"
-  if (pct >= 60) return "text-amber-600 dark:text-amber-500"
-  return "text-red-600 dark:text-red-500"
-}
-
 function barTone(pct: number): string {
   if (pct >= 80) return "bg-emerald-500"
   if (pct >= 60) return "bg-amber-500"
   return "bg-red-500"
+}
+
+function scoreHex(pct: number): string {
+  if (pct >= 80) return "#10b981" // emerald-500
+  if (pct >= 60) return "#f59e0b" // amber-500
+  return "#ef4444" // red-500
+}
+
+const HEALTH_CHART_CONFIG = { value: { label: "Health" } } satisfies ChartConfig
+
+/** A shadcn-style radial gauge showing the 0–100 score with the number centred. */
+function HealthRadial({ score }: { score: number | null }) {
+  const value = score ?? 0
+  const data = [{ value, fill: score == null ? "var(--muted-foreground)" : scoreHex(value) }]
+  return (
+    <ChartContainer config={HEALTH_CHART_CONFIG} className="mx-auto aspect-square h-[180px] w-[180px]">
+      <RadialBarChart data={data} startAngle={90} endAngle={-270} innerRadius={70} outerRadius={92}>
+        <PolarAngleAxis type="number" domain={[0, 100]} tick={false} axisLine={false} />
+        <RadialBar dataKey="value" background cornerRadius={10} />
+        <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
+          <Label
+            content={({ viewBox }) => {
+              if (viewBox && "cx" in viewBox && "cy" in viewBox) {
+                const cx = viewBox.cx ?? 0
+                const cy = viewBox.cy ?? 0
+                return (
+                  <text x={cx} y={cy} textAnchor="middle" dominantBaseline="middle">
+                    <tspan x={cx} y={cy} className="fill-foreground text-4xl font-bold tabular-nums">
+                      {score ?? "—"}
+                    </tspan>
+                    <tspan x={cx} y={cy + 24} className="fill-muted-foreground text-xs">
+                      / 100
+                    </tspan>
+                  </text>
+                )
+              }
+              return null
+            }}
+          />
+        </PolarRadiusAxis>
+      </RadialBarChart>
+    </ChartContainer>
+  )
 }
 
 function HealthCard({ summary, loading }: { summary: ReviewSummary | null; loading: boolean }) {
@@ -115,16 +154,7 @@ function HealthCard({ summary, loading }: { summary: ReviewSummary | null; loadi
           <Skeleton className="h-20 w-full" />
         ) : (
           <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
-            <div className="flex items-baseline gap-1">
-              <span
-                className={`text-5xl font-semibold tabular-nums ${
-                  score != null ? scoreTone(score) : "text-muted-foreground"
-                }`}
-              >
-                {score ?? "—"}
-              </span>
-              <span className="text-lg text-muted-foreground">/ 100</span>
-            </div>
+            <HealthRadial score={score} />
             <div className="flex-1 space-y-2.5">
               {(summary?.health ?? []).map((c) => {
                 const pct = Math.round(c.score * 100)
