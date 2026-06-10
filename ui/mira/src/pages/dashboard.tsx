@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react"
-import { Link } from "react-router"
 import {
   Area,
   AreaChart,
@@ -12,9 +11,6 @@ import {
   YAxis,
 } from "recharts"
 
-import { BarGauge } from "@/components/dashboard/bar-gauge"
-import { useAuth } from "@/lib/auth"
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import {
   Card,
   CardContent,
@@ -34,7 +30,6 @@ import { api } from "@/lib/api"
 import { useAsync } from "@/lib/hooks"
 
 export function DashboardPage() {
-  const { user } = useAuth()
   const [period, setPeriod] = useState<"day" | "week" | "month">("day")
 
   const { data: stats, loading: statsLoading } = useAsync(() => api.getOrgStats(), [])
@@ -322,8 +317,6 @@ export function DashboardPage() {
         </Card>
       </div>
 
-      {/* Top contributors — admin-only, mirrors the Contributors page access */}
-      {user?.is_admin && <TopContributors />}
 
       {/* Category bar chart — full width */}
       {periodStats && Object.keys(periodStats.categories).length > 0 && (
@@ -340,71 +333,6 @@ export function DashboardPage() {
         </Card>
       )}
     </div>
-  )
-}
-
-// ── Top contributors ──
-
-function TopContributors() {
-  // Self-contained fetch; swallow errors so the card just hides on failure.
-  const { data, loading } = useAsync(() => api.listContributors("commits").catch(() => []), [])
-  const top = (data ?? []).slice(0, 8)
-  const maxCommits = Math.max(1, ...top.map((c) => c.commits))
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle>Top Contributors</CardTitle>
-            <CardDescription>Most active by commits</CardDescription>
-          </div>
-          <Link
-            to="/contributors"
-            className="text-xs font-medium text-muted-foreground underline-offset-2 hover:underline"
-          >
-            View all →
-          </Link>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {loading ? (
-          <div className="space-y-2">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <Skeleton key={i} className="h-9 w-full" />
-            ))}
-          </div>
-        ) : top.length > 0 ? (
-          <div className="space-y-0.5">
-            {top.map((c) => (
-              <Link
-                key={c.id}
-                to={`/contributors/${encodeURIComponent(c.login)}`}
-                className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-accent"
-              >
-                <Avatar className="h-7 w-7">
-                  {c.avatar_url && <AvatarImage src={c.avatar_url} alt={c.login} />}
-                  <AvatarFallback>{c.login.slice(0, 2).toUpperCase()}</AvatarFallback>
-                </Avatar>
-                <span className="truncate text-sm font-medium">{c.login}</span>
-                <div className="ml-auto flex items-center gap-2">
-                  <span className="text-sm tabular-nums text-muted-foreground">
-                    {c.commits.toLocaleString()}
-                  </span>
-                  <BarGauge
-                    value={c.commits}
-                    max={maxCommits}
-                    label={`${c.commits.toLocaleString()} commits`}
-                  />
-                </div>
-              </Link>
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No contributor activity yet.</p>
-        )}
-      </CardContent>
-    </Card>
   )
 }
 
