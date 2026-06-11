@@ -22,7 +22,7 @@ import {
 import { UserAvatar } from "@/components/ui/user-avatar"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 // Epoch seconds → "Just now" / "5m ago" / "3h ago" / "2d ago" / a date.
 // 0 (never logged in) → "Never".
@@ -40,6 +40,7 @@ function lastSeen(ts: number): string {
 }
 
 export function UsersPage() {
+  useDocumentTitle("Users")
   const { user: currentUser } = useAuth()
   const navigate = useNavigate()
   const [refreshKey, setRefreshKey] = useState(0)

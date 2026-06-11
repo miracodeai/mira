@@ -11,7 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { api, type OrgLearnedRuleModel } from "@/lib/api"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 const SIGNAL_LABEL: Record<string, string> = {
   reject_pattern: "Rejected pattern",
@@ -26,6 +26,7 @@ const SIGNAL_STYLE: Record<string, string> = {
 }
 
 export function LearnedRulesPage() {
+  useDocumentTitle("Learnings")
   const { data: rules, loading } = useAsync(
     () => api.listLearnedRules().catch(() => []),
     [],

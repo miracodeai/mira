@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Brain,
+  ChevronRight,
   ChevronsUpDown,
   Database,
   GitFork,
@@ -18,7 +19,9 @@ import { useEffect, useState } from "react"
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router"
 
 import { useTheme } from "@/components/theme-provider"
+import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { useAsync } from "@/lib/hooks"
 
 const API_BASE = import.meta.env.VITE_API_URL || ""
 
@@ -30,6 +33,11 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,6 +57,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
@@ -64,7 +75,14 @@ const navItems = [
   { to: "/rules", icon: BookOpen, label: "Rules" },
   { to: "/learnings", icon: Brain, label: "Learnings" },
   { to: "/users", icon: Users, label: "Users", adminOnly: true },
-  { to: "/settings", icon: Settings, label: "Settings", adminOnly: true },
+]
+
+// Settings is rendered as a collapsible group (admin-only) with these
+// children rather than a flat nav item.
+const settingsSubItems = [
+  { to: "/settings/models", label: "Models" },
+  { to: "/settings/review", label: "Review" },
+  { to: "/settings/webhooks", label: "Webhooks" },
 ]
 
 const PAGE_LABELS: Record<string, string> = {
@@ -79,11 +97,30 @@ const PAGE_LABELS: Record<string, string> = {
   new: "New",
   account: "Account",
   password: "Password",
+  models: "Models",
+  review: "Review",
+  webhooks: "Webhooks",
 }
 
 function AppBreadcrumb() {
   const location = useLocation()
   const parts = location.pathname.split("/").filter(Boolean)
+
+  // The /settings/webhooks/{id} segment is an opaque id — resolve it to the
+  // webhook's name so the breadcrumb reads "Webhooks / #eng-reviews", not a
+  // raw uuid. Only fetches on that route ({id} is null elsewhere).
+  const webhookId =
+    parts[0] === "settings" &&
+    parts[1] === "webhooks" &&
+    parts.length === 3 &&
+    parts[2] !== "new"
+      ? parts[2]
+      : null
+  const { data: webhookData } = useAsync(
+    () => (webhookId ? api.getWebhook(webhookId) : Promise.resolve(null)),
+    [webhookId]
+  )
+  const webhookName = webhookData?.name ?? null
 
   if (parts.length === 0) {
     return (
@@ -97,7 +134,13 @@ function AppBreadcrumb() {
     )
   }
 
-  const label = (part: string) => PAGE_LABELS[part] || decodeURIComponent(part)
+  const label = (part: string, i: number) => {
+    if (parts[0] === "settings" && parts[1] === "webhooks" && i === 2) {
+      if (part === "new") return "New"
+      return webhookName || "Webhook"
+    }
+    return PAGE_LABELS[part] || decodeURIComponent(part)
+  }
 
   // /repos/{owner}/{repo} doesn't have a real /repos/{owner} route, so the
   // owner segment links back to the repos list with that owner pre-filtered.
@@ -116,9 +159,11 @@ function AppBreadcrumb() {
             {i > 0 && <BreadcrumbSeparator />}
             <BreadcrumbItem>
               {i === parts.length - 1 ? (
-                <BreadcrumbPage>{label(part)}</BreadcrumbPage>
+                <BreadcrumbPage>{label(part, i)}</BreadcrumbPage>
               ) : (
-                <BreadcrumbLink href={hrefFor(i)}>{label(part)}</BreadcrumbLink>
+                <BreadcrumbLink href={hrefFor(i)}>
+                  {label(part, i)}
+                </BreadcrumbLink>
               )}
             </BreadcrumbItem>
           </span>
@@ -130,10 +175,17 @@ function AppBreadcrumb() {
 
 export function DashboardLayout() {
   const { user } = useAuth()
+  const location = useLocation()
+  const onSettings = location.pathname.startsWith("/settings")
 
   const visibleNav = navItems.filter(
     (item) => !("adminOnly" in item && item.adminOnly) || user?.is_admin
   )
+
+  // Active styling keys off aria-current, which NavLink sets on the active
+  // link — single source of truth, no parallel route-matching here.
+  const navActive =
+    "aria-[current=page]:bg-sidebar-accent aria-[current=page]:font-semibold aria-[current=page]:text-sidebar-accent-foreground"
 
   // Fetch the running Mira version once on mount and render it next to the
   // logo. Falls back silently if the call fails (e.g. older backend without
@@ -192,7 +244,7 @@ export function DashboardLayout() {
                     <SidebarMenuButton
                       asChild
                       tooltip={item.label}
-                      className="aria-[current=page]:bg-sidebar-accent aria-[current=page]:font-semibold aria-[current=page]:text-sidebar-accent-foreground"
+                      className={navActive}
                     >
                       <NavLink to={item.to} end={item.to === "/"}>
                         <item.icon />
@@ -201,6 +253,40 @@ export function DashboardLayout() {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))}
+
+                {user?.is_admin && (
+                  <Collapsible
+                    asChild
+                    defaultOpen={onSettings}
+                    className="group/collapsible"
+                  >
+                    <SidebarMenuItem>
+                      <CollapsibleTrigger asChild>
+                        <SidebarMenuButton>
+                          <Settings />
+                          <span>Settings</span>
+                          <ChevronRight className="ml-auto transition-transform group-data-[state=open]/collapsible:rotate-90" />
+                        </SidebarMenuButton>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <SidebarMenuSub>
+                          {settingsSubItems.map((sub) => (
+                            <SidebarMenuSubItem key={sub.to}>
+                              <SidebarMenuSubButton
+                                asChild
+                                className={navActive}
+                              >
+                                <NavLink to={sub.to}>
+                                  <span>{sub.label}</span>
+                                </NavLink>
+                              </SidebarMenuSubButton>
+                            </SidebarMenuSubItem>
+                          ))}
+                        </SidebarMenuSub>
+                      </CollapsibleContent>
+                    </SidebarMenuItem>
+                  </Collapsible>
+                )}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

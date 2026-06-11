@@ -41,15 +41,9 @@ export function ConfirmButton({
     setLoading(true)
     try {
       await onConfirm()
-    } catch (err) {
-      // Callers surface their own failures (inline on the page); log here so a
-      // throwing onConfirm isn't swallowed silently.
-      console.error("ConfirmButton action failed:", err)
-    } finally {
-      // Always close + stop the spinner so the dialog can never hang open with
-      // no feedback if onConfirm rejects.
-      setLoading(false)
       setOpen(false)
+    } finally {
+      setLoading(false)
     }
   }
 

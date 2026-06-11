@@ -939,6 +939,26 @@ class AppDatabase:
         """Replace the admin-set runtime overrides. Pass `{}` to clear."""
         self.set_setting(self._GLOBAL_OVERRIDES_KEY, json.dumps(overrides))
 
+    # Outbound webhooks live in their own settings row (not in the review
+    # overrides blob) so their secret URLs never leak into the effective-config
+    # dump returned by GET /api/admin/settings.
+    _WEBHOOKS_KEY = "webhooks"
+
+    def get_webhooks(self) -> list[dict[str, Any]]:
+        """Return the configured outbound webhooks, or [] if none."""
+        raw = self.get_setting(self._WEBHOOKS_KEY)
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    def set_webhooks(self, webhooks: list[dict[str, Any]]) -> None:
+        """Replace the configured outbound webhooks. Pass `[]` to clear."""
+        self.set_setting(self._WEBHOOKS_KEY, json.dumps(webhooks))
+
     def mark_setup_complete(self) -> None:
         self.set_setting("setup_complete", "true")
 

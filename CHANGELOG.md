@@ -4,6 +4,26 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] — 2026-06-08
+
+### Added
+
+- **MiniMax M2.7 support with think-block stripping** — `<think>…</think>` reasoning blocks (as emitted by MiniMax and some other models) are stripped before JSON parsing, so models that "think out loud" work for indexing and review. New `minimax/MiniMax-M2.7` registry entry.
+- **Dynamic bot @mention in the dashboard** — the UI now shows the App's real handle (auto-detected from its GitHub slug, default `@miracodeai`) instead of a hardcoded `@mira-bot`. Exposed via `/api/version`.
+
+### Fixed
+
+- **Blast Radius no longer leaks private repos** — a public repo's review never names a dependent repo that isn't known to be public. Repo visibility is tracked in the registry, backfilled automatically on startup/sync, and unknown visibility is treated as private (safe by default).
+- **No more duplicate review comments on re-review** — findings that already have an open bot thread are skipped, so each push stops re-posting the same suggestion.
+- **Indexing is resilient to bad files** — a duplicate symbol name no longer crashes the whole index (`symbols` upsert is conflict-safe on both Postgres and SQLite), and a single failed file/batch is skipped instead of aborting the repo (which also stops runaway token spend after a failure).
+- **Thread-resolution failures are now logged** — the real GraphQL error surfaces instead of being silently swallowed.
+- **Think-block regex** now strips the full `<think>…</think>` block (it previously matched only the opening tag).
+- **Sidebar navigation active state** — the active nav item is driven off `aria-current` (single source of truth), with a cleaner fill + bold treatment and a fixed header divider.
+
+### Changed
+
+- Dependency bumps (vite 8, tailwindcss 4.3, react-dom, eslint 10, lucide-react, @vitejs/plugin-react, @types/node, etc.).
+
 ## [0.2.2] — 2026-06-03
 
 ### Added
@@ -119,6 +139,7 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.2.3]: https://github.com/miracodeai/mira/releases/tag/v0.2.3
 [0.2.2]: https://github.com/miracodeai/mira/releases/tag/v0.2.2
 [0.2.1]: https://github.com/miracodeai/mira/releases/tag/v0.2.1
 [0.2.0]: https://github.com/miracodeai/mira/releases/tag/v0.2.0

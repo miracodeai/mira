@@ -26,7 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
 import { api, type ReviewContextModel } from "@/lib/api"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 function formatRelativeTime(iso: string | null): string {
   if (!iso) return "Never indexed"
@@ -46,6 +46,7 @@ function formatRelativeTime(iso: string | null): string {
 
 export function RepoDetailPage() {
   const { owner, repo } = useParams<{ owner: string; repo: string }>()
+  useDocumentTitle(owner && repo ? `${owner}/${repo}` : "Repository")
 
   const { data, loading, error } = useAsync(
     () => api.getRepo(owner!, repo!),

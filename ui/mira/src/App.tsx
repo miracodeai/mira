@@ -21,6 +21,8 @@ import { ResetUserPasswordPage } from "@/pages/reset-user-password"
 import { UserFormPage } from "@/pages/user-form"
 import { UsersPage } from "@/pages/users"
 import { VulnerabilitiesPage } from "@/pages/vulnerabilities"
+import { WebhookFormPage } from "@/pages/webhook-form"
+import { WebhooksPage } from "@/pages/webhooks"
 
 const API_BASE = import.meta.env.VITE_API_URL || ""
 
@@ -207,7 +209,14 @@ export function App() {
             element={<ResetUserPasswordPage />}
           />
           <Route path="account/password" element={<ChangePasswordPage />} />
-          <Route path="settings" element={<SettingsPage />} />
+          <Route
+            path="settings"
+            element={<Navigate to="/settings/models" replace />}
+          />
+          <Route path="settings/webhooks" element={<WebhooksPage />} />
+          <Route path="settings/webhooks/new" element={<WebhookFormPage />} />
+          <Route path="settings/webhooks/:id" element={<WebhookFormPage />} />
+          <Route path="settings/:section" element={<SettingsPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

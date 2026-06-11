@@ -13,7 +13,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi import Response as FastAPIResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
 from mira.dashboard.db import AppDatabase
@@ -50,7 +50,7 @@ def register_dashboard(app: FastAPI) -> None:
 
 # Standalone app — initialized at module load, but routes are registered at
 # the bottom of this file, *after* all @router decorators have run.
-app = FastAPI(title="Mira Dashboard API", version="0.2.2")
+app = FastAPI(title="Mira Dashboard API", version="0.2.3")
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
@@ -512,6 +512,159 @@ def set_models(body: ModelsUpdate) -> dict:
     return {"ok": True}
 
 
+# ── Outbound webhooks (admin) ────────────────────────────────────────────────
+
+
+class WebhookCreate(BaseModel):
+    name: str = ""
+    url: str
+    events: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class WebhookUpdate(BaseModel):
+    name: str | None = None
+    # Blank/omitted url keeps the stored one so the masked value round-trips
+    # without forcing the admin to re-enter the secret.
+    url: str | None = None
+    events: list[str] | None = None
+    enabled: bool | None = None
+
+
+def _require_admin(request: Request) -> None:
+    user = getattr(request.state, "user", None)
+    if not user or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _webhook_public(w: dict) -> dict:
+    """Webhook with its URL masked — safe to return from the API."""
+    from mira.outbound_webhooks import detect_format, mask_url
+
+    return {
+        "id": w.get("id", ""),
+        "name": w.get("name", ""),
+        "url_masked": mask_url(w.get("url", "")),
+        "events": w.get("events", []),
+        "enabled": w.get("enabled", True),
+        "format": detect_format(w.get("url", "")),
+    }
+
+
+@router.get("/api/admin/webhooks")
+def list_webhooks(request: Request) -> dict:
+    _require_admin(request)
+    from mira.outbound_webhooks import AVAILABLE_EVENTS
+
+    webhooks = [_webhook_public(w) for w in _app_db.get_webhooks()]
+    return {"webhooks": webhooks, "available_events": AVAILABLE_EVENTS}
+
+
+@router.get("/api/admin/webhooks/{webhook_id}")
+def get_webhook(webhook_id: str, request: Request) -> dict:
+    """Full webhook incl. the unmasked URL — for the edit form (admin only).
+
+    The list endpoint masks URLs to avoid leaking secrets at a glance, but
+    editing a webhook needs the real value populated in the form.
+    """
+    _require_admin(request)
+    from mira.outbound_webhooks import detect_format
+
+    w = next((x for x in _app_db.get_webhooks() if x.get("id") == webhook_id), None)
+    if w is None:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {
+        "id": w.get("id", ""),
+        "name": w.get("name", ""),
+        "url": w.get("url", ""),
+        "events": w.get("events", []),
+        "enabled": w.get("enabled", True),
+        "format": detect_format(w.get("url", "")),
+    }
+
+
+@router.post("/api/admin/webhooks")
+def create_webhook(body: WebhookCreate, request: Request) -> dict:
+    _require_admin(request)
+    import uuid
+
+    from pydantic import ValidationError
+
+    from mira.outbound_webhooks import WebhookConfig
+
+    try:
+        cfg = WebhookConfig(
+            id=uuid.uuid4().hex,
+            name=body.name,
+            url=body.url,
+            events=body.events,
+            enabled=body.enabled,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc.errors()[0].get("msg"))) from exc
+
+    webhooks = _app_db.get_webhooks()
+    webhooks.append(cfg.model_dump())
+    _app_db.set_webhooks(webhooks)
+    return _webhook_public(cfg.model_dump())
+
+
+@router.put("/api/admin/webhooks/{webhook_id}")
+def update_webhook(webhook_id: str, body: WebhookUpdate, request: Request) -> dict:
+    _require_admin(request)
+    from pydantic import ValidationError
+
+    from mira.outbound_webhooks import WebhookConfig
+
+    webhooks = _app_db.get_webhooks()
+    existing = next((w for w in webhooks if w.get("id") == webhook_id), None)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    merged = dict(existing)
+    if body.name is not None:
+        merged["name"] = body.name
+    if body.url:  # blank → keep stored URL
+        merged["url"] = body.url
+    if body.events is not None:
+        merged["events"] = body.events
+    if body.enabled is not None:
+        merged["enabled"] = body.enabled
+
+    try:
+        cfg = WebhookConfig(**merged)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc.errors()[0].get("msg"))) from exc
+
+    webhooks = [cfg.model_dump() if w.get("id") == webhook_id else w for w in webhooks]
+    _app_db.set_webhooks(webhooks)
+    return _webhook_public(cfg.model_dump())
+
+
+@router.delete("/api/admin/webhooks/{webhook_id}")
+def delete_webhook(webhook_id: str, request: Request) -> dict:
+    _require_admin(request)
+    webhooks = _app_db.get_webhooks()
+    remaining = [w for w in webhooks if w.get("id") != webhook_id]
+    if len(remaining) == len(webhooks):
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    _app_db.set_webhooks(remaining)
+    return {"ok": True}
+
+
+@router.post("/api/admin/webhooks/{webhook_id}/test")
+async def test_webhook(webhook_id: str, request: Request) -> dict:
+    _require_admin(request)
+    from mira.outbound_webhooks import REVIEW_COMPLETED, deliver_one, sample_data
+
+    webhook = next((w for w in _app_db.get_webhooks() if w.get("id") == webhook_id), None)
+    if webhook is None:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    ok, detail = await deliver_one(webhook, REVIEW_COMPLETED, sample_data(REVIEW_COMPLETED))
+    return {"ok": ok, "detail": detail}
+
+
 @router.get("/api/events")
 async def events_stream(request: Request) -> StreamingResponse:
     """Server-Sent Events stream for real-time dashboard updates."""
@@ -775,6 +928,9 @@ async def _run_initial_indexing(default_mode: str) -> None:
             )
             tracker.complete(full_name, count)
             logger.info("Indexed %s: %d files", full_name, count)
+            from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
+
+            await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
         except Exception as exc:
             _app_db.set_repo_status(repo_record.owner, repo_record.repo, "failed", error=str(exc))
             tracker.fail(full_name, str(exc))
@@ -1926,6 +2082,9 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
             logger.info(
                 "Index %s for %s: %d files", "rebuild" if full else "update", full_name, count
             )
+            from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
+
+            await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
         except IndexingCancelled as cancelled:
             tracker.cancel(full_name, cancelled.files_indexed)
             logger.info(
