@@ -21,8 +21,10 @@ import { useParams } from "react-router"
 
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { useDocumentTitle } from "@/lib/hooks"
 
 export function SettingsPage() {
+  useDocumentTitle("Settings")
   const { user: currentUser } = useAuth()
   const { section = "models" } = useParams()
 

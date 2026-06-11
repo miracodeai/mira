@@ -11,8 +11,10 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { useAuth } from "@/lib/auth"
+import { useDocumentTitle } from "@/lib/hooks"
 
 export function LoginPage() {
+  useDocumentTitle("Sign in")
   const { user, loading, login } = useAuth()
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")

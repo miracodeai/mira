@@ -14,9 +14,10 @@ import {
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function UsersPage() {
+  useDocumentTitle("Users")
   const { user: currentUser } = useAuth()
   const [refreshKey, setRefreshKey] = useState(0)
   const { data: users } = useAsync(() => api.listUsers(), [refreshKey])
