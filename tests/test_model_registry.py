@@ -82,9 +82,7 @@ def test_custom_entry_without_cost_fields_does_not_crash(
 ) -> None:
     # A minimal custom entry (no cost fields) must not break pricing/registry load.
     f = tmp_path / "models.json"
-    f.write_text(
-        json.dumps({"local/llama": {"label": "Local", "purposes": ["review"]}})
-    )
+    f.write_text(json.dumps({"local/llama": {"label": "Local", "purposes": ["review"]}}))
     monkeypatch.setenv("MIRA_MODELS_JSON_PATH", str(f))
 
     assert registry.is_supported("local/llama", purpose="review")
