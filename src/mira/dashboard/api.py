@@ -1257,7 +1257,7 @@ def get_external_refs(owner: str, repo: str) -> list[ExternalRefModel]:
 
 class PackageModel(BaseModel):
     name: str
-    kind: str  # "npm" | "pip" | "docker" | "go" | "rust"
+    kind: str  # "npm" | "pip" | "docker" | "go" | "rust" | "composer"
     version: str
     file_path: str
     is_dev: bool = False
