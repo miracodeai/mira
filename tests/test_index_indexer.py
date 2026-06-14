@@ -243,6 +243,36 @@ class TestIndexRepo:
         assert summary.summary == "Main entry point."
         store.close()
 
+    async def test_skips_files_over_size_limit(self, tmp_path):
+        """Files above index.max_file_size are dropped before summarization."""
+        store = IndexStore(str(tmp_path / "test.db"))
+        mock_llm = AsyncMock()
+        mock_llm.complete = AsyncMock()
+
+        config = MiraConfig()
+        config.index.max_file_size = 1_000
+        big_content = "print('x')\n" * 500  # ~5 KB, over the 1 KB limit
+
+        with (
+            patch("mira.index.indexer._fetch_repo_tree", return_value=["src/main.py"]),
+            patch(
+                "mira.index.indexer._fetch_repo_tarball", return_value={"src/main.py": big_content}
+            ),
+        ):
+            count = await index_repo(
+                owner="test",
+                repo="repo",
+                token="fake-token",
+                config=config,
+                store=store,
+                llm=mock_llm,
+                full=True,
+            )
+
+        assert count == 0
+        mock_llm.complete.assert_not_called()
+        store.close()
+
 
 @pytest.mark.asyncio
 class TestIndexDiff:

@@ -288,6 +288,7 @@ async def _fetch_repo_tarball(
     repo: str,
     token: str,
     ref: str = "main",
+    max_file_size: int = 1_048_576,
 ) -> dict[str, str] | None:
     """Download the entire repo as a tarball and return ``{path: content}``.
 
@@ -297,7 +298,8 @@ async def _fetch_repo_tarball(
     our previous concurrency cap.
 
     Returns ``None`` on failure (caller should fall back to per-file fetch).
-    Files larger than 1 MB or undecodable as UTF-8 are skipped silently.
+    Files larger than ``max_file_size`` bytes or undecodable as UTF-8 are
+    skipped silently.
     """
     url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{ref}"
     headers = {
@@ -327,7 +329,7 @@ async def _fetch_repo_tarball(
             for member in tf:
                 if not member.isfile():
                     continue
-                if member.size > 1_048_576:  # 1 MB
+                if max_file_size and member.size > max_file_size:
                     continue
                 # Tarballs are wrapped in a top-level dir like "owner-repo-{sha}/".
                 # Strip that prefix so paths match the GitHub tree paths.
@@ -594,8 +596,11 @@ async def index_repo(
     # first — one request gets every file, ~10x faster than per-file fetches
     # for typical repos. Fall back to the per-file API if the tarball fails
     # (e.g. for a >100 MB repo where GitHub may reject the request).
+    max_file_size = config.index.max_file_size
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
-    tarball: dict[str, str] | None = await _fetch_repo_tarball(owner, repo, token, ref=branch)
+    tarball: dict[str, str] | None = await _fetch_repo_tarball(
+        owner, repo, token, ref=branch, max_file_size=max_file_size
+    )
 
     if tarball is not None:
         contents: list[str | None] = [tarball.get(p) for p in indexable]
@@ -610,8 +615,13 @@ async def index_repo(
     # Filter out failed fetches and compute hashes for staleness check
     file_pairs: list[tuple[str, str]] = []
     trivial_pairs: list[tuple[str, str]] = []
+    skipped_large = 0
     for path, content in zip(indexable, contents, strict=False):
         if content is None:
+            continue
+        # Catches the per-file fetch path, which the tarball cap doesn't cover.
+        if max_file_size and len(content.encode("utf-8")) > max_file_size:
+            skipped_large += 1
             continue
         if not full:
             existing = store.get_summary(path)
@@ -626,10 +636,11 @@ async def index_repo(
             file_pairs.append((path, content))
 
     logger.info(
-        "Indexing %d files (%d trivial / skipped %d unchanged)",
+        "Indexing %d files (%d trivial / skipped %d unchanged / %d over size limit)",
         len(file_pairs) + len(trivial_pairs),
         len(trivial_pairs),
-        len(indexable) - len(file_pairs) - len(trivial_pairs),
+        len(indexable) - len(file_pairs) - len(trivial_pairs) - skipped_large,
+        skipped_large,
     )
 
     # Clean up deleted files
@@ -1009,10 +1020,14 @@ async def index_diff(
     ]
     contents = await asyncio.gather(*tasks)
 
+    max_file_size = config.index.max_file_size
     file_pairs: list[tuple[str, str]] = []
     for path, content in zip(to_index, contents, strict=False):
-        if content is not None:
-            file_pairs.append((path, content))
+        if content is None:
+            continue
+        if max_file_size and len(content.encode("utf-8")) > max_file_size:
+            continue
+        file_pairs.append((path, content))
 
     # Summarize changed files
     llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)

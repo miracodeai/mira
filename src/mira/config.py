@@ -161,6 +161,14 @@ class ReviewConfig(BaseModel):
     blast_radius: bool = True
 
 
+class IndexConfig(BaseModel):
+    # Skip indexing any file larger than this (bytes). Generated SDKs, vendored
+    # bundles and large test fixtures burn indexing tokens for little value.
+    # Defaults to the previous hard-coded tarball cap (1 MB) so it's a no-op
+    # until lowered; 0 disables the limit. In bytes, matching review.max_file_size.
+    max_file_size: int = Field(default=1024 * 1024, ge=0)
+
+
 class ProviderConfig(BaseModel):
     type: str = "github"
 
@@ -174,6 +182,7 @@ class MiraConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    index: IndexConfig = Field(default_factory=IndexConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
