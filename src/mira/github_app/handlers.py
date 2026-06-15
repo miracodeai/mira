@@ -79,6 +79,8 @@ async def handle_pull_request(
 ) -> None:
     """Handle a pull_request event by running a full review."""
     installation_id: int = payload.get("installation", {}).get("id", 0)
+    pr_url = ""
+    repo_full = ""
     try:
         token = await app_auth.get_installation_token(installation_id)
 
@@ -87,6 +89,7 @@ async def handle_pull_request(
         repo = payload["repository"]["name"]
         number = pr["number"]
         pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
+        repo_full = f"{owner}/{repo}"
 
         config = load_config()
         from mira.dashboard.models_config import llm_config_for
@@ -113,7 +116,7 @@ async def handle_pull_request(
         is_indexed = bool(repo_record and repo_record.status == "ready")
 
         logger.info("Reviewing PR %s (indexed=%s)", pr_url, is_indexed)
-        await engine.review_pr(pr_url)
+        result = await engine.review_pr(pr_url)
 
         # Post a friendly note if the repo isn't indexed yet
         if not is_indexed:
@@ -142,8 +145,38 @@ async def handle_pull_request(
                 logger.warning("Failed to post unindexed note: %s", exc)
 
         logger.info("Review complete for PR %s", pr_url)
-    except Exception:
+
+        # Fire outbound webhooks (Slack/Teams/generic). Guarded internally —
+        # a webhook failure never affects the review that already landed.
+        from mira.models import Severity, build_review_stats
+        from mira.outbound_webhooks import (
+            REVIEW_COMPLETED,
+            REVIEW_HIGH_SEVERITY,
+            dispatch_event,
+        )
+
+        stats = build_review_stats(result.comments)
+        event_data = {
+            "repo": repo_full,
+            "pr_url": pr_url,
+            "number": number,
+            "title": pr.get("title", ""),
+            "comments": len(result.comments),
+            "key_issues": len(result.key_issues),
+            "severities": {sev.name.lower(): n for sev, n in stats.items()},
+        }
+        await dispatch_event(REVIEW_COMPLETED, event_data)
+        if any(sev >= Severity.WARNING for sev in stats):
+            await dispatch_event(REVIEW_HIGH_SEVERITY, event_data)
+    except Exception as exc:
         logger.exception("Error handling pull_request event")
+        if pr_url:
+            from mira.outbound_webhooks import REVIEW_FAILED, dispatch_event
+
+            await dispatch_event(
+                REVIEW_FAILED,
+                {"repo": repo_full, "pr_url": pr_url, "error": str(exc)},
+            )
 
 
 async def handle_comment(

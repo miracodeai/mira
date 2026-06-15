@@ -58,6 +58,7 @@ _JAVA_IMPORT_RE = re.compile(
 # inside an `import (` block or on an `import "..."` line.
 _GO_SINGLE_IMPORT_RE = re.compile(r'^\s*import\s+(?:(?:[A-Za-z_]\w*|\.)\s+)?"([^"]+)"\s*$')
 _GO_BLOCK_PATH_RE = re.compile(r'^\s*(?:(?:[A-Za-z_]\w*|\.)\s+)?"([^"]+)"\s*$')
+_GO_MODULE_RE = re.compile(r"^module\s+(\S+)", re.MULTILINE)
 
 # Standard-library Go packages: short single-word paths and well-known
 # multi-word paths. Cheap heuristic to avoid even trying to resolve them.
@@ -107,9 +108,10 @@ _EXT_TO_LANG = {
 
 _MAX_FILES = 8
 _MAX_PER_FILE_CHARS = 1500
-# Java/Go resolution is heuristic — picking the wrong file pollutes the
-# prompt with off-topic symbols and hurts more than it helps. Cap at 1
-# candidate so we either find the right file or skip cleanly.
+# Java and go.mod-less Go resolution is heuristic — picking the wrong file
+# pollutes the prompt with off-topic symbols and hurts more than it helps.
+# Cap at 1 candidate so we either find the right file or skip cleanly.
+# (go.mod-resolved Go imports are deterministic and allowed 2 files.)
 _MAX_CANDIDATES_PER_IMPORT = 1
 
 
@@ -258,14 +260,24 @@ def _path_overlap(file_path: str, pkg_path: str) -> int:
     return score
 
 
-def _candidates_go(import_path: str, repo_tree: set[str] | None) -> list[str]:
+def _parse_go_module(go_mod_source: str) -> str | None:
+    """Pull the module path out of a go.mod file."""
+    m = _GO_MODULE_RE.search(go_mod_source or "")
+    return m.group(1) if m else None
+
+
+def _candidates_go(
+    import_path: str,
+    repo_tree: set[str] | None,
+    module: str | None = None,
+) -> list[str]:
     """Resolve a Go import path like `github.com/grafana/grafana/pkg/x` to files.
 
-    Go imports are full module paths. We don't know this repo's module
-    name without parsing `go.mod`, so we use a tail-match heuristic: take
-    the path's last 2-3 segments and look for a directory in the repo
-    whose path ends with them. Then return up to N `.go` files in that
-    directory (skipping `*_test.go`).
+    With ``module`` (parsed from go.mod) resolution is deterministic: an
+    in-repo import is exactly `module + "/" + package_dir`, and anything
+    else is an external dependency we can't fetch. Without it we fall back
+    to a tail-match heuristic: take the path's last 2-3 segments and look
+    for a directory in the repo whose path ends with them.
     """
     if not import_path or repo_tree is None:
         return []
@@ -280,6 +292,23 @@ def _candidates_go(import_path: str, repo_tree: set[str] | None) -> list[str]:
         return []
 
     segs = p.split("/")
+
+    if module:
+        if p != module and not p.startswith(module + "/"):
+            return []  # external dependency — not in this repo
+        rel_dir = p[len(module) :].strip("/")
+        prefix = f"{rel_dir}/" if rel_dir else ""
+        files = [
+            f
+            for f in repo_tree
+            if f.startswith(prefix)
+            and "/" not in f[len(prefix) :]
+            and f.endswith(".go")
+            and not f.endswith("_test.go")
+        ]
+        # The file named after the package usually holds its core types.
+        files.sort(key=lambda f: (f != f"{prefix}{segs[-1]}.go", f))
+        return files[:2]
     # Try progressively longer tail matches: last 3 segments first, then 2.
     for tail_len in (3, 2):
         if tail_len > len(segs):
@@ -305,6 +334,7 @@ def extract_import_candidates(
     source_path: str,
     repo_tree: set[str] | None = None,
     enable_java_go: bool = True,
+    go_module: str | None = None,
 ) -> list[str]:
     """Return candidate file paths referenced by imports in ``source``.
 
@@ -343,7 +373,7 @@ def extract_import_candidates(
                 add(c)
     elif language == "go" and enable_java_go:
         for path in _extract_go_import_paths(source):
-            for c in _candidates_go(path, repo_tree):
+            for c in _candidates_go(path, repo_tree, module=go_module):
                 add(c)
     return out
 
@@ -391,6 +421,18 @@ async def build_jit_cross_file_context(
     seen_imports: set[str] = set()
     changed_paths = {f.path for f in changed_files}
 
+    # One go.mod fetch makes in-repo Go import resolution deterministic.
+    go_module: str | None = None
+    if (
+        enable_java_go
+        and any(_ext(f.path) == "go" for f in changed_files)
+        and (repo_tree is None or "go.mod" in repo_tree)
+    ):
+        try:
+            go_module = _parse_go_module(await source_fetcher.fetch("go.mod") or "")
+        except Exception as exc:
+            logger.debug("JIT: go.mod fetch failed: %s", exc)
+
     for changed_file in changed_files:
         if files_added >= _MAX_FILES or chars_used >= char_budget:
             break
@@ -414,6 +456,7 @@ async def build_jit_cross_file_context(
             changed_file.path,
             repo_tree=repo_tree,
             enable_java_go=enable_java_go,
+            go_module=go_module,
         )
 
         for cand in candidates:

@@ -14,8 +14,10 @@ import {
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, type RepoListItem } from "@/lib/api"
+import { useDocumentTitle } from "@/lib/hooks"
 
 export function ReposPage() {
+  useDocumentTitle("Repositories")
   const [repos, setRepos] = useState<RepoListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [searchParams] = useSearchParams()

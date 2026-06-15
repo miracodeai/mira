@@ -1,5 +1,8 @@
-name: Docker
+name: Release
 
+# Gated release: pushing a v* tag runs the eval gate first; the container is
+# built and pushed ONLY if the evals pass. This is the ordering that matters —
+# evals run *before* the artifact ships, never alongside it.
 on:
   push:
     tags: ["v*"]
@@ -9,12 +12,17 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Gate: the stable eval suite (excludes the noisy benchmark scorecard).
+  evals:
+    uses: ./.github/workflows/evals.yml
+    secrets: inherit
+
   build-and-push:
+    needs: evals # ← only builds/pushes if the eval gate is green
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
       - uses: actions/checkout@v6
 

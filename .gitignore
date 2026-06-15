@@ -52,6 +52,7 @@ report.txt
 
 # Benchmark reports — produced by local eval runs, not part of the release.
 BENCHMARK_REPORT*.md
+tests/benchmarks/runs/
 
 # Local eval-regression fixtures — repo-specific PR URLs and history.
 tests/eval_regressions/

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mira-reviewer"
-version = "0.2.2"
+version = "0.4.0"
 description = "AI-powered PR reviewer with low-noise filtering"
 readme = "README.md"
 license = "Apache-2.0"
@@ -74,8 +74,9 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "eval: regression suite that hits real GitHub + LLM APIs (skipped by default; opt-in with `-m eval`)",
+    "benchmark: noisy, threshold-based quality evals (e.g. the F1 scorecard) — tracked, not a release gate. Run with `-m benchmark`.",
 ]
-addopts = "-m 'not eval'"
+addopts = "-m 'not eval and not benchmark'"
 
 [tool.ruff]
 target-version = "py311"

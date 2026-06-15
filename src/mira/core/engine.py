@@ -15,6 +15,7 @@ from mira.config import MiraConfig
 from mira.core.chunker import chunk_files
 from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
+from mira.core.ensemble import merge_ensemble_runs
 from mira.core.file_filter import filter_files
 from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
@@ -57,6 +58,26 @@ from mira.models import (
 from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _audit_drop(c: ReviewComment, stage: str, reason: str = "") -> dict:
+    """Audit entry for a comment removed by a pipeline stage."""
+    return {
+        "stage": stage,
+        "path": c.path,
+        "line": c.line,
+        "title": c.title,
+        "severity": c.severity.name,
+        "category": c.category,
+        "confidence": c.confidence,
+        "reason": reason,
+    }
+
+
+def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> None:
+    """Record comments present before a stage but gone after it (identity-based)."""
+    kept = {id(c) for c in after}
+    audit.extend(_audit_drop(c, stage) for c in before if id(c) not in kept)
 
 
 def _clamp_confidence_to_findings(
@@ -929,6 +950,7 @@ class ReviewEngine:
         valid_paths = {f.path for f in filtered}
         base_existing = list(existing_comments) if existing_comments else []
         semaphore = _asyncio.Semaphore(self.config.review.max_concurrent_chunks)
+        audit: list[dict] = []
 
         async def _review_chunk(
             idx: int,
@@ -959,6 +981,22 @@ class ReviewEngine:
                         resolved_threads=resolved_threads,
                         team_conventions=team_conventions,
                     )
+
+                    def _parse(raw: str) -> tuple[list[ReviewComment], list[KeyIssue], str]:
+                        parsed = parse_llm_response(raw)
+                        return (
+                            convert_to_review_comments(
+                                parsed,
+                                valid_paths,
+                                diff_files=chunk.files,
+                            ),
+                            [
+                                KeyIssue(issue=ki.issue, path=ki.path, line=ki.line)
+                                for ki in parsed.key_issues
+                            ],
+                            parsed.summary or "",
+                        )
+
                     raw_response = ""
                     use_agentic = (
                         self.config.review.agentic_tools
@@ -973,19 +1011,57 @@ class ReviewEngine:
                             repo_tree=list(self._agentic_repo_tree),
                         )
                         raw_response = await agentic_review_loop(self.llm, messages, executor)
+                        audit.append({"stage": "agentic", "chunk": idx, "calls": executor.call_log})
                     if not raw_response:
                         raw_response = await self.llm.review(messages)
-                    parsed = parse_llm_response(raw_response)
-                    comments = convert_to_review_comments(
-                        parsed,
-                        valid_paths,
-                        diff_files=chunk.files,
-                    )
-                    key_issues = [
-                        KeyIssue(issue=ki.issue, path=ki.path, line=ki.line)
-                        for ki in parsed.key_issues
-                    ]
-                    return comments, key_issues, parsed.summary or ""
+                    comments, key_issues, summary_text = _parse(raw_response)
+
+                    # Ensemble: fire the extra runs in parallel and keep
+                    # majority-vote findings. The agentic loop (if any) only
+                    # runs once; extras sample the plain review path.
+                    n_runs = self.config.review.ensemble_runs
+                    if n_runs > 1:
+                        extra_raws = await _asyncio.gather(
+                            *[
+                                self.llm.review(
+                                    messages,
+                                    temperature=self.config.review.ensemble_temperature,
+                                )
+                                for _ in range(n_runs - 1)
+                            ],
+                            return_exceptions=True,
+                        )
+                        runs = [comments]
+                        for raw in extra_raws:
+                            if isinstance(raw, BaseException):
+                                logger.warning("Ensemble run failed: %s", raw)
+                                continue
+                            try:
+                                extra_comments, _, _ = _parse(raw)
+                                runs.append(extra_comments)
+                            except ResponseParseError as exc:
+                                logger.warning("Ensemble run failed to parse: %s", exc)
+                        if len(runs) > 1:
+                            before = sum(len(r) for r in runs)
+                            comments = merge_ensemble_runs(runs)
+                            audit.append(
+                                {
+                                    "stage": "ensemble_vote",
+                                    "chunk": idx,
+                                    "runs": len(runs),
+                                    "drafted": before,
+                                    "kept": len(comments),
+                                }
+                            )
+                            logger.info(
+                                "Ensemble chunk %d: %d comments across %d runs -> %d consensus",
+                                idx + 1,
+                                before,
+                                len(runs),
+                                len(comments),
+                            )
+
+                    return comments, key_issues, summary_text
                 except ResponseParseError as exc:
                     logger.warning(
                         "Chunk %d/%d failed to parse, skipping: %s",
@@ -1046,11 +1122,13 @@ class ReviewEngine:
         all_comments: list[ReviewComment] = []
         all_key_issues: list[KeyIssue] = []
         summaries: list[str] = []
-        for comments, key_issues, summary_text in chunk_results:
+        for i, (comments, key_issues, summary_text) in enumerate(chunk_results):
+            audit.append({"stage": "drafted", "chunk": i, "count": len(comments)})
             all_comments.extend(comments)
             all_key_issues.extend(key_issues)
             if summary_text:
                 summaries.append(summary_text)
+        audit.append({"stage": "drafted", "chunk": "security", "count": len(security_comments)})
         all_comments.extend(security_comments)
         all_comments.extend(dependency_comments)
 
@@ -1061,16 +1139,18 @@ class ReviewEngine:
             self.config.filter,
             review_round=review_round,
         )
+        _audit_stage(audit, "noise_filter", all_comments, final_comments)
 
         # Dedupe against still-open threads before self-critique, so we don't
         # spend critique calls on comments we'd discard anyway.
         if existing_comments:
-            before = len(final_comments)
+            before_drop = final_comments
             final_comments = drop_already_posted(final_comments, existing_comments)
-            if before != len(final_comments):
+            _audit_stage(audit, "already_posted", before_drop, final_comments)
+            if len(before_drop) != len(final_comments):
                 logger.info(
                     "Dropped %d comment(s) duplicating existing open threads",
-                    before - len(final_comments),
+                    len(before_drop) - len(final_comments),
                 )
 
         # Self-critique catches confident-but-wrong claims that the noise
@@ -1085,6 +1165,8 @@ class ReviewEngine:
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
                     indexing_llm=self.indexing_llm,
+                    diff_files=filtered,
+                    audit=audit,
                 )
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
@@ -1123,4 +1205,5 @@ class ReviewEngine:
             reviewed_paths=selected_paths,
             skipped_paths=skipped_paths_only,
             total_paths=all_paths,
+            audit=audit,
         )

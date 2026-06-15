@@ -20,6 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { api, type PackageSearchHit } from "@/lib/api"
+import { useDocumentTitle } from "@/lib/hooks"
 
 const KIND_LABELS: Record<string, string> = {
   npm: "npm",
@@ -38,6 +39,7 @@ const KIND_COLORS: Record<string, string> = {
 }
 
 export function PackagesPage() {
+  useDocumentTitle("Packages")
   const [name, setName] = useState("")
   const [version, setVersion] = useState("")
   const [kind, setKind] = useState<string | null>(null)

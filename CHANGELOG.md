@@ -4,6 +4,66 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-14
+
+### Added
+
+- **`exclude_files` apply to indexing** — `filter.exclude_patterns` now governs the index as well as review, so committed vendor dirs, generated SDKs, and test data can be kept out of indexing without burning tokens on them. The same globs that exclude a file from review exclude it from indexing; the dashboard's per-repo file count reflects the exclusions too. Closes #97.
+- **Indexing file-size limit** — new `index.max_file_size` (bytes, default 1 MB) skips any file above the limit before it reaches the summarizer. Lower it to keep indexing cheap on large codebases with big fixtures or generated files; `0` disables the limit. Replaces the previous hard-coded 1 MB tarball cap and now also covers the per-file fetch path. Closes #98.
+
+### Fixed
+
+- **Indexing no longer drops a whole batch on one malformed file** — summarization responses with unescaped backslashes (e.g. DeepSeek emitting PHP namespaces like `\App\Models` or Windows paths inside JSON strings) are repaired before parsing, so a single bad string no longer fails `json.loads` and discards every file in the batch. Parsing is also lenient about raw control characters. Closes #96.
+- **Indexing no longer crashes on a null symbol field** — a model emitting an explicit `"signature": null` (or null `kind` / `description`) was inserting `NULL` into a `NOT NULL` column and aborting the file. Those fields are now coerced to their defaults, and symbols with no name are skipped. Part of #96.
+
+## [0.3.1] — 2026-06-11
+
+### Added
+
+- **Review thinking mode** — an extended-reasoning budget for reviews (`off` / `low` / `medium` / `high` / `max`), so a model spends more effort before commenting. Set it in `mira.yaml` (`llm.review_reasoning_effort`) or via the Review Model section on the Settings page; it applies to reviews only and defaults to off. Works on OpenRouter (DeepSeek, Claude, and OpenAI reasoning models) and on Bedrock for Claude; on a model or endpoint that doesn't support a reasoning effort it's dropped automatically so the review still runs. (`max` is DeepSeek's top level — sent as `xhigh` on OpenRouter.)
+- **Runtime-adjustable model registry** — point `MIRA_MODELS_JSON_PATH` at your own `models.json` to add custom models (a cost-effective DeepSeek/MiniMax entry, a local endpoint, …) or override bundled ones, without reinstalling. Entries overlay the bundled list by id; a missing or invalid file is ignored with a warning, and a partial entry falls back to default pricing rather than crashing. Closes #83.
+
+### Changed
+
+- The eval suite is now hermetic for reliable release gating — the eval engine pins its filter config so ambient dashboard/DB overrides can't change what the tests see, the planted-issue catch tests retry to absorb model variance, and the noisy comment-count metric moved to the nightly benchmark.
+
+## [0.3.0] — 2026-06-11
+
+### Added
+
+- **Outbound webhooks** — POST to Slack, Microsoft Teams, or a generic JSON endpoint when a review finishes, a review fails, a high-severity finding lands, or a repo finishes indexing. Configured on the admin Settings page (dedicated list + add/edit pages). Delivery is best-effort and SSRF-guarded (private/internal addresses are refused), so a slow or misconfigured endpoint can't delay or break a review.
+- **User management** — self-service password change and admin password reset (as proper pages, not modals), a sidebar user dropdown with account switching, DiceBear avatars, and last-sign-in tracking shown in the users table.
+- **Per-page browser tab titles** — each dashboard page now sets its own `document.title` instead of a single static title.
+
+### Fixed
+
+- **Thinking-mode models no longer fail reviews** — models that reject a forced `tool_choice` (e.g. deepseek thinking mode, which returns a 400) are detected and retried with `tool_choice: "auto"`, and the model is remembered so later calls skip the doomed attempt. Fixes #82.
+
+### Changed
+
+- **Evals gate the release build** — the LLM eval suite now runs on a release tag and the container is only built/pushed if it passes. The noisy threshold-based scorecard moved to a separate nightly `benchmark` job (and a `benchmark` pytest marker) so it's tracked without gating releases.
+- The dashboard API client was split into per-domain modules (internal refactor, no behaviour change).
+
+## [0.2.3] — 2026-06-08
+
+### Added
+
+- **MiniMax M2.7 support with think-block stripping** — `<think>…</think>` reasoning blocks (as emitted by MiniMax and some other models) are stripped before JSON parsing, so models that "think out loud" work for indexing and review. New `minimax/MiniMax-M2.7` registry entry.
+- **Dynamic bot @mention in the dashboard** — the UI now shows the App's real handle (auto-detected from its GitHub slug, default `@miracodeai`) instead of a hardcoded `@mira-bot`. Exposed via `/api/version`.
+
+### Fixed
+
+- **Blast Radius no longer leaks private repos** — a public repo's review never names a dependent repo that isn't known to be public. Repo visibility is tracked in the registry, backfilled automatically on startup/sync, and unknown visibility is treated as private (safe by default).
+- **No more duplicate review comments on re-review** — findings that already have an open bot thread are skipped, so each push stops re-posting the same suggestion.
+- **Indexing is resilient to bad files** — a duplicate symbol name no longer crashes the whole index (`symbols` upsert is conflict-safe on both Postgres and SQLite), and a single failed file/batch is skipped instead of aborting the repo (which also stops runaway token spend after a failure).
+- **Thread-resolution failures are now logged** — the real GraphQL error surfaces instead of being silently swallowed.
+- **Think-block regex** now strips the full `<think>…</think>` block (it previously matched only the opening tag).
+- **Sidebar navigation active state** — the active nav item is driven off `aria-current` (single source of truth), with a cleaner fill + bold treatment and a fixed header divider.
+
+### Changed
+
+- Dependency bumps (vite 8, tailwindcss 4.3, react-dom, eslint 10, lucide-react, @vitejs/plugin-react, @types/node, etc.).
+
 ## [0.2.2] — 2026-06-03
 
 ### Added
@@ -119,6 +179,10 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.4.0]: https://github.com/miracodeai/mira/releases/tag/v0.4.0
+[0.3.1]: https://github.com/miracodeai/mira/releases/tag/v0.3.1
+[0.3.0]: https://github.com/miracodeai/mira/releases/tag/v0.3.0
+[0.2.3]: https://github.com/miracodeai/mira/releases/tag/v0.2.3
 [0.2.2]: https://github.com/miracodeai/mira/releases/tag/v0.2.2
 [0.2.1]: https://github.com/miracodeai/mira/releases/tag/v0.2.1
 [0.2.0]: https://github.com/miracodeai/mira/releases/tag/v0.2.0

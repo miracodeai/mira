@@ -44,6 +44,7 @@ class TestEcosystemMapping:
             ("pip", "PyPI"),
             ("go", "Go"),
             ("rust", "crates.io"),
+            ("composer", "Packagist"),
             ("docker", None),
             ("unknown", None),
         ],

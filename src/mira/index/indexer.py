@@ -152,14 +152,21 @@ def _build_batches(file_pairs: list[tuple[str, str]]) -> list[list[tuple[str, st
     return batches
 
 
-def _should_index(path: str) -> bool:
-    """Check if a file path should be indexed."""
+def _should_index(path: str, exclude_patterns: list[str] | None = None) -> bool:
+    """Check if a file path should be indexed.
+
+    ``exclude_patterns`` are the user's ``filter.exclude_patterns`` globs; they
+    layer on top of the built-in skip list so indexing honours the same
+    exclusions as review (e.g. committed vendor dirs that bloat indexing cost).
+    """
     filename = os.path.basename(path)
-    # Check skip patterns
     for pattern in _SKIP_PATTERNS:
         if fnmatch(path, pattern) or fnmatch(filename, pattern):
             return False
-    # Check extension
+    if exclude_patterns:
+        for pattern in exclude_patterns:
+            if fnmatch(path, pattern) or fnmatch(filename, pattern):
+                return False
     _, ext = os.path.splitext(filename)
     return ext.lower() in _INDEXABLE_EXTENSIONS
 
@@ -281,6 +288,7 @@ async def _fetch_repo_tarball(
     repo: str,
     token: str,
     ref: str = "main",
+    max_file_size: int = 1_048_576,
 ) -> dict[str, str] | None:
     """Download the entire repo as a tarball and return ``{path: content}``.
 
@@ -290,7 +298,8 @@ async def _fetch_repo_tarball(
     our previous concurrency cap.
 
     Returns ``None`` on failure (caller should fall back to per-file fetch).
-    Files larger than 1 MB or undecodable as UTF-8 are skipped silently.
+    Files larger than ``max_file_size`` bytes or undecodable as UTF-8 are
+    skipped silently.
     """
     url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{ref}"
     headers = {
@@ -320,7 +329,7 @@ async def _fetch_repo_tarball(
             for member in tf:
                 if not member.isfile():
                     continue
-                if member.size > 1_048_576:  # 1 MB
+                if max_file_size and member.size > max_file_size:
                     continue
                 # Tarballs are wrapped in a top-level dir like "owner-repo-{sha}/".
                 # Strip that prefix so paths match the GitHub tree paths.
@@ -366,41 +375,89 @@ def _strip_code_fences(raw: str) -> str:
     return text.strip()
 
 
+_VALID_JSON_ESCAPES = set('"\\/bfnrtu')
+
+
+def _escape_lone_backslashes(text: str) -> str:
+    """Escape backslashes that aren't part of a valid JSON escape sequence.
+
+    Models like DeepSeek mention PHP namespaces (``\\App\\Models``) or Windows
+    paths in summaries and emit the backslashes unescaped, so json.loads bails
+    with "Invalid \\escape". We walk string literals and double any backslash
+    that doesn't start a real escape, consuming valid escapes as pairs so an
+    escaped quote is never mistaken for a string boundary.
+    """
+    out: list[str] = []
+    in_string = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+            i += 1
+        elif ch == "\\":
+            nxt = text[i + 1] if i + 1 < n else ""
+            if nxt in _VALID_JSON_ESCAPES:
+                out.append(ch + nxt)
+                i += 2
+            else:
+                out.append("\\\\")
+                i += 1
+        else:
+            if ch == '"':
+                in_string = False
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def _parse_summarize_response(raw: str) -> list[dict[str, Any]]:
     """Parse the LLM response from the summarization prompt."""
     text = strip_think_blocks(_strip_code_fences(raw))
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict) and "files" in data:
-            result: list[dict[str, Any]] = data["files"]
-            return result
-        if isinstance(data, list):
-            return list(data)
-        logger.warning(
-            "Summarization response has unexpected structure (keys: %s): %s",
-            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-            text[:200],
-        )
+    # strict=False tolerates raw newlines in strings; a repair pass for lone
+    # backslashes salvages otherwise-valid responses from models that don't
+    # escape paths/namespaces, so one bad string doesn't drop the whole batch.
+    data: Any = None
+    for candidate in (text, _escape_lone_backslashes(text)):
+        try:
+            data = json.loads(candidate, strict=False)
+            break
+        except (json.JSONDecodeError, TypeError):
+            continue
+    else:
+        logger.warning("Failed to parse summarization response: %s", raw[:300])
         return []
-    except (json.JSONDecodeError, TypeError) as exc:
-        logger.warning(
-            "Failed to parse summarization response (%s): %s",
-            exc,
-            raw[:300],
-        )
-        return []
+
+    if isinstance(data, dict) and "files" in data:
+        result: list[dict[str, Any]] = data["files"]
+        return result
+    if isinstance(data, list):
+        return list(data)
+    logger.warning(
+        "Summarization response has unexpected structure (keys: %s): %s",
+        list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+        text[:200],
+    )
+    return []
 
 
 def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> FileSummary:
     """Convert LLM output for a single file into a FileSummary."""
     symbols = []
     for sym in file_data.get("symbols", []):
+        name = sym.get("name") or ""
+        if not name:
+            continue
+        # `or ""` not `get(key, "")` — models emit explicit nulls that the
+        # default wouldn't catch, and these columns are NOT NULL.
         symbols.append(
             SymbolInfo(
-                name=sym.get("name", ""),
-                kind=sym.get("kind", "function"),
-                signature=sym.get("signature", ""),
-                description=sym.get("description", ""),
+                name=name,
+                kind=sym.get("kind") or "function",
+                signature=sym.get("signature") or "",
+                description=sym.get("description") or "",
             )
         )
 
@@ -526,7 +583,7 @@ async def index_repo(
 
     # Fetch repo tree
     tree_paths = await _fetch_repo_tree(owner, repo, token, branch)
-    indexable = [p for p in tree_paths if _should_index(p)]
+    indexable = [p for p in tree_paths if _should_index(p, config.filter.exclude_patterns)]
     logger.info(
         "Found %d indexable files in %s/%s (out of %d total)",
         len(indexable),
@@ -539,8 +596,11 @@ async def index_repo(
     # first — one request gets every file, ~10x faster than per-file fetches
     # for typical repos. Fall back to the per-file API if the tarball fails
     # (e.g. for a >100 MB repo where GitHub may reject the request).
+    max_file_size = config.index.max_file_size
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
-    tarball: dict[str, str] | None = await _fetch_repo_tarball(owner, repo, token, ref=branch)
+    tarball: dict[str, str] | None = await _fetch_repo_tarball(
+        owner, repo, token, ref=branch, max_file_size=max_file_size
+    )
 
     if tarball is not None:
         contents: list[str | None] = [tarball.get(p) for p in indexable]
@@ -555,8 +615,13 @@ async def index_repo(
     # Filter out failed fetches and compute hashes for staleness check
     file_pairs: list[tuple[str, str]] = []
     trivial_pairs: list[tuple[str, str]] = []
+    skipped_large = 0
     for path, content in zip(indexable, contents, strict=False):
         if content is None:
+            continue
+        # Catches the per-file fetch path, which the tarball cap doesn't cover.
+        if max_file_size and len(content.encode("utf-8")) > max_file_size:
+            skipped_large += 1
             continue
         if not full:
             existing = store.get_summary(path)
@@ -571,10 +636,11 @@ async def index_repo(
             file_pairs.append((path, content))
 
     logger.info(
-        "Indexing %d files (%d trivial / skipped %d unchanged)",
+        "Indexing %d files (%d trivial / skipped %d unchanged / %d over size limit)",
         len(file_pairs) + len(trivial_pairs),
         len(trivial_pairs),
-        len(indexable) - len(file_pairs) - len(trivial_pairs),
+        len(indexable) - len(file_pairs) - len(trivial_pairs) - skipped_large,
+        skipped_large,
     )
 
     # Clean up deleted files
@@ -942,7 +1008,7 @@ async def index_diff(
         return 0
 
     # Filter to indexable files
-    to_index = [p for p in changed_paths if _should_index(p)]
+    to_index = [p for p in changed_paths if _should_index(p, config.filter.exclude_patterns)]
     if not to_index:
         return 0
 
@@ -954,10 +1020,14 @@ async def index_diff(
     ]
     contents = await asyncio.gather(*tasks)
 
+    max_file_size = config.index.max_file_size
     file_pairs: list[tuple[str, str]] = []
     for path, content in zip(to_index, contents, strict=False):
-        if content is not None:
-            file_pairs.append((path, content))
+        if content is None:
+            continue
+        if max_file_size and len(content.encode("utf-8")) > max_file_size:
+            continue
+        file_pairs.append((path, content))
 
     # Summarize changed files
     llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)

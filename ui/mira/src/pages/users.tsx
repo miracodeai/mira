@@ -1,28 +1,51 @@
-import { Plus, Trash2 } from "lucide-react"
+import { KeyRound, Plus, Trash2, Users as UsersIcon } from "lucide-react"
 import { useState } from "react"
+import { useNavigate } from "react-router"
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
+import { ConfirmButton } from "@/components/ui/confirm-button"
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { UserAvatar } from "@/components/ui/user-avatar"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
+
+// Epoch seconds → "Just now" / "5m ago" / "3h ago" / "2d ago" / a date.
+// 0 (never logged in) → "Never".
+function lastSeen(ts: number): string {
+  if (!ts) return "Never"
+  const diff = Date.now() / 1000 - ts
+  if (diff < 60) return "Just now"
+  const mins = Math.floor(diff / 60)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 30) return `${days}d ago`
+  return new Date(ts * 1000).toLocaleDateString()
+}
 
 export function UsersPage() {
+  useDocumentTitle("Users")
   const { user: currentUser } = useAuth()
+  const navigate = useNavigate()
   const [refreshKey, setRefreshKey] = useState(0)
-  const { data: users } = useAsync(() => api.listUsers(), [refreshKey])
-  const [showCreate, setShowCreate] = useState(false)
-  const [newUser, setNewUser] = useState({ username: "", password: "", is_admin: false })
-  const [error, setError] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const { data: users, loading } = useAsync(() => api.listUsers(), [refreshKey])
 
   if (!currentUser?.is_admin) {
     return (
@@ -32,139 +55,135 @@ export function UsersPage() {
     )
   }
 
-  const handleCreate = async () => {
-    setError(null)
+  const remove = async (id: number) => {
+    setDeleteError(null)
     try {
-      await api.createUser(newUser.username, newUser.password, newUser.is_admin)
-      setNewUser({ username: "", password: "", is_admin: false })
-      setShowCreate(false)
+      await api.deleteUser(id)
       setRefreshKey((k) => k + 1)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to create user")
+    } catch (e) {
+      setDeleteError(
+        `Failed to delete user: ${e instanceof Error ? e.message : String(e)}`
+      )
     }
-  }
-
-  const handleDelete = async (id: number) => {
-    await api.deleteUser(id)
-    setRefreshKey((k) => k + 1)
   }
 
   return (
     <div className="space-y-6 p-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Users</h1>
-        <p className="text-sm text-muted-foreground">
-          Manage users and access
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Users</h1>
+          <p className="text-sm text-muted-foreground">
+            Manage who can access the Mira dashboard.
+          </p>
+        </div>
+        {users && users.length > 0 && (
+          <Button size="sm" onClick={() => navigate("/users/new")}>
+            <Plus className="mr-1 h-4 w-4" /> Add user
+          </Button>
+        )}
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>Users</CardTitle>
-              <CardDescription>
-                {users?.length ?? 0} users with dashboard access
-              </CardDescription>
+      {loading ? (
+        <div className="text-sm text-muted-foreground">Loading…</div>
+      ) : !users || users.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center gap-4 py-16 text-center">
+            <div className="flex size-12 items-center justify-center rounded-full bg-muted">
+              <UsersIcon className="size-6 text-muted-foreground" />
             </div>
-            <Button size="sm" onClick={() => setShowCreate(!showCreate)}>
-              <Plus className="mr-1 h-3 w-3" /> Add User
+            <div className="space-y-1">
+              <p className="text-sm font-medium">No users yet</p>
+              <p className="max-w-sm text-sm text-muted-foreground">
+                Add a user to give someone access to the dashboard.
+              </p>
+            </div>
+            <Button size="sm" onClick={() => navigate("/users/new")}>
+              <Plus className="mr-1 h-4 w-4" /> Add user
             </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {showCreate && (
-            <div className="mb-6 space-y-3 rounded-lg border p-4">
-              <div className="grid grid-cols-2 gap-3">
-                <Input
-                  placeholder="Username"
-                  value={newUser.username}
-                  onChange={(e) =>
-                    setNewUser({ ...newUser, username: e.target.value })
-                  }
-                />
-                <Input
-                  type="password"
-                  placeholder="Password"
-                  value={newUser.password}
-                  onChange={(e) =>
-                    setNewUser({ ...newUser, password: e.target.value })
-                  }
-                />
-              </div>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={newUser.is_admin}
-                  onChange={(e) =>
-                    setNewUser({ ...newUser, is_admin: e.target.checked })
-                  }
-                  className="rounded"
-                />
-                Admin privileges
-              </label>
-              {error && (
-                <p className="text-sm text-destructive">{error}</p>
-              )}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  onClick={handleCreate}
-                  disabled={!newUser.username || !newUser.password}
-                >
-                  Create
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setShowCreate(false)}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {users && users.length > 0 ? (
-            <div className="space-y-4">
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>User</TableHead>
+                <TableHead>Role</TableHead>
+                <TableHead>Last seen</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {users.map((u) => (
-                <div key={u.id} className="flex items-center">
-                  <Avatar className="h-9 w-9">
-                    <AvatarFallback>
-                      {u.username.slice(0, 2).toUpperCase()}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="ml-4 space-y-1">
-                    <p className="text-sm font-medium leading-none">
-                      {u.username}
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      {u.is_admin ? "Admin" : "User"}
-                    </p>
-                  </div>
-                  <div className="ml-auto flex items-center gap-2">
-                    {u.is_admin && (
-                      <Badge variant="secondary">Admin</Badge>
-                    )}
-                    {u.id !== currentUser.id && (
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={() => handleDelete(u.id)}
+                <TableRow key={u.id}>
+                  <TableCell>
+                    <div className="flex items-center gap-3">
+                      <UserAvatar seed={u.username} className="h-7 w-7" />
+                      <span className="font-medium">{u.username}</span>
+                      {u.id === currentUser.id && (
+                        <span className="text-xs text-muted-foreground">
+                          (you)
+                        </span>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    {u.is_admin ? (
+                      <Badge variant="secondary" className="ring-1 ring-border">
+                        Admin
+                      </Badge>
+                    ) : (
+                      <Badge
+                        variant="secondary"
+                        className="bg-transparent ring-1 ring-border"
                       >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                        User
+                      </Badge>
                     )}
-                  </div>
-                </div>
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {lastSeen(u.last_login_at)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => navigate(`/users/${u.id}/password`)}
+                          >
+                            <KeyRound className="h-3.5 w-3.5" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Reset password</TooltipContent>
+                      </Tooltip>
+                      {u.id !== currentUser.id && (
+                        <ConfirmButton
+                          variant="ghost"
+                          size="icon-sm"
+                          tooltip="Delete"
+                          dialogTitle="Delete user?"
+                          dialogDescription={`"${u.username}" will lose dashboard access. This can't be undone.`}
+                          confirmLabel="Delete"
+                          destructive
+                          onConfirm={() => remove(u.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                        </ConfirmButton>
+                      )}
+                    </div>
+                  </TableCell>
+                </TableRow>
               ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No users found.</p>
-          )}
-        </CardContent>
-      </Card>
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+
+      {deleteError && (
+        <p className="text-sm break-words text-destructive">{deleteError}</p>
+      )}
     </div>
   )
 }

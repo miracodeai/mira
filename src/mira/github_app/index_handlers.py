@@ -41,6 +41,7 @@ async def _count_files_for_repos(
         return
 
     app_db = _get_app_db()
+    exclude_patterns = load_config().filter.exclude_patterns
     for repo_info in repos:
         full_name = repo_info.get("full_name", "")
         if "/" not in full_name:
@@ -48,7 +49,7 @@ async def _count_files_for_repos(
         owner, repo = full_name.split("/", 1)
         try:
             tree_paths = await _fetch_repo_tree(owner, repo, token)
-            indexable = [p for p in tree_paths if _should_index(p)]
+            indexable = [p for p in tree_paths if _should_index(p, exclude_patterns)]
             app_db.set_repo_file_count(owner, repo, len(indexable))
             logger.info("Counted %d indexable files in %s", len(indexable), full_name)
         except Exception as exc:

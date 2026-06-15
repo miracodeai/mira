@@ -48,8 +48,8 @@ _JS_CLASS = re.compile(r"^(\s*)(?:export\s+)?(?:default\s+)?class\s+(\w+)")
 _JS_METHOD = re.compile(r"^(\s*)(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{")
 
 # Go patterns
-_GO_FUNC = re.compile(r"^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(")
-_GO_TYPE = re.compile(r"^type\s+(\w+)\s+struct\s*\{")
+_GO_FUNC = re.compile(r"^func\s+(?:\(\s*\w+\s+\*?(\w+)(?:\[[^\]]*\])?\s*\)\s+)?(\w+)\s*\(")
+_GO_TYPE = re.compile(r"^type\s+(\w+)\s+(struct|interface)\s*\{")
 
 # Rust patterns
 _RUST_FN = re.compile(r"^(\s*)(?:pub\s+)?(?:async\s+)?fn\s+(\w+)")
@@ -61,7 +61,11 @@ _JAVA_METHOD = re.compile(
     r"^(\s*)(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?"
     r"(?:\w+(?:<[^>]*>)?(?:\[\])*\s+)(\w+)\s*\("
 )
-_JAVA_CLASS = re.compile(r"^(\s*)(?:public\s+)?(?:abstract\s+)?(?:final\s+)?class\s+(\w+)")
+_JAVA_CLASS = re.compile(
+    r"^(\s*)(?:(?:public|private|protected|static|abstract|final|sealed|non-sealed|strictfp)\s+)*"
+    r"(?:class|interface|enum|record)\s+(\w+)"
+)
+_JAVA_CTOR = re.compile(r"^(\s*)(?:public|private|protected)\s+(\w+)\s*\(")
 
 
 @dataclass
@@ -73,6 +77,9 @@ class SymbolSpan:
     start_line: int  # 1-based
     end_line: int  # 1-based, inclusive
     source: str
+    # Container-scoped name where one exists, e.g. "ClassName.method" or
+    # "Receiver.Method". Empty for top-level symbols.
+    qualified_name: str = ""
 
 
 def extract_symbols(source: str, language: str) -> list[SymbolSpan]:
@@ -95,9 +102,9 @@ def extract_symbols(source: str, language: str) -> list[SymbolSpan]:
 
 
 def find_symbol_by_name(source: str, language: str, name: str) -> SymbolSpan | None:
-    """Find a specific symbol by name in source code."""
+    """Find a specific symbol by plain or container-qualified name."""
     for sym in extract_symbols(source, language):
-        if sym.name == name:
+        if name in (sym.name, sym.qualified_name):
             return sym
     return None
 
@@ -265,14 +272,16 @@ def _extract_go(lines: list[str]) -> list[SymbolSpan]:
 
         fn_match = _GO_FUNC.match(line)
         if fn_match:
+            receiver, name = fn_match.group(1), fn_match.group(2)
             end = _find_brace_end(lines, i)
             symbols.append(
                 SymbolSpan(
-                    name=fn_match.group(1),
-                    kind="function",
+                    name=name,
+                    kind="method" if receiver else "function",
                     start_line=i + 1,
                     end_line=end + 1,
                     source="\n".join(lines[i : end + 1]),
+                    qualified_name=f"{receiver}.{name}" if receiver else "",
                 )
             )
             i = end + 1
@@ -284,7 +293,7 @@ def _extract_go(lines: list[str]) -> list[SymbolSpan]:
             symbols.append(
                 SymbolSpan(
                     name=type_match.group(1),
-                    kind="struct",
+                    kind=type_match.group(2),
                     start_line=i + 1,
                     end_line=end + 1,
                     source="\n".join(lines[i : end + 1]),
@@ -357,11 +366,20 @@ def _extract_rust(lines: list[str]) -> list[SymbolSpan]:
 
 
 def _extract_java(lines: list[str]) -> list[SymbolSpan]:
-    """Extract symbols from Java."""
+    """Extract symbols from Java.
+
+    Descends into class/interface/enum/record bodies (every Java method
+    lives inside one) and qualifies methods with their enclosing type,
+    mirroring the Python extractor. Method bodies are skipped over so
+    statements like `return foo(...)` can't false-match.
+    """
     symbols: list[SymbolSpan] = []
+    enclosing: list[tuple[str, int]] = []  # (type name, body end index)
 
     i = 0
     while i < len(lines):
+        while enclosing and enclosing[-1][1] < i:
+            enclosing.pop()
         line = lines[i]
 
         cls_match = _JAVA_CLASS.match(line)
@@ -376,19 +394,28 @@ def _extract_java(lines: list[str]) -> list[SymbolSpan]:
                     source="\n".join(lines[i : end + 1]),
                 )
             )
-            i = end + 1
+            enclosing.append((cls_match.group(2), end))
+            i += 1
             continue
 
         method_match = _JAVA_METHOD.match(line)
-        if method_match:
-            end = _find_brace_end(lines, i)
+        if not method_match and enclosing:
+            ctor = _JAVA_CTOR.match(line)
+            if ctor and ctor.group(2) == enclosing[-1][0]:
+                method_match = ctor
+        if method_match and enclosing:
+            # Abstract/interface declarations have no body — span is the line.
+            braceless = ";" in line and "{" not in line
+            end = i if braceless else _find_brace_end(lines, i)
+            name = method_match.group(2)
             symbols.append(
                 SymbolSpan(
-                    name=method_match.group(2),
+                    name=name,
                     kind="method",
                     start_line=i + 1,
                     end_line=end + 1,
                     source="\n".join(lines[i : end + 1]),
+                    qualified_name=f"{enclosing[-1][0]}.{name}",
                 )
             )
             i = end + 1

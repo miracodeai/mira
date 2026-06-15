@@ -34,6 +34,7 @@ class TestLoadConfig:
         assert config.review.focus_only_on_problems is False
         assert config.review.walkthrough is True
         assert config.review.walkthrough_sequence_diagram is True
+        assert config.index.max_file_size == 1_048_576
 
     def test_focus_only_on_problems_override(self, sample_config_path: Path):
         config = load_config(

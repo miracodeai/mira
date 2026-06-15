@@ -26,6 +26,12 @@ class LLMConfig(BaseModel):
     # Optional per-purpose overrides. Fall back to `model` if not set.
     indexing_model: str | None = None
     review_model: str | None = None
+    # Extended-thinking effort for reviews ("low"/"medium"/"high"; None/"off" =
+    # no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
+    # `reasoning_effort` is the resolved value the provider reads (set by
+    # `llm_config_for`, the same way `model` is resolved from `review_model`).
+    review_reasoning_effort: str | None = None
+    reasoning_effort: str | None = None
     temperature: float = 0.2
     max_tokens: int = 4096
     max_context_tokens: int = 120_000
@@ -46,6 +52,10 @@ class LLMConfig(BaseModel):
 
 class FilterConfig(BaseModel):
     confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    # Per-category floors layered over confidence_threshold (the higher wins).
+    # Lets noisy categories (e.g. "security" from the cheap-model pass) be
+    # held to a stricter bar without raising the global floor.
+    category_confidence_thresholds: dict[str, float] = Field(default_factory=dict)
     max_comments: int = Field(default=5, ge=1)
     min_severity: str = "nitpick"
     exclude_patterns: list[str] = Field(
@@ -101,6 +111,16 @@ class ReviewConfig(BaseModel):
     code_context: bool = True
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
+    # Review each chunk N times and keep only majority-vote findings.
+    # 1 = off (single pass, exact current behavior). 3 is the sweet spot:
+    # variance FPs flicker across runs, real findings recur. Runs fire in
+    # parallel so wall clock stays ~flat, but token cost multiplies by N —
+    # this is the opt-in "thorough" tier, not the default.
+    ensemble_runs: int = Field(default=1, ge=1, le=5)
+    # Sampling temperature for the extra ensemble runs (the first run keeps
+    # the configured llm.temperature). Mild diversity makes the vote useful.
+    ensemble_temperature: float = Field(default=0.3, ge=0.0, le=1.0)
+
     # Run a second-pass LLM critique on each draft comment before posting.
     # The critic asks "is this analysis actually correct? Cite specific
     # lines that prove it." Comments that fail the critique are dropped.
@@ -147,6 +167,14 @@ class ReviewConfig(BaseModel):
     dependency_overlap: bool = True
 
 
+class IndexConfig(BaseModel):
+    # Skip indexing any file larger than this (bytes). Generated SDKs, vendored
+    # bundles and large test fixtures burn indexing tokens for little value.
+    # Defaults to the previous hard-coded tarball cap (1 MB) so it's a no-op
+    # until lowered; 0 disables the limit. In bytes, matching review.max_file_size.
+    max_file_size: int = Field(default=1024 * 1024, ge=0)
+
+
 class ProviderConfig(BaseModel):
     type: str = "github"
 
@@ -160,6 +188,7 @@ class MiraConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    index: IndexConfig = Field(default_factory=IndexConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 

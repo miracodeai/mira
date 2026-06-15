@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { api } from "@/lib/api"
+import { useDocumentTitle } from "@/lib/hooks"
 
 type ModelOption = {
   value: string
@@ -26,6 +27,7 @@ type ModelOption = {
 }
 
 export function SetupPage() {
+  useDocumentTitle("Setup")
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)

@@ -209,6 +209,72 @@ class TestExtractImportCandidates:
         assert len(cands) == 1
 
 
+class TestGoModuleResolution:
+    """With go.mod's module path, in-repo Go imports resolve deterministically."""
+
+    TREE = {
+        "go.mod",
+        "pkg/services/auth/anon/anon.go",
+        "pkg/services/auth/anon/store.go",
+        "pkg/services/auth/anon/store_test.go",
+        "pkg/services/auth/anon/deeper/inner.go",  # not a direct child — excluded
+        "pkg/setting/setting.go",
+    }
+
+    def test_module_prefix_resolves_exact_package_dir(self):
+        src = 'import "github.com/grafana/grafana/pkg/services/auth/anon"\n'
+        cands = extract_import_candidates(
+            src, "go", "main.go", repo_tree=self.TREE, go_module="github.com/grafana/grafana"
+        )
+        # Package-named file first, test files and subpackages excluded.
+        assert cands[0] == "pkg/services/auth/anon/anon.go"
+        assert "pkg/services/auth/anon/store.go" in cands
+        assert all("_test.go" not in c and "deeper" not in c for c in cands)
+
+    def test_external_dependency_returns_nothing(self):
+        # Tail-match would have wrongly matched pkg/setting here.
+        src = 'import "github.com/someone/else/pkg/setting"\n'
+        cands = extract_import_candidates(
+            src, "go", "main.go", repo_tree=self.TREE, go_module="github.com/grafana/grafana"
+        )
+        assert cands == []
+
+    def test_no_module_falls_back_to_tail_match(self):
+        src = 'import "github.com/grafana/grafana/pkg/services/auth/anon"\n'
+        cands = extract_import_candidates(src, "go", "main.go", repo_tree=self.TREE)
+        assert any("pkg/services/auth/anon/" in c for c in cands)
+
+    def test_parse_go_module(self):
+        from mira.index.jit_context import _parse_go_module
+
+        assert (
+            _parse_go_module("module github.com/grafana/grafana\n\ngo 1.21\n")
+            == "github.com/grafana/grafana"
+        )
+        assert _parse_go_module("// just comments\n") is None
+        assert _parse_go_module("") is None
+
+    @pytest.mark.asyncio
+    async def test_jit_context_fetches_go_mod_once(self):
+        sources = {
+            "go.mod": "module example.com/app\n",
+            "cmd/main.go": 'package main\n\nimport "example.com/app/pkg/auth"\n',
+            "pkg/auth/auth.go": (
+                "package auth\n\n"
+                "type Service struct {}\n\n"
+                "func (s *Service) Login() error {\n\treturn nil\n}\n"
+            ),
+        }
+        fetcher = _FakeFetcher(sources)
+        out = await build_jit_cross_file_context(
+            changed_files=[_file("cmd/main.go")],
+            source_fetcher=fetcher,
+            repo_tree=set(sources),
+        )
+        assert "pkg/auth/auth.go" in out
+        assert "Login" in out
+
+
 class TestBuildJITContext:
     @pytest.mark.asyncio
     async def test_empty_when_no_changed_files(self):

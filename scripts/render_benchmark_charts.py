@@ -54,7 +54,7 @@ DARK_BAR_HERO = "#41b064"  # Mira brand green (hero bar)
 
 TOOLS = [
     # (slug,                       display,            f1,     median_s)
-    ("mira", "Mira", 39.0, 85),
+    ("mira", "Mira", 44.0, 77),
     ("cubic-v2", "Cubic-v2", 56.4, 540),
     ("qodo-extended-v2", "Qodo Extended", 54.4, 360),
     ("augment", "Augment", 45.9, 300),
@@ -96,7 +96,7 @@ def render_speed_bars() -> Path:
     # then a couple of extras to show the long tail. Tool version strings
     # are approximate / illustrative.
     rows = [
-        ("Mira", 85, True),
+        ("Mira", 77, True),
         ("Sourcery AI", 180, False),
         ("CodeRabbit", 300, False),
         ("Augment", 300, False),
@@ -166,7 +166,7 @@ def render_speed_bars() -> Path:
     fig.text(
         0.5,
         0.91,
-        "Median wall-clock time per PR  •  Code Review Bench, 25-PR subset",
+        "Median wall-clock time per PR  •  Code Review Bench, 50-PR offline set",
         ha="center",
         va="top",
         fontsize=10,
@@ -283,7 +283,7 @@ def render_frontier_scatter() -> Path:
     fig.text(
         0.5,
         0.92,
-        "F1 vs median review time per PR  •  Code Review Bench, 25-PR subset",
+        "F1 vs median review time per PR  •  Code Review Bench, 50-PR offline set",
         ha="center",
         va="top",
         fontsize=10,
@@ -302,11 +302,11 @@ def render_by_language() -> Path:
     # (results/comparison_report.json from the F1=34 plateau run).
     # Numbers are medians across the recent stable runs, not peaks.
     data = [
-        ("Python", 46),
-        ("Ruby", 40),
-        ("TypeScript", 33),
-        ("Java", 30),
-        ("Go", 24),
+        ("Ruby", 54),
+        ("TypeScript", 49),
+        ("Go", 40),
+        ("Java", 39),
+        ("Python", 35),
     ]
     data.sort(key=lambda x: x[1], reverse=True)
     names = [n for n, _ in data]
@@ -362,7 +362,7 @@ def render_by_language() -> Path:
     fig.text(
         0.5,
         0.90,
-        "F1 score per language  •  Code Review Bench, 5 PRs each",
+        "F1 score per language  •  Code Review Bench, 10 PRs each",
         ha="center",
         va="top",
         fontsize=10,

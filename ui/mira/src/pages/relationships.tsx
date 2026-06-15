@@ -21,9 +21,10 @@ import {
 } from "@/components/ui/card"
 import { RelationshipGraph } from "@/components/dashboard/relationship-graph"
 import { api } from "@/lib/api"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function RelationshipsPage() {
+  useDocumentTitle("Relationships")
   const { data, loading, error } = useAsync(api.getRelationships, [])
   const { data: repos } = useAsync(api.listRepos, [])
   const [refreshKey, setRefreshKey] = useState(0)

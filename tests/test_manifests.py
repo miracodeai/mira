@@ -9,6 +9,8 @@ import pytest
 from mira.index.manifests import (
     _is_lockfile_path,
     is_manifest,
+    parse_composer_json,
+    parse_composer_lock,
     parse_dockerfile,
     parse_go_mod,
     parse_manifest,
@@ -170,6 +172,87 @@ class TestDockerfile:
         assert pkgs[0].version == ""
 
 
+class TestComposerJson:
+    def test_require_and_require_dev(self):
+        content = json.dumps(
+            {
+                "name": "acme/app",
+                "require": {
+                    "laravel/framework": "^10.0",
+                    "guzzlehttp/guzzle": "7.8.*",
+                },
+                "require-dev": {
+                    "phpunit/phpunit": "^10.0",
+                },
+            }
+        )
+        pkgs = parse_composer_json(content, "composer.json")
+        by_name = {p.name: p for p in pkgs}
+        assert by_name["laravel/framework"].version == "^10.0"
+        assert by_name["laravel/framework"].is_dev is False
+        assert by_name["guzzlehttp/guzzle"].version == "7.8.*"
+        assert by_name["phpunit/phpunit"].is_dev is True
+        assert all(p.kind == "composer" for p in pkgs)
+
+    def test_skips_platform_packages(self):
+        content = json.dumps(
+            {
+                "require": {
+                    "php": ">=8.1",
+                    "php-64bit": ">=8.1",
+                    "ext-json": "*",
+                    "lib-openssl": ">=1.0",
+                    "composer-plugin-api": "^2.0",
+                    "composer-runtime-api": "^2.0",
+                    "hhvm": "^4.0",
+                    "symfony/console": "^6.0",
+                }
+            }
+        )
+        pkgs = parse_composer_json(content, "composer.json")
+        assert [p.name for p in pkgs] == ["symfony/console"]
+
+    def test_invalid_json_returns_empty(self):
+        assert parse_composer_json("{not-json", "composer.json") == []
+
+
+class TestComposerLock:
+    def test_packages_and_packages_dev(self):
+        content = json.dumps(
+            {
+                "packages": [
+                    {"name": "laravel/framework", "version": "10.48.0"},
+                    {"name": "guzzlehttp/guzzle", "version": "7.8.1"},
+                ],
+                "packages-dev": [
+                    {"name": "phpunit/phpunit", "version": "10.5.0"},
+                ],
+            }
+        )
+        pkgs = parse_composer_lock(content, "composer.lock")
+        by_name = {p.name: p for p in pkgs}
+        assert by_name["laravel/framework"].version == "10.48.0"
+        assert by_name["laravel/framework"].is_dev is False
+        assert by_name["phpunit/phpunit"].is_dev is True
+        assert all(p.kind == "composer" for p in pkgs)
+
+    def test_invalid_json_returns_empty(self):
+        assert parse_composer_lock("not json", "composer.lock") == []
+
+    def test_skips_entries_missing_name_or_version(self):
+        content = json.dumps(
+            {
+                "packages": [
+                    {"name": "valid/pkg", "version": "1.0.0"},
+                    {"name": "missing-version"},
+                    {"version": "1.0.0"},
+                ]
+            }
+        )
+        pkgs = parse_composer_lock(content, "composer.lock")
+        assert [p.name for p in pkgs] == ["valid/pkg"]
+
+
 class TestDispatcher:
     @pytest.mark.parametrize(
         "path,expected",
@@ -185,6 +268,8 @@ class TestDispatcher:
             ("uv.lock", True),
             ("poetry.lock", True),
             ("package-lock.json", True),
+            ("composer.json", True),
+            ("backend/composer.lock", True),
             ("README.md", False),
             ("src/main.py", False),
         ],
@@ -287,11 +372,14 @@ class TestLockfileHeuristic:
         [
             ("uv.lock", True),
             ("poetry.lock", True),
+            ("composer.lock", True),
+            ("backend/composer.lock", True),
             ("package-lock.json", True),
             ("frontend/package-lock.json", True),
             ("pyproject.toml", False),
             ("package.json", False),
             ("requirements.txt", False),
+            ("composer.json", False),
         ],
     )
     def test_is_lockfile_path(self, path, expected):

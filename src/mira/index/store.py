@@ -249,7 +249,7 @@ class LearnedRuleRow:
 class PackageManifestRow:
     id: int
     name: str
-    kind: str  # "npm" | "pip" | "docker" | "go" | "rust"
+    kind: str  # "npm" | "pip" | "docker" | "go" | "rust" | "composer"
     version: str
     file_path: str
     is_dev: bool = False
@@ -1154,7 +1154,7 @@ def list_packages_org_wide_sqlite() -> list[dict]:
             try:
                 rows = conn.execute(
                     "SELECT DISTINCT kind, name, version, file_path FROM package_manifests "
-                    "WHERE kind IN ('npm', 'pip', 'go', 'rust') AND version != ''"
+                    "WHERE kind IN ('npm', 'pip', 'go', 'rust', 'composer') AND version != ''"
                 ).fetchall()
             finally:
                 conn.close()

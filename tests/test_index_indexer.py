@@ -51,6 +51,15 @@ class TestShouldIndex:
     def test_unknown_extension(self):
         assert _should_index("README.md") is False
 
+    def test_user_exclude_pattern(self):
+        assert _should_index("app/generated/api.py", ["*/generated/*"]) is False
+
+    def test_user_exclude_glob_by_extension(self):
+        assert _should_index("src/schema.proto", ["*.proto"]) is False
+
+    def test_user_exclude_does_not_affect_others(self):
+        assert _should_index("src/main.py", ["*.proto"]) is True
+
 
 class TestContentHash:
     def test_deterministic(self):
@@ -92,6 +101,18 @@ class TestParseSummarizeResponse:
         raw = f"```\n{inner}\n```"
         result = _parse_summarize_response(raw)
         assert len(result) == 1
+
+    def test_unescaped_backslash_in_string(self):
+        # DeepSeek-style: PHP namespace backslashes left unescaped (issue #96).
+        raw = '{"files": [{"path": "a.php", "summary": "Model in \\App\\Models namespace"}]}'
+        result = _parse_summarize_response(raw)
+        assert len(result) == 1
+        assert result[0]["summary"] == "Model in \\App\\Models namespace"
+
+    def test_valid_escapes_preserved(self):
+        raw = json.dumps({"files": [{"path": "a.py", "summary": 'tab\there "quote"'}]})
+        result = _parse_summarize_response(raw)
+        assert result[0]["summary"] == 'tab\there "quote"'
 
 
 class TestStripCodeFences:
@@ -141,6 +162,20 @@ class TestBuildFileSummary:
         assert fs.path == "empty.py"
         assert fs.symbols == []
         assert fs.imports == []
+
+    def test_null_symbol_fields_coerced(self):
+        # Models emit explicit nulls; columns are NOT NULL (issue #96).
+        data = {"symbols": [{"name": "foo", "kind": None, "signature": None, "description": None}]}
+        fs = _build_file_summary("a.py", "content", data)
+        assert len(fs.symbols) == 1
+        assert fs.symbols[0].kind == "function"
+        assert fs.symbols[0].signature == ""
+        assert fs.symbols[0].description == ""
+
+    def test_nameless_symbol_skipped(self):
+        data = {"symbols": [{"name": None, "signature": "x"}, {"name": "ok"}]}
+        fs = _build_file_summary("a.py", "content", data)
+        assert [s.name for s in fs.symbols] == ["ok"]
 
 
 @pytest.mark.asyncio
@@ -206,6 +241,36 @@ class TestIndexRepo:
         summary = store.get_summary("src/main.py")
         assert summary is not None
         assert summary.summary == "Main entry point."
+        store.close()
+
+    async def test_skips_files_over_size_limit(self, tmp_path):
+        """Files above index.max_file_size are dropped before summarization."""
+        store = IndexStore(str(tmp_path / "test.db"))
+        mock_llm = AsyncMock()
+        mock_llm.complete = AsyncMock()
+
+        config = MiraConfig()
+        config.index.max_file_size = 1_000
+        big_content = "print('x')\n" * 500  # ~5 KB, over the 1 KB limit
+
+        with (
+            patch("mira.index.indexer._fetch_repo_tree", return_value=["src/main.py"]),
+            patch(
+                "mira.index.indexer._fetch_repo_tarball", return_value={"src/main.py": big_content}
+            ),
+        ):
+            count = await index_repo(
+                owner="test",
+                repo="repo",
+                token="fake-token",
+                config=config,
+                store=store,
+                llm=mock_llm,
+                full=True,
+            )
+
+        assert count == 0
+        mock_llm.complete.assert_not_called()
         store.close()
 
 
