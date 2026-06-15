@@ -23,7 +23,7 @@ from mira.llm.response_parser import (
     convert_to_review_comments,
     parse_llm_response,
 )
-from mira.models import KeyIssue, ReviewComment
+from mira.models import KeyIssue, ReviewComment, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -184,9 +184,49 @@ async def security_review_pass(
     for c in comments:
         if not c.category or c.category != "security":
             c.category = "security"
+        c.source_pass = "security"
     if comments:
         logger.info("Security pass produced %d candidate comment(s)", len(comments))
     return comments
+
+
+_MAX_HUNK_EVIDENCE_CHARS = 1200
+
+
+def _hunk_evidence(comment: ReviewComment, diff_files: list | None) -> str:
+    """The diff hunk(s) covering a comment's lines — the critic's real evidence."""
+    if not diff_files:
+        return ""
+    file = next((f for f in diff_files if f.path == comment.path), None)
+    if file is None:
+        return ""
+    end = comment.end_line or comment.line
+    parts = []
+    for h in file.hunks:
+        h_end = h.target_start + max(h.target_length, 1) - 1
+        if comment.line <= h_end and h.target_start <= end:
+            parts.append(h.content)
+    text = "\n".join(parts)
+    if len(text) > _MAX_HUNK_EVIDENCE_CHARS:
+        text = text[:_MAX_HUNK_EVIDENCE_CHARS] + "…"
+    return text
+
+
+def _critique_keep(verdict: dict, comment: ReviewComment) -> bool:
+    """Deterministic keep rule over the critic's evidence grade.
+
+    The dial lives here, in code, so precision/recall tradeoffs are tunable
+    against the benchmark harness instead of buried in prompt wording.
+    """
+    evidence = verdict.get("evidence")
+    if evidence == "proven":
+        return True
+    if evidence == "plausible":
+        return comment.severity >= Severity.WARNING and comment.confidence >= 0.8
+    if evidence == "unsupported":
+        return False
+    # Older binary shape (model fallback): honor it.
+    return verdict.get("keep") is True
 
 
 async def self_critique(
@@ -195,8 +235,18 @@ async def self_critique(
     learned_rules: list[str] | None = None,
     custom_rules: list[dict[str, str]] | None = None,
     indexing_llm: LLMProvider | None = None,
+    diff_files: list | None = None,
+    audit: list[dict] | None = None,
 ) -> list[ReviewComment]:
-    """Re-verify each draft comment: keep only ones whose cited code proves the issue.
+    """Grade each draft comment's evidence and drop the unsupported ones.
+
+    The critic grades evidence (proven / plausible / unsupported) rather
+    than making keep/drop calls — an adversarial "find why this is wrong"
+    framing systematically kills subtle-but-real findings. The keep rule
+    is applied in code afterwards.
+
+    `diff_files`, when passed, lets the critic see the actual hunks each
+    comment targets instead of judging from the truncated citation alone.
 
     Team-documented preferences (learned + custom rules) are surfaced to the
     critic so it doesn't drop comments that align with them as "style nits".
@@ -212,12 +262,16 @@ async def self_critique(
         cited = (c.existing_code or "").strip()
         if len(cited) > 400:
             cited = cited[:400] + "…"
-        draft_lines.append(
+        entry = (
             f"[{i}] {c.path}:{c.line} — {c.severity.name} / {c.category}\n"
             f"    Title: {c.title}\n"
             f"    Body:  {(c.body or '').strip()[:500]}\n"
             f"    Cites: {cited or '(no code citation)'}\n"
         )
+        hunk = _hunk_evidence(c, diff_files)
+        if hunk:
+            entry += f"    Diff hunk:\n{hunk}\n"
+        draft_lines.append(entry)
 
     rules_block = ""
     rule_texts: list[str] = list(learned_rules or [])
@@ -227,29 +281,29 @@ async def self_critique(
         rule_texts.append(f"{title}: {content}" if title else content)
     if rule_texts:
         rules_block = (
-            "## Team preferences (do NOT drop comments that enforce these)\n\n"
+            "## Team preferences (do NOT grade comments that enforce these as unsupported)\n\n"
             + "\n".join(f"- {t}" for t in rule_texts)
             + "\n\n"
         )
 
     critic_prompt = (
-        "You are reviewing draft PR comments produced by another reviewer. "
-        "Your job is to filter out confidently-wrong analyses, speculation, "
-        "and 'while I'm here' nitpicks. Keep only comments where the cited "
-        "code clearly proves the issue and the fix is actionable.\n\n"
-        "Be especially skeptical of:\n"
-        "- Claims about Python/JS semantics that don't match the actual "
-        "  language behaviour (e.g. 'decorator only registers last route' "
-        "  is wrong; stacked decorators register both)\n"
-        "- Race-condition or timing arguments that depend on lines not in "
-        "  the citation\n"
-        "- 'May not be valid' / 'could potentially' hedges without proof\n"
-        "- Style preferences masquerading as warnings\n\n"
-        "If the cited code clearly proves the issue, KEEP it. If you're "
-        "unsure or it looks speculative, DROP it.\n\n"
-        + rules_block
-        + "## Draft comments\n\n"
-        + "\n".join(draft_lines)
+        "You are grading draft PR comments produced by another reviewer. "
+        "For each comment, grade how well the shown code supports the "
+        "claimed issue:\n\n"
+        "- `proven` — the shown code demonstrates the issue and the "
+        "reasoning is correct.\n"
+        "- `plausible` — consistent with the shown code but depends on "
+        "behaviour or code not shown (cross-file contracts, runtime "
+        "values). Real findings often land here; this is a valid grade, "
+        "not a failure.\n"
+        "- `unsupported` — the shown code contradicts the claim, the "
+        "language-semantics reasoning is wrong (e.g. 'decorator only "
+        "registers last route' — stacked decorators register both), or "
+        "it's a style preference dressed up as an issue.\n\n"
+        "Grade the evidence; do NOT construct counter-arguments. A subtle "
+        "issue clearly visible in the code (a predicate with side effects, "
+        "an idiom misuse) is `proven` even if reasonable people might ship "
+        "it anyway.\n\n" + rules_block + "## Draft comments\n\n" + "\n".join(draft_lines)
     )
 
     critic_llm = indexing_llm or _indexing_llm(llm)
@@ -269,17 +323,41 @@ async def self_critique(
     if not isinstance(verdicts, list):
         return comments
 
-    keep_indices = {int(v["index"]) for v in verdicts if v.get("keep") is True}
+    keep_indices: set[int] = set()
+    verdict_by_idx: dict[int, dict] = {}
     for v in verdicts:
-        if v.get("keep") is False and 0 <= int(v.get("index", -1)) < len(comments):
-            idx = int(v["index"])
-            logger.info(
-                "Self-critique dropped [%d] %s:%d — %s",
-                idx,
-                comments[idx].path,
-                comments[idx].line,
-                str(v.get("reason", "no reason"))[:120],
+        try:
+            idx = int(v.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= idx < len(comments):
+            continue
+        verdict_by_idx[idx] = v
+        if _critique_keep(v, comments[idx]):
+            keep_indices.add(idx)
+
+    for i, c in enumerate(comments):
+        if i in keep_indices:
+            continue
+        v = verdict_by_idx.get(i)
+        evidence = v.get("evidence", "keep=false") if v else "no-verdict"
+        reason = str(v.get("reason", "no reason")) if v else "critic returned no verdict"
+        if audit is not None:
+            audit.append(
+                {
+                    "stage": "self_critique",
+                    "path": c.path,
+                    "line": c.line,
+                    "title": c.title,
+                    "severity": c.severity.name,
+                    "category": c.category,
+                    "confidence": c.confidence,
+                    "reason": f"{evidence}: {reason}",
+                }
             )
+        logger.info(
+            "Self-critique dropped [%d] %s:%d (%s) — %s", i, c.path, c.line, evidence, reason[:120]
+        )
 
     return [c for i, c in enumerate(comments) if i in keep_indices]
 

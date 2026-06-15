@@ -6,11 +6,11 @@
   <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
    <cc:Work>
     <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
-    <dc:date>2026-05-14T15:45:27.965906</dc:date>
+    <dc:date>2026-06-13T22:33:31.488864</dc:date>
     <dc:format>image/svg+xml</dc:format>
     <dc:creator>
      <cc:Agent>
-      <dc:title>Matplotlib v3.10.9, https://matplotlib.org/</dc:title>
+      <dc:title>Matplotlib v3.11.0, https://matplotlib.org/</dc:title>
      </cc:Agent>
     </dc:creator>
    </cc:Work>
@@ -41,17 +41,17 @@ z
    <g id="matplotlib.axis_2"/>
    <g id="patch_3">
     <path d="M 91.577534 81.171692
-L 123.439079 81.171692
-L 123.439079 63.725538
+L 120.440345 81.171692
+L 120.440345 63.725538
 L 91.577534 63.725538
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #41b064"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #41b064"/>
    </g>
    <g id="text_1">
-    <text style="font-weight: 700; font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #41b064" x="84.627969" y="75.292287" transform="rotate(-0 84.627969 75.292287)">Mira</text>
+    <text style="font-weight: 700; font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #41b064" x="84.627969" y="76.617615" transform="rotate(-0 84.627969 76.617615)">Mira</text>
    </g>
    <g id="text_2">
-    <text style="font-weight: 700; font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #41b064" x="130.388644" y="75.033772" transform="rotate(-0 130.388644 75.033772)">85s</text>
+    <text style="font-weight: 700; font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #41b064" x="127.38991" y="76.238615" transform="rotate(-0 127.38991 76.238615)">77s</text>
    </g>
    <g id="patch_4">
     <path d="M 91.577534 116.064
@@ -59,13 +59,13 @@ L 159.049041 116.064
 L 159.049041 98.617846
 L 91.577534 98.617846
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_3">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="110.222407" transform="rotate(-0 84.627969 110.222407)">Sourcery AI</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="111.405423" transform="rotate(-0 84.627969 111.405423)">Sourcery AI</text>
    </g>
    <g id="text_4">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="165.998606" y="109.926079" transform="rotate(-0 165.998606 109.926079)">3m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="165.998606" y="111.035923" transform="rotate(-0 165.998606 111.035923)">3m</text>
    </g>
    <g id="patch_5">
     <path d="M 91.577534 150.956308
@@ -73,13 +73,13 @@ L 204.030046 150.956308
 L 204.030046 133.510154
 L 91.577534 133.510154
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_5">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="145.076903" transform="rotate(-0 84.627969 145.076903)">CodeRabbit</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="146.297731" transform="rotate(-0 84.627969 146.297731)">CodeRabbit</text>
    </g>
    <g id="text_6">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="210.979611" y="144.818387" transform="rotate(-0 210.979611 144.818387)">5m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="210.979611" y="145.928231" transform="rotate(-0 210.979611 145.928231)">5m</text>
    </g>
    <g id="patch_6">
     <path d="M 91.577534 185.848615
@@ -87,13 +87,13 @@ L 204.030046 185.848615
 L 204.030046 168.402462
 L 91.577534 168.402462
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_7">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="179.903038" transform="rotate(-0 84.627969 179.903038)">Augment</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="181.190038" transform="rotate(-0 84.627969 181.190038)">Augment</text>
    </g>
    <g id="text_8">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="210.979611" y="179.710695" transform="rotate(-0 210.979611 179.710695)">5m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="210.979611" y="180.820538" transform="rotate(-0 210.979611 180.820538)">5m</text>
    </g>
    <g id="patch_7">
     <path d="M 91.577534 220.740923
@@ -101,13 +101,13 @@ L 204.030046 220.740923
 L 204.030046 203.294769
 L 91.577534 203.294769
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_9">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="214.954331" transform="rotate(-0 84.627969 214.954331)">Greptile</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="216.082346" transform="rotate(-0 84.627969 216.082346)">Greptile</text>
    </g>
    <g id="text_10">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="210.979611" y="214.603002" transform="rotate(-0 210.979611 214.603002)">5m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="210.979611" y="215.712846" transform="rotate(-0 210.979611 215.712846)">5m</text>
    </g>
    <g id="patch_8">
     <path d="M 91.577534 255.633231
@@ -115,13 +115,13 @@ L 226.520548 255.633231
 L 226.520548 238.187077
 L 91.577534 238.187077
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_11">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="249.753826" transform="rotate(-0 84.627969 249.753826)">Qodo Extended</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="250.974654" transform="rotate(-0 84.627969 250.974654)">Qodo Extended</text>
    </g>
    <g id="text_12">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="233.470113" y="249.49531" transform="rotate(-0 233.470113 249.49531)">6m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="233.470113" y="250.605154" transform="rotate(-0 233.470113 250.605154)">6m</text>
    </g>
    <g id="patch_9">
     <path d="M 91.577534 290.525538
@@ -129,13 +129,13 @@ L 271.501553 290.525538
 L 271.501553 273.079385
 L 91.577534 273.079385
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_13">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="284.672774" transform="rotate(-0 84.627969 284.672774)">Cursor Bugbot</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="285.866962" transform="rotate(-0 84.627969 285.866962)">Cursor Bugbot</text>
    </g>
    <g id="text_14">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="278.451118" y="284.387618" transform="rotate(-0 278.451118 284.387618)">8m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="278.451118" y="285.497462" transform="rotate(-0 278.451118 285.497462)">8m</text>
    </g>
    <g id="patch_10">
     <path d="M 91.577534 325.417846
@@ -143,13 +143,13 @@ L 293.992055 325.417846
 L 293.992055 307.971692
 L 91.577534 307.971692
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_15">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="319.538441" transform="rotate(-0 84.627969 319.538441)">Cubic-v2</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="320.759269" transform="rotate(-0 84.627969 320.759269)">Cubic-v2</text>
    </g>
    <g id="text_16">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="300.94162" y="319.279925" transform="rotate(-0 300.94162 319.279925)">9m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="300.94162" y="320.389769" transform="rotate(-0 300.94162 320.389769)">9m</text>
    </g>
    <g id="patch_11">
     <path d="M 91.577534 360.310154
@@ -157,13 +157,13 @@ L 316.482557 360.310154
 L 316.482557 342.864
 L 91.577534 342.864
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_17">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="354.523561" transform="rotate(-0 84.627969 354.523561)">GitHub Copilot</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="355.651577" transform="rotate(-0 84.627969 355.651577)">GitHub Copilot</text>
    </g>
    <g id="text_18">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="323.432122" y="354.172233" transform="rotate(-0 323.432122 354.172233)">~10m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="323.432122" y="355.282077" transform="rotate(-0 323.432122 355.282077)">~10m</text>
    </g>
    <g id="patch_12">
     <path d="M 91.577534 395.202462
@@ -171,24 +171,24 @@ L 554.881882 395.202462
 L 554.881882 377.756308
 L 91.577534 377.756308
 z
-" clip-path="url(#pd2e04fbd7b)" style="fill: #525252"/>
+" clip-path="url(#p08a5a6e8c1)" style="fill: #525252"/>
    </g>
    <g id="text_19">
-    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="389.415869" transform="rotate(-0 84.627969 389.415869)">Claude (deep)</text>
+    <text style="font-size: 11px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: end; fill: #e5e5e5" x="84.627969" y="390.543885" transform="rotate(-0 84.627969 390.543885)">Claude (deep)</text>
    </g>
    <g id="text_20">
-    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="561.831447" y="389.064541" transform="rotate(-0 561.831447 389.064541)">~20m</text>
+    <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: start; fill: #e5e5e5" x="561.831447" y="390.174385" transform="rotate(-0 561.831447 390.174385)">~20m</text>
    </g>
   </g>
   <g id="text_21">
-   <text style="font-weight: 700; font-size: 16px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: middle; fill: #e5e5e5" x="321.977534" y="18.625" transform="rotate(-0 321.977534 18.625)">Reviewing one pull request</text>
+   <text style="font-weight: 700; font-size: 16px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: middle; fill: #e5e5e5" x="321.977534" y="22.8" transform="rotate(-0 321.977534 22.8)">Reviewing one pull request</text>
   </g>
   <g id="text_22">
-   <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: middle; fill: #737373" x="321.977534" y="32.653375" transform="rotate(-0 321.977534 32.653375)">Median wall-clock time per PR  •  Code Review Bench, 25-PR subset</text>
+   <text style="font-size: 10px; font-family: 'Inter', 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Helvetica', 'Arial', 'DejaVu Sans', sans-serif; text-anchor: middle; fill: #737373" x="321.977534" y="34.864" transform="rotate(-0 321.977534 34.864)">Median wall-clock time per PR  •  Code Review Bench, 50-PR offline set</text>
   </g>
  </g>
  <defs>
-  <clipPath id="pd2e04fbd7b">
+  <clipPath id="p08a5a6e8c1">
    <rect x="91.577534" y="48.024" width="532.8" height="362.88"/>
   </clipPath>
  </defs>

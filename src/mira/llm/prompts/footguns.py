@@ -65,6 +65,11 @@ _FOOTGUNS: dict[str, list[str]] = {
         "at runtime — flag whenever it's used on values that might genuinely be nullish.",
         "**`Promise.all` rejects on first failure** but doesn't cancel the others. If you need "
         "all-or-nothing behaviour with cleanup, use `Promise.allSettled` or explicit cancellation.",
+        "**Floating promises** — an async call whose result is never awaited or `.catch`ed "
+        "(event handlers, fire-and-forget cleanup like cancelling a job AND deleting its DB row) "
+        "silently drops both errors and any follow-up steps after the first rejection.",
+        "**`||` vs `??` for defaults** — `value || fallback` replaces `0`, `''`, and `false` with "
+        "the fallback. Use `??` when only `null`/`undefined` should trigger the default.",
     ],
     "go": [
         "**Loop-variable capture** — `for _, v := range xs { go func() { use(v) }() }` captures "
@@ -79,6 +84,13 @@ _FOOTGUNS: dict[str, list[str]] = {
         "Use `append([]T{}, a[2:5]...)` to copy.",
         "**Method receivers: `func (p T)` vs `func (p *T)`** — value receivers can't mutate the "
         "receiver, and a value receiver on a struct with a sync.Mutex makes the mutex useless (copies it).",
+        "**`err` shadowed by `:=`** — `if x, err := f(); ...` inside a block declares a NEW `err`; "
+        "the outer `err` checked later never sees it.",
+        "**Error path swallows the success case** — returning early on a non-fatal sentinel error "
+        "(`if err != nil { return err }` where one error value should degrade gracefully, e.g. a "
+        "limit-reached sentinel) fails the whole operation instead of handling that case.",
+        "**Early return before `defer`** — a return between acquiring a resource and the "
+        "`defer x.Close()` line leaks the resource.",
     ],
     "java": [
         "**Boxed-int equality** — `Integer a = 1000; Integer b = 1000; a == b` is FALSE (outside "
@@ -89,6 +101,13 @@ _FOOTGUNS: dict[str, list[str]] = {
         "**`Iterator.remove()` is the only safe way to mutate during iteration** — modifying the "
         "collection directly throws `ConcurrentModificationException`.",
         "**`equals()` without `hashCode()`** — breaks every hash-based collection silently.",
+        "**Unboxing NPE** — `int x = map.get(key)` throws `NullPointerException` when the key is "
+        "absent; same for any `Integer`/`Boolean` auto-unboxed in a condition or arithmetic.",
+        "**`Optional.get()` without `isPresent()`** — throws `NoSuchElementException`; also flag "
+        "`Map.get()` results dereferenced without a null check.",
+        "**Provider/factory lookup falling through to a default** — code that resolves a named "
+        "provider (crypto, keystore, datasource) and silently falls back to the platform default "
+        "when the lookup misses returns the WRONG provider rather than failing loudly.",
     ],
     "ruby": [
         "**`||=` doesn't short-circuit on `false`** — `x ||= compute_default()` calls `compute_default` "
@@ -100,6 +119,14 @@ _FOOTGUNS: dict[str, list[str]] = {
         "string boundaries use `\\A...\\z`. `'foo\\nbar'.match(/^bar$/)` succeeds.",
         "**`.send` vs `.public_send`** — `.send` ignores `private`/`protected` access. Use "
         "`public_send` unless you specifically intend to bypass.",
+        "**Predicate methods (`foo?`) with side effects** — a `?` method that mutates state, "
+        "writes to the DB, or records a match is a landmine: callers treat predicates as pure "
+        "reads and call them freely (logging, guards, retries), multiplying the side effect.",
+        "**Inline `rescue nil`** — `value = risky() rescue nil` swallows EVERY StandardError "
+        "(typos, nil derefs included), not just the one you meant to ignore.",
+        "**ActiveRecord callbacks on save paths** — `before_save`/`after_commit` hooks firing "
+        "extra writes or external calls make innocent-looking `update`/`save!` calls have "
+        "non-obvious side effects; flag new callbacks doing I/O.",
     ],
 }
 
@@ -114,6 +141,10 @@ _UNIVERSAL: list[str] = [
     "**TOCTOU (Time-of-Check-to-Time-of-Use)** — counting/checking a value then writing it "
     "is a race. Two concurrent requests can both pass the check before either writes. Use "
     "atomic upsert / unique constraint / advisory lock.",
+    "**Unreleased resources** — a file, socket, DB connection/cursor, or lock acquired without "
+    "a scoped-release construct (`with` / `defer` / try-finally) leaks when an exception or early "
+    "return skips the close. Flag handles opened and never closed, and closes that only run on "
+    "the happy path.",
 ]
 
 

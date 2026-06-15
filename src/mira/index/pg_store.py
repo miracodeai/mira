@@ -290,7 +290,7 @@ def list_packages_org_wide(url: str) -> list[dict]:
         cur.execute(
             "SELECT DISTINCT owner, repo, kind, name, version, file_path "
             "FROM package_manifests "
-            "WHERE kind IN ('npm', 'pip', 'go', 'rust') AND version <> ''"
+            "WHERE kind IN ('npm', 'pip', 'go', 'rust', 'composer') AND version <> ''"
         )
         rows = cur.fetchall()
     return [

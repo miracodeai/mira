@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { api, type RepoListItem, type RuleModel } from "@/lib/api"
-import { useAsync } from "@/lib/hooks"
+import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 // ── Types ──
 
@@ -33,6 +33,7 @@ interface EditingRule {
 // ── Page ──
 
 export function RulesPage() {
+  useDocumentTitle("Rules")
   // Global rules
   const [globalRules, setGlobalRules] = useState<RuleModel[]>([])
   const [editingGlobal, setEditingGlobal] = useState<EditingRule | null>(null)

@@ -58,14 +58,14 @@ Plotted against every published competitor on the same subset, Mira sits in the 
 
 ![Speed vs quality: Mira on the Pareto frontier](.github/assets/benchmark-by-language.svg)
 
-Measured on the same 25-PR offline subset (5 PRs each from Sentry, Grafana, Keycloak, Discourse, Cal.com), judged by Claude Sonnet 4.5.
+Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.5.
 
 | | **Mira** | Cubic-v2 | Greptile | CodeRabbit | GitHub Copilot |
 |---|---:|---:|---:|---:|---:|
-| F1 | **39** | 56 | 35 | 32 | 31 |
-| Precision | **36%** | 50% | 32% | 24% | 24% |
-| Recall | **43%** | 65% | 40% | 50% | 43% |
-| Median time / PR | **~85s** | ~9m | ~5m | ~5m | ~10m |
+| F1 | **44** | 56 | 35 | 32 | 31 |
+| Precision | **43%** | 50% | 32% | 24% | 24% |
+| Recall | **46%** | 65% | 40% | 50% | 43% |
+| Median time / PR | **~77s** | ~9m | ~5m | ~5m | ~10m |
 
 > Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.5 as the judge.
 
@@ -135,6 +135,30 @@ Mira talks to OpenRouter under the hood, so any model OpenRouter supports works.
 | Google | `google/gemini-2.5-pro` |
 
 Set `OPENROUTER_API_KEY` once; one key works across every provider. See [`src/mira/llm/models.json`](src/mira/llm/models.json) for the full registry of models Mira recognises (with pricing and per-purpose recommendations).
+
+**Adding your own models.** The dashboard's model dropdowns (and the validation behind them) come from that registry. To make a custom model selectable — e.g. DeepSeek or a local endpoint — point `MIRA_MODELS_JSON_PATH` at your own `models.json` (a volume mount works well). Its entries are **merged over** the bundled ones by model id, so you only list what you want to add or override:
+
+```bash
+MIRA_MODELS_JSON_PATH=/config/models.json
+```
+
+```jsonc
+// /config/models.json — copy an entry from the bundled file as a template
+{
+  "deepseek/deepseek-chat": {
+    "label": "DeepSeek Chat",
+    "provider": "openai",
+    "max_input_tokens": 64000,
+    "max_output_tokens": 8000,
+    "input_cost_per_1m": 0.27,
+    "output_cost_per_1m": 1.10,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"]
+  }
+}
+```
+
+The file is read at startup; a missing or invalid file falls back to the bundled registry with a warning.
 
 > **Coming soon:** direct adapters for **Anthropic**, **OpenAI**, **Google Vertex**, **Ollama**, and **vLLM**, for teams that already hold provider keys, run open-weights models in-house, or have data-residency rules that prevent traffic from flowing through OpenRouter.
 

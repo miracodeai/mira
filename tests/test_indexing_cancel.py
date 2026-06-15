@@ -79,7 +79,7 @@ async def test_index_repo_raises_on_cancel(tmp_path, monkeypatch):
     async def fake_fetch(owner, repo, path, token, ref, semaphore):
         return f"# contents of {path}\n{_content_pad}"
 
-    async def fake_tarball(owner, repo, token, ref="main"):
+    async def fake_tarball(owner, repo, token, ref="main", max_file_size=1_048_576):
         return {p: f"# contents of {p}\n{_content_pad}" for p in ["a.py", "b.py", "c.py", "d.py"]}
 
     async def fake_summarize_batch(batch, llm, sem):

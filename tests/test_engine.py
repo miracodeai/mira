@@ -184,6 +184,14 @@ class TestReviewEngine:
         mock_llm.review.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_audit_records_drafted_counts(self, mock_llm: LLMProvider, sample_diff_text: str):
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm)
+        result = await engine.review_diff(sample_diff_text)
+        drafted = [e for e in result.audit if e.get("stage") == "drafted"]
+        assert drafted, "expected per-chunk drafted entries in the audit trail"
+        assert any(e["chunk"] == "security" for e in drafted)
+
+    @pytest.mark.asyncio
     async def test_review_pr_without_provider_raises(self, mock_llm: LLMProvider):
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm)
         with pytest.raises(RuntimeError, match="provider is required"):

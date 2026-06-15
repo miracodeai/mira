@@ -21,6 +21,20 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 INDEXING_MODELS = registry.models_for_purpose("indexing")
 REVIEW_MODELS = registry.models_for_purpose("review")
 
+# Thinking-mode options for the review model. "off" disables extended thinking
+# (today's behavior); low/medium/high map to OpenRouter's unified
+# ``reasoning.effort``. Single source for the dashboard dropdown and validation.
+THINKING_MODES: list[dict[str, str]] = [
+    {"value": "off", "label": "Off"},
+    {"value": "low", "label": "Low"},
+    {"value": "medium", "label": "Medium"},
+    {"value": "high", "label": "High"},
+    # DeepSeek's top "max" level (sent as "xhigh" on OpenRouter, which rejects
+    # "max"). Not every provider supports it.
+    {"value": "max", "label": "Max"},
+]
+THINKING_MODE_VALUES = {m["value"] for m in THINKING_MODES}
+
 
 def estimate_indexing_cost(file_count: int, model: str) -> dict:
     """Estimate cost of indexing N files with the given model.
@@ -74,11 +88,27 @@ def get_review_model(config: LLMConfig, db_value: str | None = None) -> str:
     return config.model
 
 
+def get_review_thinking_mode(config: LLMConfig, db_value: str | None = None) -> str | None:
+    """Resolve the review thinking mode: DB → config.review_reasoning_effort → None.
+
+    A DB value of "off" or "" counts as unset and falls through to the
+    mira.yaml-level setting — saving the models form always writes this key
+    (default "off"), so a stored "off" must not permanently shadow a config
+    override. "off" anywhere normalizes to None ("no reasoning").
+    """
+    resolved = db_value if (db_value and db_value != "off") else config.review_reasoning_effort
+    if not resolved or resolved == "off":
+        return None
+    return resolved
+
+
 def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     """Return an LLMConfig with the appropriate model set for the given purpose.
 
     Reads the DB setting first (via _app_db), falls back to config fields.
     """
+    # Thinking mode only applies to reviews; other purposes leave it off.
+    thinking_mode: str | None = None
     try:
         from mira.dashboard.api import _app_db
 
@@ -88,6 +118,9 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
         elif purpose == "review":
             db_val = _app_db.get_setting("review_model")
             resolved = get_review_model(base, db_val)
+            thinking_mode = get_review_thinking_mode(
+                base, _app_db.get_setting("review_thinking_mode")
+            )
         else:
             resolved = base.model
     except Exception:
@@ -96,7 +129,8 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
             resolved = base.indexing_model or base.model
         elif purpose == "review":
             resolved = base.review_model or base.model
+            thinking_mode = get_review_thinking_mode(base)
         else:
             resolved = base.model
 
-    return base.model_copy(update={"model": resolved})
+    return base.model_copy(update={"model": resolved, "reasoning_effort": thinking_mode})

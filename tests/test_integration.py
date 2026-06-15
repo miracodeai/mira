@@ -573,6 +573,9 @@ class TestEndToEndReview:
         diff_text = (FIXTURES_DIR / "fake_repo_payment_change.diff").read_text()
         config = load_config()
         config.review.walkthrough = False
+        # Pin the filter so ambient global/DB overrides (e.g. a dashboard
+        # confidence_threshold) can't drop the 0.9-confidence test comment.
+        config.filter.confidence_threshold = 0.7
 
         comments = [
             {

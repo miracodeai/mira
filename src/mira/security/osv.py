@@ -29,6 +29,7 @@ _ECOSYSTEM_MAP: dict[str, str] = {
     "pip": "PyPI",
     "go": "Go",
     "rust": "crates.io",
+    "composer": "Packagist",
 }
 
 # Stripping common version constraint operators. OSV.dev wants a concrete

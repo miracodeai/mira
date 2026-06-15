@@ -138,6 +138,90 @@ class TestComplete:
             assert "response_format" not in body
 
     @pytest.mark.asyncio
+    async def test_reasoning_effort_sets_reasoning_and_drops_temperature(self):
+        config = LLMConfig(model="test-model", reasoning_effort="high")
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response(_make_response_json("ok"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+            call_kwargs = mock_client.post.call_args
+            body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+            assert body["reasoning"] == {"effort": "high"}
+            # Anthropic rejects a custom temperature while thinking — we drop it.
+            assert "temperature" not in body
+
+    @pytest.mark.asyncio
+    async def test_max_effort_maps_to_xhigh_on_openrouter(self):
+        # OpenRouter rejects "max"; "xhigh" is its equivalent top level.
+        config = LLMConfig(model="test-model", reasoning_effort="max")
+        provider = LLMProvider(config)
+        mock_resp = _mock_httpx_response(_make_response_json("ok"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete([{"role": "user", "content": "hi"}])
+            body = mock_client.post.call_args.kwargs["json"]
+            assert body["reasoning"] == {"effort": "xhigh"}
+
+    @pytest.mark.asyncio
+    async def test_max_effort_passes_through_on_non_openrouter(self):
+        # DeepSeek's native API accepts "max" verbatim.
+        config = LLMConfig(
+            model="deepseek-reasoner",
+            reasoning_effort="max",
+            base_url="https://api.deepseek.com/v1",
+        )
+        provider = LLMProvider(config)
+        mock_resp = _mock_httpx_response(_make_response_json("ok"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete([{"role": "user", "content": "hi"}])
+            body = mock_client.post.call_args.kwargs["json"]
+            assert body["reasoning"] == {"effort": "max"}
+
+    @pytest.mark.asyncio
+    async def test_reasoning_off_leaves_body_unchanged(self):
+        for effort in (None, "off"):
+            config = LLMConfig(model="test-model", reasoning_effort=effort)
+            provider = LLMProvider(config)
+
+            mock_resp = _mock_httpx_response(_make_response_json("ok"))
+
+            with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.post = AsyncMock(return_value=mock_resp)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                await provider.complete([{"role": "user", "content": "hi"}])
+
+                call_kwargs = mock_client.post.call_args
+                body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+                assert "reasoning" not in body
+                assert "temperature" in body
+
+    @pytest.mark.asyncio
     async def test_no_usage_tracked_when_missing(self):
         config = LLMConfig(model="test-model")
         provider = LLMProvider(config)
@@ -302,3 +386,125 @@ class TestStripModelPrefix:
 
         result = _strip_model_prefix("llama3.1:latest", "http://localhost:11434/v1")
         assert result == "llama3.1:latest"
+
+
+class TestToolChoiceFallback:
+    """#82: thinking models (deepseek) 400 on a forced tool_choice; retry
+    with "auto" rather than failing the review."""
+
+    _TOOL = {"type": "function", "function": {"name": "submit_review", "parameters": {}}}
+
+    def _client(self, responses):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_retries_with_auto_on_tool_choice_400(self):
+        provider = LLMProvider(LLMConfig(model="deepseek/deepseek-v4-pro"))
+        rejected = _mock_httpx_response(
+            {"error": {"message": "thinking mode does not support this tool_choice"}},
+            status_code=400,
+        )
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([rejected, ok])
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            n_posts = len(cls.return_value.post.call_args_list)
+
+        assert result == '{"comments": []}'
+        assert n_posts == 2  # forced 400'd, then the auto retry
+        assert "deepseek/deepseek-v4-pro" in provider._no_forced_tool_choice
+
+    @pytest.mark.asyncio
+    async def test_remembered_model_skips_forced_attempt(self):
+        provider = LLMProvider(LLMConfig(model="deepseek/deepseek-v4-pro"))
+        provider._no_forced_tool_choice.add("deepseek/deepseek-v4-pro")
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([ok])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            posts = cls.return_value.post.call_args_list
+
+        assert len(posts) == 1  # straight to auto, no wasted forced attempt
+        assert posts[0].kwargs["json"]["tool_choice"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_unrelated_400_does_not_trigger_auto_fallback(self):
+        # A non-tool_choice 400 should error out, not flip the model to auto.
+        provider = LLMProvider(LLMConfig(model="anthropic/claude-sonnet-4-6"))
+        err = _mock_httpx_response(
+            {"error": {"message": "context length exceeded"}}, status_code=400
+        )
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=err)
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("mira.llm.provider.httpx.AsyncClient", return_value=client),
+            pytest.raises(LLMError),
+        ):
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+        assert "anthropic/claude-sonnet-4-6" not in provider._no_forced_tool_choice
+
+
+class TestReasoningFallback:
+    """Thinking mode is opt-in and applied to whatever model is selected; a
+    model/endpoint that rejects a reasoning effort must degrade to a normal
+    review, not fail it."""
+
+    _TOOL = {"type": "function", "function": {"name": "submit_review", "parameters": {}}}
+
+    def _client(self, responses):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_retries_without_reasoning_on_400(self):
+        provider = LLMProvider(LLMConfig(model="some/model", reasoning_effort="high"))
+        rejected = _mock_httpx_response(
+            {"error": {"message": "reasoning_effort: Invalid option"}}, status_code=400
+        )
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([rejected, ok])
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            posts = cls.return_value.post.call_args_list
+
+        assert result == '{"comments": []}'
+        assert len(posts) == 2  # reasoning 400'd, then retried without it
+        assert "reasoning" not in posts[1].kwargs["json"]  # dropped on the retry
+        assert "some/model" in provider._no_reasoning
+
+    @pytest.mark.asyncio
+    async def test_remembered_model_skips_reasoning(self):
+        provider = LLMProvider(LLMConfig(model="some/model", reasoning_effort="high"))
+        provider._no_reasoning.add("some/model")
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([ok])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            posts = cls.return_value.post.call_args_list
+
+        assert len(posts) == 1  # no wasted reasoning attempt
+        assert "reasoning" not in posts[0].kwargs["json"]

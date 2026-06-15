@@ -133,9 +133,8 @@ SUBMIT_CRITIQUE_TOOL = {
     "function": {
         "name": "submit_critique",
         "description": (
-            "For each draft review comment, decide whether it's a real, "
-            "verifiable issue. Return the indices of comments worth keeping "
-            "and a brief reason for each rejection."
+            "For each draft review comment, grade how well the evidence in "
+            "the diff supports the claimed issue."
         ),
         "parameters": {
             "type": "object",
@@ -150,13 +149,18 @@ SUBMIT_CRITIQUE_TOOL = {
                                 "type": "integer",
                                 "description": "Zero-based index of the draft comment.",
                             },
-                            "keep": {
-                                "type": "boolean",
+                            "evidence": {
+                                "type": "string",
+                                "enum": ["proven", "plausible", "unsupported"],
                                 "description": (
-                                    "true if the comment cites specific code that proves "
-                                    "the issue, the reasoning is correct, and the fix is "
-                                    "actionable. false for confident-but-wrong claims, "
-                                    "speculation, or 'while I'm here' style nits."
+                                    "proven: the shown code demonstrates the issue and the "
+                                    "reasoning is correct. "
+                                    "plausible: the issue is consistent with the shown code "
+                                    "but depends on behaviour or code not shown — this is a "
+                                    "valid grade for real findings, not a failure. "
+                                    "unsupported: the shown code contradicts the claim, the "
+                                    "reasoning is wrong, or it's a style preference dressed "
+                                    "up as an issue."
                                 ),
                             },
                             "reason": {
@@ -164,7 +168,7 @@ SUBMIT_CRITIQUE_TOOL = {
                                 "description": "One short sentence explaining the verdict.",
                             },
                         },
-                        "required": ["index", "keep", "reason"],
+                        "required": ["index", "evidence", "reason"],
                     },
                 },
             },
@@ -326,6 +330,13 @@ class LLMProvider:
         self.config = config
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        # Models that 400 on a forced tool_choice (deepseek thinking mode);
+        # remembered so we send tool_choice="auto" instead.
+        self._no_forced_tool_choice: set[str] = set()
+        # Models that 400 on a reasoning effort (it's opt-in and applied to
+        # whatever model is selected); remembered so we drop it and review
+        # without thinking rather than failing.
+        self._no_reasoning: set[str] = set()
 
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -346,6 +357,27 @@ class LLMProvider:
             headers["X-Title"] = "Mira Code Reviewer"
         self._cached_headers = headers
         return dict(headers)
+
+    def _apply_reasoning(self, body: dict) -> None:
+        """Enable extended thinking when a reasoning effort is configured.
+
+        OpenRouter exposes a unified ``reasoning.effort`` knob that it
+        normalizes across providers. Anthropic models reject a custom
+        ``temperature`` while thinking is on, so we drop it and let the
+        provider default it. No-op when reasoning is off, keeping the request
+        byte-for-byte identical to before.
+        """
+        effort = self.config.reasoning_effort
+        if not effort or effort == "off":
+            return
+        if body.get("model") in self._no_reasoning:
+            return
+        # "max" is DeepSeek's native top level; OpenRouter rejects it and uses
+        # "xhigh" for the same thing, so translate when targeting OpenRouter.
+        if effort == "max" and _is_openrouter(self.config.base_url):
+            effort = "xhigh"
+        body["reasoning"] = {"effort": effort}
+        body.pop("temperature", None)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -370,6 +402,7 @@ class LLMProvider:
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
@@ -408,14 +441,22 @@ class LLMProvider:
         The LLM returns structured data by 'calling' a tool. We extract the
         tool arguments as the JSON response.
         """
+        api_model = _strip_model_prefix(model, self.config.base_url)
+        forced_choice: dict | str = {
+            "type": "function",
+            "function": {"name": tools[0]["function"]["name"]},
+        }
         body: dict = {
-            "model": _strip_model_prefix(model, self.config.base_url),
+            "model": api_model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": {"type": "function", "function": {"name": tools[0]["function"]["name"]}},
+            # Force the one tool for structured args; models that reject a
+            # forced choice fall back to "auto" (handled on the 400 below).
+            "tool_choice": "auto" if api_model in self._no_forced_tool_choice else forced_choice,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
@@ -423,6 +464,26 @@ class LLMProvider:
                 headers=self._build_headers(),
                 json=body,
             )
+            if (
+                resp.status_code == 400
+                and body["tool_choice"] != "auto"
+                and "tool_choice" in resp.text.lower()
+            ):
+                # Forced choice unsupported — remember it and let the model pick.
+                logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
+                self._no_forced_tool_choice.add(api_model)
+                body["tool_choice"] = "auto"
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            if resp.status_code == 400 and "reasoning" in body and "reasoning" in resp.text.lower():
+                # Reasoning effort unsupported on this model/endpoint — drop it
+                # and review without thinking instead of failing the review.
+                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
+                self._no_reasoning.add(api_model)
+                body.pop("reasoning", None)
+                body["temperature"] = (
+                    temperature if temperature is not None else self.config.temperature
+                )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             if resp.status_code != 200:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
@@ -524,6 +585,7 @@ class LLMProvider:
             "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
@@ -623,12 +685,14 @@ class LLMProvider:
                 f"LLM tool-call failed with {self.config.model}: {primary_err}"
             ) from primary_err
 
-    async def review(self, messages: list[dict[str, str]]) -> str:
+    async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         """Submit a review using tool calling.
 
         Returns the JSON string containing review comments, key issues, and summary.
         """
-        return await self.complete_with_tools(messages, tools=[SUBMIT_REVIEW_TOOL])
+        return await self.complete_with_tools(
+            messages, tools=[SUBMIT_REVIEW_TOOL], temperature=temperature
+        )
 
     async def walkthrough(self, messages: list[dict[str, str]]) -> str:
         """Submit a walkthrough using tool calling.

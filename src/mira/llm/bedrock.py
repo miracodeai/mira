@@ -156,14 +156,26 @@ class BedrockProvider:
 
         system, conversation = _messages_to_bedrock(messages)
 
+        max_out = max_tokens if max_tokens is not None else self.config.max_tokens
         kwargs: dict = {
             "modelId": model,
             "messages": conversation,
             "inferenceConfig": {
                 "temperature": temperature if temperature is not None else self.config.temperature,
-                "maxTokens": max_tokens if max_tokens is not None else self.config.max_tokens,
+                "maxTokens": max_out,
             },
         }
+        # Extended thinking: map effort → a token budget (Bedrock Claude expects
+        # an explicit budget, not an effort level). Thinking requires temperature
+        # unset, so drop it when enabled. Budget must stay below maxTokens.
+        effort = self.config.reasoning_effort
+        if effort and effort != "off":
+            budget = {"low": 2048, "medium": 8192, "high": 16384, "max": 32768}.get(effort, 8192)
+            budget = min(budget, max(1024, max_out - 1024))
+            kwargs["additionalModelRequestFields"] = {
+                "thinking": {"type": "enabled", "budget_tokens": budget}
+            }
+            kwargs["inferenceConfig"].pop("temperature", None)
         if system:
             kwargs["system"] = system
         if tool_config:

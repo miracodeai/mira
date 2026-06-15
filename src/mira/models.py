@@ -136,6 +136,9 @@ class ReviewComment:
     agent_prompt: str | None = None
     # Verbatim diff snippet used by self-critique; stripped before posting.
     existing_code: str = ""
+    # Which pipeline pass produced this ("main" or "security") — lets eval
+    # artifacts attribute FP share per pass. Not posted anywhere.
+    source_pass: str = "main"
 
 
 def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
@@ -355,6 +358,10 @@ class ReviewResult:
     reviewed_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
     total_paths: list[str] = field(default_factory=list)
+    # Diagnostic trail: per-chunk draft counts and every comment dropped by a
+    # filter/critique stage, so a benchmark run can show whether a missed
+    # finding was never drafted or drafted-then-dropped. Not posted anywhere.
+    audit: list[dict] = field(default_factory=list)
 
 
 @dataclass
