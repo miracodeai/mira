@@ -62,6 +62,20 @@ export function DashboardPage() {
 
   const activeJobs = indexingJobs.filter((j) => j.status === "indexing")
 
+  // Running reviews — poll fast (3s) while any are active, slow otherwise.
+  const [runningReviews, setRunningReviews] = useState<
+    import("@/lib/api").RunningReviewModel[]
+  >([])
+  const hasActiveReviews = runningReviews.length > 0
+  useEffect(() => {
+    const poll = () => {
+      api.getRunningReviews({ limit: 10, offset: 0 }).then((res) => setRunningReviews(res.items)).catch(() => {})
+    }
+    poll()
+    const interval = setInterval(poll, hasActiveReviews ? 3000 : 30000)
+    return () => clearInterval(interval)
+  }, [hasActiveReviews])
+
   const rs = stats?.review_stats
 
   // Derive severity & category totals from timeseries (period-aware)
@@ -113,7 +127,50 @@ export function DashboardPage() {
       )}
 
       {/* Stat cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardDescription>In-Progress Reviews</CardDescription>
+                <CardTitle className="text-4xl tabular-nums">
+                  {runningReviews.filter((r) => r.status === "reviewing").length}
+                </CardTitle>
+              </div>
+              <a
+                href="/reviews"
+                className="text-xs font-medium text-muted-foreground underline-offset-2 hover:underline"
+              >
+                View all →
+              </a>
+            </div>
+          </CardHeader>
+          {runningReviews.filter((r) => r.status === "reviewing").length > 0 && (
+            <CardContent>
+              <ul className="space-y-1.5">
+                {runningReviews
+                  .filter((r) => r.status === "reviewing")
+                  .slice(0, 2)
+                  .map((r) => (
+                    <li key={`${r.repo}#${r.pr_number}`}>
+                      <a
+                        href={r.pr_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-medium underline-offset-2 hover:underline"
+                      >
+                        {r.repo}#{r.pr_number}
+                      </a>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {r.pr_title}
+                      </p>
+                    </li>
+                  ))}
+              </ul>
+            </CardContent>
+          )}
+        </Card>
+
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>PRs Reviewed</CardDescription>

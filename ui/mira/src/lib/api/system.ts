@@ -1,4 +1,5 @@
 import { fetchJson, postJson } from "./http"
+import type { PaginatedReviews } from "./types"
 
 // Version, setup, and GitHub install/uninstall lifecycle.
 export const systemApi = {
@@ -35,4 +36,11 @@ export const systemApi = {
       `/api/uninstalls/${installation_id}/delete`,
       {}
     ),
+
+  getRunningReviews: (params?: { limit?: number; offset?: number }) => {
+    const qs = params
+      ? "?" + new URLSearchParams(Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]))).toString()
+      : ""
+    return fetchJson<PaginatedReviews>("/api/reviews" + qs)
+  },
 }

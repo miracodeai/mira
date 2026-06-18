@@ -207,6 +207,24 @@ export interface CustomEdgeModel {
   created_at: number
 }
 
+export interface RunningReviewModel {
+  repo: string
+  pr_number: number
+  pr_title: string
+  pr_url: string
+  status: string
+  started_at: number
+  finished_at: number
+  error: string
+}
+
+export interface PaginatedReviews {
+  items: RunningReviewModel[]
+  total: number
+  limit: number
+  offset: number
+}
+
 export interface RuleModel {
   id: number
   title: string

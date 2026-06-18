@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from mira.core.review_status import tracker
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
 from mira.dashboard.db import AppDatabase
 from mira.index.relationships import RelationshipStore
@@ -222,6 +223,17 @@ class ReviewContextModel(BaseModel):
 class ReviewContextCreate(BaseModel):
     title: str
     content: str
+
+
+class RunningReviewModel(BaseModel):
+    repo: str
+    pr_number: int
+    pr_title: str
+    pr_url: str
+    status: str
+    started_at: float
+    finished_at: float = 0.0
+    error: str = ""
 
 
 class OverrideRequest(BaseModel):
@@ -2139,6 +2151,69 @@ async def cancel_index(owner: str, repo: str) -> dict:
     if tracker.request_cancel(full_name):
         return {"status": "cancelling"}
     return {"status": "not_indexing"}
+
+
+class PaginatedReviews(BaseModel):
+    items: list[RunningReviewModel]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/api/reviews", response_model=PaginatedReviews)
+def list_all_reviews(limit: int = 20, offset: int = 0) -> PaginatedReviews:
+    """Org-wide reviews: in-memory active + recent completed from every repo."""
+    seen: set[tuple[str, int]] = set()
+
+    # In-memory active/recent jobs first
+    items: list[RunningReviewModel] = []
+    for j in tracker.get_all():
+        key = (j.repo, j.pr_number)
+        seen.add(key)
+        items.append(
+            RunningReviewModel(
+                repo=j.repo,
+                pr_number=j.pr_number,
+                pr_title=j.pr_title,
+                pr_url=j.pr_url,
+                status=j.status,
+                started_at=j.started_at,
+                finished_at=j.finished_at,
+                error=j.error,
+            )
+        )
+
+    # DB-backed review events from all repos (completed history)
+    for repo_record in _app_db.list_repos():
+        try:
+            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            for e in store.list_review_events(limit=500):
+                key = (f"{repo_record.owner}/{repo_record.repo}", e.pr_number)
+                if key not in seen:
+                    seen.add(key)
+                    items.append(
+                        RunningReviewModel(
+                            repo=f"{repo_record.owner}/{repo_record.repo}",
+                            pr_number=e.pr_number,
+                            pr_title=e.pr_title,
+                            pr_url=e.pr_url,
+                            status="completed",
+                            started_at=e.created_at,
+                            finished_at=e.created_at + (e.duration_ms / 1000),
+                        )
+                    )
+            store.close()
+        except Exception:
+            pass
+
+    items.sort(key=lambda r: r.started_at, reverse=True)
+    total = len(items)
+    return PaginatedReviews(
+        items=items[offset : offset + limit],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/api/repos/{owner}/{repo}/reviews", response_model=list[ReviewEventModel])

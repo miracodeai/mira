@@ -5,6 +5,7 @@ import {
   ChevronsUpDown,
   Database,
   GitFork,
+  GitPullRequestArrow,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -68,6 +69,7 @@ import { UserAvatar } from "@/components/ui/user-avatar"
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/reviews", icon: GitPullRequestArrow, label: "Reviews" },
   { to: "/repos", icon: Database, label: "Repositories" },
   { to: "/packages", icon: Package, label: "Packages" },
   { to: "/vulnerabilities", icon: ShieldAlert, label: "Vulnerabilities" },
@@ -86,6 +88,7 @@ const settingsSubItems = [
 ]
 
 const PAGE_LABELS: Record<string, string> = {
+  reviews: "Reviews",
   repos: "Repositories",
   packages: "Packages",
   vulnerabilities: "Vulnerabilities",

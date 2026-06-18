@@ -13,6 +13,7 @@ import { PackagesPage } from "@/pages/packages"
 import { RepoDetailPage } from "@/pages/repo-detail"
 import { RelationshipsPage } from "@/pages/relationships"
 import { ReposPage } from "@/pages/repos"
+import { RunningReviewsPage } from "@/pages/reviews"
 import { SettingsPage } from "@/pages/settings"
 import { SetupPage } from "@/pages/setup"
 import { RulesPage } from "@/pages/rules"
@@ -195,6 +196,7 @@ export function App() {
           }
         >
           <Route index element={<DashboardPage />} />
+          <Route path="reviews" element={<RunningReviewsPage />} />
           <Route path="repos" element={<ReposPage />} />
           <Route path="repos/:owner/:repo" element={<RepoDetailPage />} />
           <Route path="packages" element={<PackagesPage />} />

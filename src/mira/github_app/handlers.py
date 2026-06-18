@@ -13,6 +13,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from mira.config import load_config
 from mira.core.engine import ReviewEngine
+from mira.core.review_status import tracker as review_tracker
 from mira.dashboard.models_config import llm_config_for
 from mira.github_app.auth import GitHubAppAuth
 from mira.index.store import IndexStore
@@ -116,7 +117,13 @@ async def handle_pull_request(
         is_indexed = bool(repo_record and repo_record.status == "ready")
 
         logger.info("Reviewing PR %s (indexed=%s)", pr_url, is_indexed)
-        result = await engine.review_pr(pr_url)
+        review_tracker.start(repo_full, number, pr.get("title", ""), pr_url)
+        try:
+            result = await engine.review_pr(pr_url)
+            review_tracker.complete(repo_full, number)
+        except Exception as exc:
+            review_tracker.fail(repo_full, number, str(exc))
+            raise
 
         # Post a friendly note if the repo isn't indexed yet
         if not is_indexed:
@@ -195,6 +202,7 @@ async def handle_comment(
 
         owner = payload["repository"]["owner"]["login"]
         repo = payload["repository"]["name"]
+        repo_full = f"{owner}/{repo}"
         number = payload["issue"]["number"]
         pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
 
@@ -243,7 +251,13 @@ async def handle_comment(
                 comment_user,
                 len(progress.skipped_paths),
             )
-            await engine.review_pr(pr_url)
+            review_tracker.start(repo_full, number, payload["issue"].get("title", ""), pr_url)
+            try:
+                await engine.review_pr(pr_url)
+                review_tracker.complete(repo_full, number)
+            except Exception as exc:
+                review_tracker.fail(repo_full, number, str(exc))
+                raise
             logger.info("review-rest complete for PR %s", pr_url)
         elif is_review:
             engine = ReviewEngine(
@@ -254,7 +268,13 @@ async def handle_comment(
                 indexing_llm=indexing_llm,
             )
             logger.info("Re-review triggered for PR %s by @%s", pr_url, comment_user)
-            await engine.review_pr(pr_url)
+            review_tracker.start(repo_full, number, payload["issue"].get("title", ""), pr_url)
+            try:
+                await engine.review_pr(pr_url)
+                review_tracker.complete(repo_full, number)
+            except Exception as exc:
+                review_tracker.fail(repo_full, number, str(exc))
+                raise
             logger.info("Re-review complete for PR %s", pr_url)
         else:
             pr_info = await provider.get_pr_info(pr_url)
