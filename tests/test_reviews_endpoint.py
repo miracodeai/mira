@@ -8,11 +8,11 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from mira.dashboard import api
-from mira.dashboard.db import AppDatabase
-from mira.dashboard.api import app
-from mira.index.store import IndexStore
 from mira.core.review_status import ReviewTracker
+from mira.dashboard import api
+from mira.dashboard.api import app
+from mira.dashboard.db import AppDatabase
+from mira.index.store import IndexStore
 
 
 @pytest.fixture
@@ -90,4 +90,3 @@ def test_requires_auth():
     client = TestClient(app)
     resp = client.get("/api/reviews")
     assert resp.status_code == 401
-
