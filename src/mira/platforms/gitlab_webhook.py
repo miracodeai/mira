@@ -226,22 +226,22 @@ async def handle_gitlab_note(payload: dict[str, Any], auth: PlatformAuth, bot_na
             await provider.resolve_threads(pr_info, [str(discussion_id)])
             try:
                 store = _open_store(owner, repo, "gitlab")
-                try:
-                    store.record_feedback(
-                        pr_number=iid,
-                        pr_url=mr_url,
-                        comment_path=position.get("new_path", ""),
-                        comment_line=position.get("new_line", 0) or 0,
-                        comment_category="",
-                        comment_severity="",
-                        comment_title="",
-                        signal="rejected",
-                        actor=actor,
-                    )
-                finally:
-                    store.close()
+                store.record_feedback(
+                    pr_number=iid,
+                    pr_url=mr_url,
+                    comment_path=position.get("new_path", ""),
+                    comment_line=position.get("new_line", 0) or 0,
+                    comment_category="",
+                    comment_severity="",
+                    comment_title="",
+                    signal="rejected",
+                    actor=actor,
+                )
             except Exception as exc:
                 logger.debug("Failed to record GitLab reject feedback: %s", exc)
+            finally:
+                if "store" in locals():
+                    store.close()
             return
 
         # Free-form @-mention on an inline thread → LLM intent classification.

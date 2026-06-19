@@ -16,7 +16,7 @@ from mira.github_app.auth import GitHubAppAuth
 from mira.index.store import IndexStore
 from mira.llm import create_llm
 from mira.llm.prompts.review import build_conversation_prompt
-from mira.llm.provider import SUBMIT_THREAD_REPLY_TOOL
+from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import PRInfo
 from mira.platforms.mentions import command_after_mention, mention_names, strip_mentions
