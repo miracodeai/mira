@@ -117,7 +117,15 @@ async def handle_merge_request(payload: dict[str, Any], auth: PlatformAuth, bot_
         token = await auth.get_token()
         provider = create_provider("gitlab", token)
         await run_pr_review(
-            provider, owner, repo, iid, mr_url, is_private, bot_name, platform="gitlab"
+            provider,
+            owner,
+            repo,
+            iid,
+            mr_url,
+            is_private,
+            bot_name,
+            platform="gitlab",
+            pr_title=attrs.get("title", "") or "",
         )
     except Exception:
         logger.exception("Error handling GitLab merge_request event for %s/%s!%s", owner, repo, iid)

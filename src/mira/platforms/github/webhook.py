@@ -594,7 +594,16 @@ async def handle_pull_request(
         # the review itself fails. Idempotent on every synchronize re-fire.
         _record_pr_contribution(payload, "pr_opened")
 
-        await run_pr_review(provider, owner, repo, number, pr_url, is_private, bot_name)
+        await run_pr_review(
+            provider,
+            owner,
+            repo,
+            number,
+            pr_url,
+            is_private,
+            bot_name,
+            pr_title=pr.get("title", ""),
+        )
     except Exception as exc:
         logger.exception("Error handling pull_request event")
         if pr_url:
@@ -628,7 +637,15 @@ async def handle_comment(
 
         provider = create_provider("github", token)
         await run_pr_command(
-            provider, owner, repo, number, pr_url, question, comment_user, bot_name
+            provider,
+            owner,
+            repo,
+            number,
+            pr_url,
+            question,
+            comment_user,
+            bot_name,
+            pr_title=payload["issue"].get("title", ""),
         )
     except Exception:
         logger.exception("Error handling comment event")

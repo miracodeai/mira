@@ -148,7 +148,15 @@ async def handle_forgejo_pr(payload: dict[str, Any], auth: PlatformAuth, bot_nam
         token = await auth.get_token()
         provider = create_provider("forgejo", token)
         await run_pr_review(
-            provider, owner, repo_name, number, pr_url, is_private, bot_name, platform="forgejo"
+            provider,
+            owner,
+            repo_name,
+            number,
+            pr_url,
+            is_private,
+            bot_name,
+            platform="forgejo",
+            pr_title=pr.get("title", "") or "",
         )
     except Exception:
         logger.exception(
