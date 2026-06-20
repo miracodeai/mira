@@ -44,6 +44,14 @@ class TestCodexCLIProvider:
         assert "-m" not in cmd
         assert cmd[-1] == "-"
 
+    def test_command_rejects_shell_metacharacters_or_arguments(self):
+        provider = CodexCLIProvider(
+            LLMConfig(provider="codex-cli", codex_command="codex --dangerous-flag")
+        )
+
+        with pytest.raises(ValueError, match="Invalid codex_command"):
+            provider._command("/tmp/out.txt")
+
     def test_extracts_fenced_json(self):
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
         assert provider._extract_json_object('Here you go:\n```json\n{"comments": []}\n```') == (
@@ -61,6 +69,17 @@ class TestCodexCLIProvider:
         provider._run_codex.assert_awaited_once()
         assert provider.total_prompt_tokens > 0
         assert provider.total_completion_tokens > 0
+
+    @pytest.mark.asyncio
+    async def test_complete_json_mode_counts_extracted_response_tokens(self):
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+        provider._run_codex = AsyncMock(return_value='text before {"ok": true} text after')  # type: ignore[method-assign]
+        provider.count_tokens = lambda text: len(text)  # type: ignore[method-assign]
+
+        result = await provider.complete([{"role": "user", "content": "return json"}])
+
+        assert result == '{"ok": true}'
+        assert provider.total_completion_tokens == len('{"ok": true}')
 
     @pytest.mark.asyncio
     async def test_complete_with_tools_prompts_for_tool_arguments_json(self):

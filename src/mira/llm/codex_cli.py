@@ -59,9 +59,14 @@ class CodexCLIProvider:
         return env
 
     def _command(self, output_path: str) -> list[str]:
-        command = shlex.split(self.config.codex_command or "codex")
+        codex_command = self.config.codex_command or "codex"
+        if any(char in codex_command for char in (" ", "\t", "\n", ";", "|", "&")):
+            raise ValueError(
+                f"Invalid codex_command: {codex_command!r}. "
+                "Set it to a single executable path/name without arguments."
+            )
         cmd = [
-            *command,
+            codex_command,
             "exec",
             "--skip-git-repo-check",
             "--sandbox",
@@ -117,6 +122,10 @@ class CodexCLIProvider:
                 raise LLMError(
                     f"Codex CLI timed out after {self.config.codex_timeout_seconds}s"
                 ) from exc
+            except BaseException:
+                proc.kill()
+                await proc.wait()
+                raise
 
             stdout_text = stdout.decode("utf-8", errors="replace")
             stderr_text = stderr.decode("utf-8", errors="replace")
@@ -208,8 +217,9 @@ class CodexCLIProvider:
             )
         raw = await self._run_codex(prompt)
         self.total_prompt_tokens += self.count_tokens(prompt)
-        self.total_completion_tokens += self.count_tokens(raw)
-        return self._extract_json_object(raw) if json_mode else raw
+        result = self._extract_json_object(raw) if json_mode else raw
+        self.total_completion_tokens += self.count_tokens(result)
+        return result
 
     async def complete_with_tools(
         self,
@@ -220,8 +230,9 @@ class CodexCLIProvider:
         prompt = self._tool_prompt(messages, tools)
         raw = await self._run_codex(prompt)
         self.total_prompt_tokens += self.count_tokens(prompt)
-        self.total_completion_tokens += self.count_tokens(raw)
-        return self._extract_json_object(raw)
+        result = self._extract_json_object(raw)
+        self.total_completion_tokens += self.count_tokens(result)
+        return result
 
     async def complete_agentic(
         self,
