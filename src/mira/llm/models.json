@@ -100,6 +100,17 @@
     "purposes": ["indexing", "review"],
     "recommended_for": []
   },
+  "codex-default": {
+    "label": "Codex CLI default",
+    "provider": "codex-cli",
+    "max_input_tokens": 200000,
+    "max_output_tokens": 64000,
+    "input_cost_per_1m": 0.00,
+    "output_cost_per_1m": 0.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": ["indexing", "review"]
+  },
   "us.anthropic.claude-sonnet-4-6-v1:0": {
     "label": "Claude Sonnet 4.6 (Bedrock)",
     "provider": "bedrock",

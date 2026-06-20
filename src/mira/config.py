@@ -48,6 +48,13 @@ class LLMConfig(BaseModel):
     # (env vars, instance profile, ECS task role, SSO).
     region: str = "us-east-1"
     aws_profile: str | None = None
+    # Codex CLI provider settings. Auth is handled by Codex itself through
+    # CODEX_HOME/auth.json from `codex login`; Mira does not need an OpenAI API key.
+    codex_command: str = "codex"
+    codex_home: str | None = None
+    codex_workdir: str | None = None
+    codex_sandbox: str = "read-only"
+    codex_timeout_seconds: int = 900
 
 
 class FilterConfig(BaseModel):

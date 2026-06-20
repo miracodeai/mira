@@ -186,6 +186,25 @@ Available Bedrock models:
 | Claude Haiku 4.5 | `us.anthropic.claude-haiku-4-5-v1:0` | Indexing |
 | Claude Opus 4.6 | `us.anthropic.claude-opus-4-6-v1:0` | Review (premium) |
 
+### Codex CLI
+
+If you already use OpenAI Codex locally, Mira can run reviews through the
+Codex CLI instead of an HTTP API key. Auth stays inside Codex itself via
+`CODEX_HOME/auth.json` from `codex login`:
+
+```yaml
+# mira.yaml
+llm:
+  provider: "codex-cli"
+  model: "codex-default"      # omit -m and use the Codex CLI default
+  codex_home: "/app/codex"    # optional; defaults to CODEX_HOME
+  codex_sandbox: "read-only"  # optional
+  codex_timeout_seconds: 900  # optional
+```
+
+Mount the Codex auth directory into the container and point `CODEX_HOME` or
+`llm.codex_home` at it. No `OPENROUTER_API_KEY` is required for this provider.
+
 Test locally without GitHub:
 
 ```bash
