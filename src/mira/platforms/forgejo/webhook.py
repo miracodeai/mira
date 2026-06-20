@@ -114,6 +114,15 @@ async def handle_forgejo_pr(payload: dict[str, Any], auth: PlatformAuth, bot_nam
     if action not in ("opened", "synchronized", "reopened"):
         return
 
+    # Same opt-out as GitHub's `synchronize`: new commits on an already open PR
+    # only get reviewed on an explicit `@bot review` comment.
+    if action == "synchronized" and not load_config().review.review_on_synchronize:
+        logger.info(
+            "Forgejo PR %s push skipped — review.review_on_synchronize is off",
+            payload.get("repository", {}).get("full_name", "?"),
+        )
+        return
+
     pr = payload.get("pull_request", {})
     repo = payload.get("repository", {})
     full_name = repo.get("full_name", "")

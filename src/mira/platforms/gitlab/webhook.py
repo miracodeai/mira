@@ -302,6 +302,14 @@ async def dispatch_gitlab_event(
             if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
                 logger.debug("MR skipped — author %s filtered by author filter", actor)
                 return "ignored"
+            # Same opt-out as GitHub's `synchronize`: new commits on an already
+            # open MR only get reviewed on an explicit `@bot review` comment.
+            if action == "update" and not cfg.review.review_on_synchronize:
+                logger.info(
+                    "MR !%s push skipped — review.review_on_synchronize is off",
+                    attrs.get("iid", 0),
+                )
+                return "ignored"
             background_tasks.add_task(handle_merge_request, payload, auth, bot_name)
             return "processing"
         if action == "merge":

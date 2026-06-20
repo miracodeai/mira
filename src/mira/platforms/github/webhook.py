@@ -477,6 +477,16 @@ async def dispatch_github_event(
             logger.debug("Ignoring pull_request event from self (%s)", sender)
             return "ignored"
 
+        # Opt out of per-push reviews: only open/reopen auto-review, later
+        # commits wait for an explicit `@bot review` comment.
+        if action == "synchronize" and not cfg.review.review_on_synchronize:
+            logger.info(
+                "PR %s#%s push skipped — review.review_on_synchronize is off",
+                payload.get("repository", {}).get("full_name", "?"),
+                payload.get("pull_request", {}).get("number", 0),
+            )
+            return "ignored"
+
         if author_is_filtered(sender, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
             owner = payload.get("repository", {}).get("owner", {}).get("login", "?")
             repo = payload.get("repository", {}).get("name", "?")

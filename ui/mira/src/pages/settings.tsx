@@ -468,6 +468,12 @@ export function SettingsPage() {
                   "Auto-resolve conversations",
                   "Automatically resolve bot review threads the LLM verifies as fixed on each review. Turn off to leave comments open until a human resolves them."
                 )}
+                {boolField(
+                  "review",
+                  "review_on_synchronize",
+                  "Review on every push",
+                  "When enabled, Mira reviews every new commit pushed to a PR. Disable to only review on PR open or manual @bot_name review."
+                )}
                 {numField(
                   "review",
                   "max_concurrent_chunks",

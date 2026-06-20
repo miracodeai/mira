@@ -11,7 +11,7 @@ import psycopg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from mira.config import FilterConfig, MiraConfig
+from mira.config import FilterConfig, MiraConfig, ReviewConfig
 from mira.platforms.github.auth import GitHubAppAuth
 from mira.platforms.server import create_app
 
@@ -448,6 +448,45 @@ async def test_pr_opened_blocked_author_filtered(
     result = await _post(client, "pull_request", payload)
     assert result["status"] == "ignored"
     mock_handler.assert_not_awaited()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_synchronize_skipped_when_review_on_synchronize_off(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(review=ReviewConfig(review_on_synchronize=False))
+    payload = _make_pr_payload(action="synchronize")
+    payload["sender"] = {"login": "alice"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "ignored"
+    mock_handler.assert_not_awaited()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_still_reviewed_when_review_on_synchronize_off(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(review=ReviewConfig(review_on_synchronize=False))
+    payload = _make_pr_payload(action="opened")
+    payload["sender"] = {"login": "alice"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_synchronize_reviewed_by_default(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig()
+    payload = _make_pr_payload(action="synchronize")
+    payload["sender"] = {"login": "alice"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
 
 
 @patch("mira.platforms.github.webhook.load_config")
