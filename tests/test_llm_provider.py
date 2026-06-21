@@ -508,3 +508,138 @@ class TestReasoningFallback:
 
         assert len(posts) == 1  # no wasted reasoning attempt
         assert "reasoning" not in posts[0].kwargs["json"]
+
+
+class TestParam400SelfHeal:
+    """The provider self-heals on 400s for params some gateways reject
+    (e.g. Databricks-served Anthropic models), stripping the offending
+    param and remembering it per-model. OpenRouter never 400s on these,
+    so this behavior is additive and backward compatible.
+    """
+
+    def _err(self, message: str):
+        # json.dumps of this dict becomes resp.text, which the heal scans.
+        return _mock_httpx_response({"error_code": "BAD", "message": message}, status_code=400)
+
+    @pytest.mark.asyncio
+    async def test_response_format_400_is_healed_and_remembered(self):
+        config = LLMConfig(model="databricks-claude-sonnet-4-6")
+        provider = LLMProvider(config)
+
+        err = self._err("Response format type json_object is not supported for this model.")
+        ok = _mock_httpx_response(_make_response_json("{}"))
+        bodies, responses = [], [err, ok]
+
+        async def _record(*args, **kwargs):
+            # _post_chat mutates the same body dict across retries, so snapshot
+            # top-level keys at call time rather than reading call_args later.
+            bodies.append(dict(kwargs.get("json") or {}))
+            return responses.pop(0)
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=_record)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+        assert result == "{}"
+        assert len(bodies) == 2  # one 400, one healed retry
+        assert "response_format" in bodies[0]  # first attempt sent it
+        assert "response_format" not in bodies[1]  # retry dropped it
+        assert "databricks-claude-sonnet-4-6" in provider._no_response_format
+
+    @pytest.mark.asyncio
+    async def test_response_format_400_matches_underscore_phrasing(self):
+        # Finding #3: heal must match both "response format" and "response_format".
+        config = LLMConfig(model="some-model")
+        provider = LLMProvider(config)
+
+        err = self._err("unsupported parameter: response_format")  # underscore form
+        ok = _mock_httpx_response(_make_response_json("{}"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=[err, ok])
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+        assert result == "{}"
+        assert "some-model" in provider._no_response_format
+
+    @pytest.mark.asyncio
+    async def test_temperature_400_is_healed_and_remembered(self):
+        config = LLMConfig(model="databricks-claude-opus-4-8")
+        provider = LLMProvider(config)
+
+        err = self._err("Model us.anthropic.claude-opus-4-8 does not support the temperature parameter.")
+        ok = _mock_httpx_response(_make_response_json("done"))
+        bodies, responses = [], [err, ok]
+
+        async def _record(*args, **kwargs):
+            bodies.append(dict(kwargs.get("json") or {}))
+            return responses.pop(0)
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=_record)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await provider.complete(
+                [{"role": "user", "content": "hi"}], json_mode=False
+            )
+
+        assert result == "done"
+        assert len(bodies) == 2
+        assert "temperature" in bodies[0]
+        assert "temperature" not in bodies[1]
+        assert "databricks-claude-opus-4-8" in provider._no_temperature
+
+    @pytest.mark.asyncio
+    async def test_send_temperature_false_omits_it_on_first_call(self):
+        # Proactive opt-out: no 400 needed, temperature never sent.
+        config = LLMConfig(model="databricks-claude-opus-4-8", send_temperature=False)
+        provider = LLMProvider(config)
+
+        ok = _mock_httpx_response(_make_response_json("ok"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=ok)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        posts = mock_client.post.call_args_list
+        assert len(posts) == 1  # no wasted 400/retry
+        assert "temperature" not in posts[0].kwargs["json"]
+
+    @pytest.mark.asyncio
+    async def test_default_path_still_sends_temperature_and_response_format(self):
+        # Backward-compat guard: default config (OpenRouter-style) is unchanged.
+        config = LLMConfig(model="anthropic/claude-sonnet-4-6")
+        provider = LLMProvider(config)
+
+        ok = _mock_httpx_response(_make_response_json("{}"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=ok)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
+
+        body = mock_client.post.call_args_list[0].kwargs["json"]
+        assert body["temperature"] == 0.2
+        assert body["response_format"] == {"type": "json_object"}

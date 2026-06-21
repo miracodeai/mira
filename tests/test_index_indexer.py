@@ -341,3 +341,43 @@ class TestIndexDiff:
 
         assert store.get_summary("old.py") is None
         store.close()
+
+
+class TestResolveIndexConcurrency:
+    """MIRA_INDEX_LLM_CONCURRENCY parsing must guard against bad values so a
+    misconfigured env can't deadlock the semaphore (0), crash at import
+    (non-int), or remove the concurrency cap (huge value). (Review findings
+    #1 config + #2 security.)
+    """
+
+    def _resolve(self, monkeypatch, value):
+        from mira.index.indexer import _resolve_index_concurrency
+
+        if value is None:
+            monkeypatch.delenv("MIRA_INDEX_LLM_CONCURRENCY", raising=False)
+        else:
+            monkeypatch.setenv("MIRA_INDEX_LLM_CONCURRENCY", value)
+        return _resolve_index_concurrency()
+
+    def test_unset_defaults_to_8(self, monkeypatch):
+        assert self._resolve(monkeypatch, None) == 8
+
+    def test_empty_string_defaults_to_8(self, monkeypatch):
+        assert self._resolve(monkeypatch, "") == 8
+
+    def test_valid_value_passes_through(self, monkeypatch):
+        assert self._resolve(monkeypatch, "4") == 4
+
+    def test_zero_is_clamped_to_one(self, monkeypatch):
+        # Semaphore(0) would deadlock indexing — must clamp up to 1.
+        assert self._resolve(monkeypatch, "0") == 1
+
+    def test_negative_is_clamped_to_one(self, monkeypatch):
+        assert self._resolve(monkeypatch, "-5") == 1
+
+    def test_huge_value_is_capped(self, monkeypatch):
+        assert self._resolve(monkeypatch, "100000") == 64
+
+    def test_non_integer_falls_back_to_8(self, monkeypatch):
+        # Must not raise ValueError at import on garbage input.
+        assert self._resolve(monkeypatch, "two") == 8
