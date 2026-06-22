@@ -407,7 +407,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
     github_token = os.environ.get("GITHUB_TOKEN", "")
     if not github_token and any(r.platform == "github" for r in to_index):
         try:
-            from mira.github_app.auth import GitHubAppAuth
+            from mira.platforms.github.auth import GitHubAppAuth
 
             app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
             private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")

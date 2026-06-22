@@ -38,8 +38,8 @@ async def sync_gitlab_projects() -> dict:
     token = os.environ.get("MIRA_GITLAB_TOKEN", "")
     if not token:
         raise HTTPException(status_code=400, detail="MIRA_GITLAB_TOKEN is not configured")
-    from mira.platforms.auth import GitLabTokenAuth
-    from mira.platforms.gitlab_webhook import backfill_gitlab_projects
+    from mira.platforms.gitlab.auth import GitLabTokenAuth
+    from mira.platforms.gitlab.webhook import backfill_gitlab_projects
 
     base_url = os.environ.get("MIRA_GITLAB_API_URL", "https://gitlab.com/api/v4")
     count = await backfill_gitlab_projects(GitLabTokenAuth(token, base_url))
@@ -366,8 +366,8 @@ async def get_setup_status() -> dict:
             if app_id and private_key:
                 import asyncio as _asyncio
 
-                from mira.github_app.auth import GitHubAppAuth
-                from mira.github_app.index_handlers import _count_files_for_repos
+                from mira.platforms.github.auth import GitHubAppAuth
+                from mira.platforms.github.webhook import _count_files_for_repos
 
                 auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
                 installations = await auth.list_installations()

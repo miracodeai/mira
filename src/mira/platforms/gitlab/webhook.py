@@ -46,7 +46,7 @@ async def list_gitlab_projects(token: str, base_url: str) -> list[dict[str, Any]
 async def backfill_gitlab_projects(auth: PlatformAuth) -> int:
     """Register every accessible GitLab project so they show in the dashboard
     ready to index — without waiting for a webhook. Returns the count."""
-    from mira.github_app.index_handlers import _get_app_db
+    from mira.platforms.index_handlers import _get_app_db
 
     token = await auth.get_token()
     base_url = profiles.resolve("gitlab")["api_url"]
@@ -80,8 +80,8 @@ def _split_project_path(path_with_namespace: str) -> tuple[str, str]:
 
 async def handle_merge_request(payload: dict[str, Any], auth: PlatformAuth, bot_name: str) -> None:
     """Review a merge request (open / reopen / new commits)."""
-    from mira.github_app.handlers import PAUSE_LABEL, run_pr_review
-    from mira.github_app.index_handlers import _get_app_db
+    from mira.platforms.handlers import PAUSE_LABEL, run_pr_review
+    from mira.platforms.index_handlers import _get_app_db
 
     attrs = payload.get("object_attributes", {})
     project = payload.get("project", {})
@@ -118,7 +118,7 @@ async def handle_merge_request(payload: dict[str, Any], auth: PlatformAuth, bot_
 
 async def handle_gitlab_push(payload: dict[str, Any], auth: PlatformAuth, bot_name: str) -> None:
     """Incrementally index a push to the default branch."""
-    from mira.github_app.index_handlers import _get_app_db, run_incremental_index
+    from mira.platforms.index_handlers import _get_app_db, run_incremental_index
 
     project = payload.get("project", {})
     owner, repo = _split_project_path(project.get("path_with_namespace", ""))
@@ -156,7 +156,7 @@ async def handle_gitlab_push(payload: dict[str, Any], auth: PlatformAuth, bot_na
 
 async def handle_gitlab_merge(payload: dict[str, Any], auth: PlatformAuth, bot_name: str) -> None:
     """Merge-time learning when an MR is merged."""
-    from mira.github_app.handlers import run_pr_merged_learning
+    from mira.platforms.handlers import run_pr_merged_learning
 
     attrs = payload.get("object_attributes", {})
     project = payload.get("project", {})
@@ -175,7 +175,7 @@ async def handle_gitlab_merge(payload: dict[str, Any], auth: PlatformAuth, bot_n
 
 async def handle_gitlab_note(payload: dict[str, Any], auth: PlatformAuth, bot_name: str) -> None:
     """An @-mention in an MR note: command, pause/resume, or thread reject."""
-    from mira.github_app.handlers import (
+    from mira.platforms.handlers import (
         _PAUSE_KEYWORDS,
         _REJECT_KEYWORDS,
         _RESUME_KEYWORDS,

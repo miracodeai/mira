@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from mira.github_app.auth import GitHubAppAuth
-from mira.github_app.webhooks import create_app
+from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.server import create_app
 
 WEBHOOK_SECRET = "test-secret-123"
 BOT_NAME = "mira-bot"
@@ -108,7 +108,7 @@ async def test_invalid_signature(client: AsyncClient) -> None:
     assert resp.status_code == 401
 
 
-@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_opened_triggers_handler(mock_handler: AsyncMock, client: AsyncClient) -> None:
     payload_bytes = json.dumps(_pr_opened_payload()).encode()
     resp = await client.post(
@@ -142,7 +142,7 @@ async def test_pr_closed_ignored(client: AsyncClient) -> None:
     assert resp.json()["status"] == "ignored"
 
 
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_comment_with_mention_triggers_handler(
     mock_handler: AsyncMock, client: AsyncClient
 ) -> None:
@@ -214,7 +214,7 @@ def _review_comment_payload(body: str, user: str = "alice") -> dict:
     }
 
 
-@patch("mira.github_app.webhooks.handle_thread_reject", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_thread_reject", new_callable=AsyncMock)
 async def test_review_comment_reject_triggers_handler(
     mock_handler: AsyncMock, client: AsyncClient
 ) -> None:
@@ -269,7 +269,7 @@ async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None
 # ── pause / resume / ignore tests ────────────────────────────────────────────
 
 
-@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_with_paused_label_returns_paused(
     mock_handler: AsyncMock, client: AsyncClient
 ) -> None:
@@ -289,7 +289,7 @@ async def test_pr_with_paused_label_returns_paused(
     mock_handler.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_with_ignore_in_description(mock_handler: AsyncMock, client: AsyncClient) -> None:
     payload = _make_pr_payload(body="Some text\n@mira-bot ignore\nMore text")
     payload_bytes = json.dumps(payload).encode()
@@ -307,8 +307,8 @@ async def test_pr_with_ignore_in_description(mock_handler: AsyncMock, client: As
     mock_handler.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_pause_comment_dispatches_pause_handler(
     mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
 ) -> None:
@@ -329,8 +329,8 @@ async def test_pause_comment_dispatches_pause_handler(
     mock_comment.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_resume_comment_dispatches_pause_handler(
     mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
 ) -> None:
@@ -351,8 +351,8 @@ async def test_resume_comment_dispatches_pause_handler(
     mock_comment.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_review_comment_still_dispatches_handle_comment(
     mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
 ) -> None:

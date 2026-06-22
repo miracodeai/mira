@@ -68,8 +68,8 @@ async def sync_repos() -> dict:
 
     import asyncio as _asyncio
 
-    from mira.github_app.auth import GitHubAppAuth
-    from mira.github_app.index_handlers import _count_files_for_repos
+    from mira.platforms.github.auth import GitHubAppAuth
+    from mira.platforms.github.webhook import _count_files_for_repos
 
     auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
 
@@ -461,7 +461,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
         token = os.environ.get("GITHUB_TOKEN", "")
         if not token:
             try:
-                from mira.github_app.auth import GitHubAppAuth
+                from mira.platforms.github.auth import GitHubAppAuth
 
                 app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
                 private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")

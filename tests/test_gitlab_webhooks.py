@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from mira.github_app.webhooks import create_app
-from mira.platforms.auth import GitLabTokenAuth
+from mira.platforms.gitlab.auth import GitLabTokenAuth
+from mira.platforms.server import create_app
 
 GL_SECRET = "gl-secret"
 BOT = "mira-bot"
@@ -76,7 +76,7 @@ async def test_rejects_bad_token(client):
 
 @pytest.mark.asyncio
 async def test_mr_open_triggers_review(client):
-    with patch("mira.platforms.gitlab_webhook.handle_merge_request", new=AsyncMock()) as h:
+    with patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h:
         resp = await client.post(
             "/gitlab/webhook",
             content=json.dumps(_mr_payload(action="open")),
@@ -88,7 +88,7 @@ async def test_mr_open_triggers_review(client):
 
 @pytest.mark.asyncio
 async def test_mr_update_without_newcommits_ignored(client):
-    with patch("mira.platforms.gitlab_webhook.handle_merge_request", new=AsyncMock()) as h:
+    with patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h:
         resp = await client.post(
             "/gitlab/webhook",
             content=json.dumps(_mr_payload(action="update")),  # no oldrev = no new commits
@@ -102,7 +102,7 @@ async def test_mr_update_without_newcommits_ignored(client):
 async def test_self_authored_event_ignored(client, gitlab_auth):
     payload = _mr_payload(action="open")
     payload["user"]["username"] = "mira-bot"  # the bot itself
-    with patch("mira.platforms.gitlab_webhook.handle_merge_request", new=AsyncMock()) as h:
+    with patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h:
         resp = await client.post(
             "/gitlab/webhook",
             content=json.dumps(payload),
@@ -124,7 +124,7 @@ def _note_payload(note="@mira-bot review"):
 
 @pytest.mark.asyncio
 async def test_note_mention_triggers_command(client):
-    with patch("mira.platforms.gitlab_webhook.handle_gitlab_note", new=AsyncMock()) as h:
+    with patch("mira.platforms.gitlab.webhook.handle_gitlab_note", new=AsyncMock()) as h:
         resp = await client.post(
             "/gitlab/webhook",
             content=json.dumps(_note_payload()),
@@ -135,7 +135,7 @@ async def test_note_mention_triggers_command(client):
 
 @pytest.mark.asyncio
 async def test_note_without_mention_ignored(client):
-    with patch("mira.platforms.gitlab_webhook.handle_gitlab_note", new=AsyncMock()) as h:
+    with patch("mira.platforms.gitlab.webhook.handle_gitlab_note", new=AsyncMock()) as h:
         resp = await client.post(
             "/gitlab/webhook",
             content=json.dumps(_note_payload(note="looks good")),
@@ -147,7 +147,7 @@ async def test_note_without_mention_ignored(client):
 
 @pytest.mark.asyncio
 async def test_mr_merge_triggers_learning(client):
-    with patch("mira.platforms.gitlab_webhook.handle_gitlab_merge", new=AsyncMock()) as h:
+    with patch("mira.platforms.gitlab.webhook.handle_gitlab_merge", new=AsyncMock()) as h:
         resp = await client.post(
             "/gitlab/webhook",
             content=json.dumps(_mr_payload(action="merge")),
@@ -159,7 +159,7 @@ async def test_mr_merge_triggers_learning(client):
 @pytest.mark.asyncio
 async def test_inline_mention_routes_to_thread_reply(gitlab_auth):
     """A free-form @-mention on a diff note → LLM intent classification."""
-    from mira.platforms import gitlab_webhook as gw
+    from mira.platforms.gitlab import webhook as gw
 
     payload = {
         "object_attributes": {
@@ -176,9 +176,9 @@ async def test_inline_mention_routes_to_thread_reply(gitlab_auth):
     prov = AsyncMock()
     prov.get_pr_info = AsyncMock(return_value=object())
     with (
-        patch("mira.platforms.gitlab_webhook.create_provider", return_value=prov),
-        patch("mira.github_app.handlers.run_thread_reply", new=AsyncMock()) as rtr,
-        patch("mira.github_app.handlers.run_pr_command", new=AsyncMock()) as rpc,
+        patch("mira.platforms.gitlab.webhook.create_provider", return_value=prov),
+        patch("mira.platforms.handlers.run_thread_reply", new=AsyncMock()) as rtr,
+        patch("mira.platforms.handlers.run_pr_command", new=AsyncMock()) as rpc,
     ):
         await gw.handle_gitlab_note(payload, gitlab_auth, "mira-bot")
     rtr.assert_awaited_once()
@@ -187,35 +187,35 @@ async def test_inline_mention_routes_to_thread_reply(gitlab_auth):
 
 @pytest.mark.asyncio
 async def test_paused_label_skips_review(gitlab_auth):
-    from mira.platforms import gitlab_webhook as gw
+    from mira.platforms.gitlab import webhook as gw
 
     payload = _mr_payload(action="open")
     payload["labels"] = [{"title": "mira-paused"}]
-    with patch("mira.github_app.handlers.run_pr_review", new=AsyncMock()) as rpr:
+    with patch("mira.platforms.handlers.run_pr_review", new=AsyncMock()) as rpr:
         await gw.handle_merge_request(payload, gitlab_auth, "mira-bot")
     rpr.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_ignore_in_description_skips_review(gitlab_auth):
-    from mira.platforms import gitlab_webhook as gw
+    from mira.platforms.gitlab import webhook as gw
 
     payload = _mr_payload(action="open")
     payload["object_attributes"]["description"] = "wip @mira-bot ignore for now"
-    with patch("mira.github_app.handlers.run_pr_review", new=AsyncMock()) as rpr:
+    with patch("mira.platforms.handlers.run_pr_review", new=AsyncMock()) as rpr:
         await gw.handle_merge_request(payload, gitlab_auth, "mira-bot")
     rpr.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_unpaused_mr_runs_review(gitlab_auth):
-    from mira.platforms import gitlab_webhook as gw
+    from mira.platforms.gitlab import webhook as gw
 
     payload = _mr_payload(action="open")
     with (
-        patch("mira.github_app.index_handlers._get_app_db"),
-        patch("mira.platforms.gitlab_webhook.create_provider", return_value=AsyncMock()),
-        patch("mira.github_app.handlers.run_pr_review", new=AsyncMock()) as rpr,
+        patch("mira.platforms.index_handlers._get_app_db"),
+        patch("mira.platforms.gitlab.webhook.create_provider", return_value=AsyncMock()),
+        patch("mira.platforms.handlers.run_pr_review", new=AsyncMock()) as rpr,
     ):
         await gw.handle_merge_request(payload, gitlab_auth, "mira-bot")
     rpr.assert_awaited_once()

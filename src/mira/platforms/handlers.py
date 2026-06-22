@@ -1,4 +1,6 @@
-"""Webhook event handlers for the GitHub App."""
+"""Platform-neutral webhook handlers — shared by the GitHub and GitLab
+webhook layers. Each takes a provider/auth and operates through the engine;
+none is tied to a specific platform's payload shape."""
 
 from __future__ import annotations
 
@@ -12,28 +14,42 @@ from jinja2 import Environment, FileSystemLoader
 from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.dashboard.models_config import llm_config_for
-from mira.github_app.auth import GitHubAppAuth
 from mira.index.store import IndexStore
 from mira.llm import create_llm
 from mira.llm.prompts.review import build_conversation_prompt
 from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
-from mira.models import PRInfo
-from mira.platforms.mentions import command_after_mention, mention_names, strip_mentions
-from mira.providers import create_provider
 
 logger = logging.getLogger(__name__)
+
+_REVIEW_KEYWORDS = {"review", "review this", "review this pr"}
+
+_REJECT_KEYWORDS = {"reject", "dismiss", "resolve", "ignore"}
+
+_REVIEW_REST_KEYWORDS = {"review-rest", "review rest", "rest", "continue"}
+
+_HELP_KEYWORDS = {"help", "?", "commands"}
+
+_THREAD_REPLY_ENV = Environment(
+    loader=FileSystemLoader(
+        str(Path(__file__).resolve().parents[1] / "llm" / "prompts" / "templates")
+    ),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+_THREAD_REPLY_TEMPLATE = _THREAD_REPLY_ENV.get_template("thread_reply.jinja2")
+
+PAUSE_LABEL = "mira-paused"
+
+_PAUSE_KEYWORDS = {"pause"}
+
+_RESUME_KEYWORDS = {"resume"}
 
 
 def _open_store(owner: str, repo: str, platform: str = "github") -> IndexStore:
     """Open an IndexStore for the given owner/repo."""
     return IndexStore.open(owner, repo, platform=platform)
-
-
-_REVIEW_KEYWORDS = {"review", "review this", "review this pr"}
-_REJECT_KEYWORDS = {"reject", "dismiss", "resolve", "ignore"}
-_REVIEW_REST_KEYWORDS = {"review-rest", "review rest", "rest", "continue"}
-_HELP_KEYWORDS = {"help", "?", "commands"}
 
 
 def _help_message(bot_name: str) -> str:
@@ -55,20 +71,6 @@ def _help_message(bot_name: str) -> str:
         f"To skip a PR entirely, include `@{bot_name} ignore` in the PR body.\n\n"
         f"Full docs: https://docs.miracode.ai/commands"
     )
-
-
-_THREAD_REPLY_ENV = Environment(
-    loader=FileSystemLoader(
-        str(Path(__file__).resolve().parents[1] / "llm" / "prompts" / "templates")
-    ),
-    trim_blocks=True,
-    lstrip_blocks=True,
-)
-_THREAD_REPLY_TEMPLATE = _THREAD_REPLY_ENV.get_template("thread_reply.jinja2")
-
-PAUSE_LABEL = "mira-paused"
-_PAUSE_KEYWORDS = {"pause"}
-_RESUME_KEYWORDS = {"resume"}
 
 
 async def run_pr_review(
@@ -138,39 +140,6 @@ async def run_pr_review(
     await dispatch_event(REVIEW_COMPLETED, event_data)
     if any(sev >= Severity.WARNING for sev in stats):
         await dispatch_event(REVIEW_HIGH_SEVERITY, event_data)
-
-
-async def handle_pull_request(
-    payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
-    bot_name: str,
-) -> None:
-    """Handle a pull_request event by running a full review."""
-    installation_id: int = payload.get("installation", {}).get("id", 0)
-    pr_url = ""
-    repo_full = ""
-    try:
-        token = await app_auth.get_installation_token(installation_id)
-
-        pr = payload["pull_request"]
-        owner = payload["repository"]["owner"]["login"]
-        repo = payload["repository"]["name"]
-        number = pr["number"]
-        pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
-        repo_full = f"{owner}/{repo}"
-
-        provider = create_provider("github", token)
-        is_private = bool(payload["repository"].get("private", False))
-        await run_pr_review(provider, owner, repo, number, pr_url, is_private, bot_name)
-    except Exception as exc:
-        logger.exception("Error handling pull_request event")
-        if pr_url:
-            from mira.outbound_webhooks import REVIEW_FAILED, dispatch_event
-
-            await dispatch_event(
-                REVIEW_FAILED,
-                {"repo": repo_full, "pr_url": pr_url, "error": str(exc)},
-            )
 
 
 async def run_pr_command(
@@ -252,34 +221,6 @@ async def run_pr_command(
         response = await llm.complete(messages, json_mode=False)
         await provider.post_comment(pr_info, f"> @{actor} asked: {question}\n\n{response}")
         logger.info("Replied to comment on %s", pr_url)
-
-
-async def handle_comment(
-    payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
-    bot_name: str,
-) -> None:
-    """Handle an issue_comment event mentioning the bot."""
-    installation_id: int = payload.get("installation", {}).get("id", 0)
-    try:
-        token = await app_auth.get_installation_token(installation_id)
-
-        comment_body: str = payload["comment"]["body"]
-        comment_user: str = payload["comment"]["user"]["login"]
-        names = mention_names(bot_name, await app_auth.get_bot_identity())
-        question = strip_mentions(comment_body, names)
-
-        owner = payload["repository"]["owner"]["login"]
-        repo = payload["repository"]["name"]
-        number = payload["issue"]["number"]
-        pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
-
-        provider = create_provider("github", token)
-        await run_pr_command(
-            provider, owner, repo, number, pr_url, question, comment_user, bot_name
-        )
-    except Exception:
-        logger.exception("Error handling comment event")
 
 
 async def run_thread_reply(
@@ -364,183 +305,6 @@ async def run_thread_reply(
             logger.debug("Failed to record disagreement feedback: %s", fb_err)
 
     logger.info("Thread reply (%s) on %s: %s", intent, pr_info.url, reply_text[:80])
-
-
-async def _handle_thread_freeform_reply(
-    payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
-    bot_name: str,
-) -> None:
-    """GitHub adapter for the free-form thread reply (see run_thread_reply)."""
-    installation_id: int = payload.get("installation", {}).get("id", 0)
-    try:
-        token = await app_auth.get_installation_token(installation_id)
-        provider = create_provider("github", token)
-
-        comment = payload["comment"]
-        comment_id: int = comment["id"]
-        in_reply_to_id: int | None = comment.get("in_reply_to_id")
-
-        owner = payload["repository"]["owner"]["login"]
-        repo = payload["repository"]["name"]
-        number = payload["pull_request"]["number"]
-        pr_info = PRInfo(
-            title="",
-            description="",
-            base_branch="",
-            head_branch="",
-            url=f"https://github.com/{owner}/{repo}/pull/{number}",
-            number=number,
-            owner=owner,
-            repo=repo,
-        )
-
-        names = mention_names(bot_name, await app_auth.get_bot_identity())
-        user_reply = strip_mentions(comment["body"], names)
-        original_suggestion = (
-            await provider.get_comment_body(pr_info, in_reply_to_id) if in_reply_to_id else ""
-        )
-
-        await run_thread_reply(
-            provider,
-            pr_info,
-            user_reply,
-            comment_id,
-            original_suggestion=original_suggestion,
-            comment_node_id=comment["node_id"],
-            comment_path=comment.get("path", ""),
-            comment_line=comment.get("original_line", 0) or comment.get("line", 0),
-            actor=comment["user"]["login"],
-            bot_name=bot_name,
-        )
-    except Exception:
-        logger.exception("Error handling free-form thread reply")
-
-
-async def handle_thread_reject(
-    payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
-    bot_name: str,
-) -> None:
-    """Handle a pull_request_review_comment that rejects a review thread."""
-    installation_id: int = payload.get("installation", {}).get("id", 0)
-    try:
-        token = await app_auth.get_installation_token(installation_id)
-
-        comment_body: str = payload["comment"]["body"]
-        comment_node_id: str = payload["comment"]["node_id"]
-
-        # The first word after the mention (either the configured name or the
-        # bot's real login), e.g. "@mira reject" → "reject".
-        names = mention_names(bot_name, await app_auth.get_bot_identity())
-        command = command_after_mention(comment_body, names)
-
-        # No explicit reject/dismiss keyword → fall through to the
-        # free-form LLM reply path. The bot reads the human's message,
-        # classifies intent, and either acknowledges + resolves (if the
-        # human refuted) or just replies (questions, agreements).
-        if command not in _REJECT_KEYWORDS:
-            await _handle_thread_freeform_reply(payload, app_auth, bot_name)
-            return
-
-        owner = payload["repository"]["owner"]["login"]
-        repo = payload["repository"]["name"]
-        number = payload["pull_request"]["number"]
-
-        provider = create_provider("github", token)
-        from mira.models import PRInfo as _PRInfo
-
-        _pr_info_for_lookup = _PRInfo(
-            title="",
-            description="",
-            base_branch="",
-            head_branch="",
-            url=f"https://github.com/{owner}/{repo}/pull/{number}",
-            number=number,
-            owner=owner,
-            repo=repo,
-        )
-        thread_id = await provider.get_thread_id_for_comment(
-            comment_node_id,
-            _pr_info_for_lookup,
-        )
-        if not thread_id:
-            logger.info(
-                "Thread not found or already resolved for comment %s on PR %s/%s#%d",
-                comment_node_id,
-                owner,
-                repo,
-                number,
-            )
-            return
-
-        from mira.models import PRInfo
-
-        pr_info = PRInfo(
-            title="",
-            description="",
-            base_branch="",
-            head_branch="",
-            url=f"https://github.com/{owner}/{repo}/pull/{number}",
-            number=number,
-            owner=owner,
-            repo=repo,
-        )
-        try:
-            resolved = await provider.resolve_threads(pr_info, [thread_id])
-        except Exception as resolve_err:
-            logger.warning(
-                "Failed to resolve thread %s on PR %s/%s#%d: %s",
-                thread_id,
-                owner,
-                repo,
-                number,
-                resolve_err,
-            )
-            try:
-                await provider.post_comment(
-                    pr_info,
-                    "Sorry, I couldn't dismiss this suggestion. "
-                    "Please try again or resolve the thread manually.",
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to post reject failure reply on PR %s/%s#%d", owner, repo, number
-                )
-            return
-
-        logger.info(
-            "Reject command '%s': resolved %d thread(s) on PR %s/%s#%d",
-            command,
-            resolved,
-            owner,
-            repo,
-            number,
-        )
-
-        # Record feedback for learning
-        try:
-            store = _open_store(owner, repo)
-            try:
-                store.record_feedback(
-                    pr_number=number,
-                    pr_url=f"https://github.com/{owner}/{repo}/pull/{number}",
-                    comment_path=payload["comment"].get("path", ""),
-                    comment_line=payload["comment"].get("original_line", 0)
-                    or payload["comment"].get("line", 0),
-                    comment_category="",
-                    comment_severity="",
-                    comment_title="",
-                    signal="rejected",
-                    actor=payload["comment"]["user"]["login"],
-                )
-            finally:
-                store.close()
-        except Exception as fb_err:
-            logger.debug("Failed to record feedback: %s", fb_err)
-
-    except Exception:
-        logger.exception("Error handling thread reject event")
 
 
 async def run_pr_merged_learning(
@@ -657,93 +421,3 @@ async def run_pr_merged_learning(
         deterministic_rules,
         llm_rules,
     )
-
-
-async def handle_pr_merged(
-    payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
-    bot_name: str,
-) -> None:
-    """Learn from a merged PR by extracting accept/reject + human-review signals."""
-    installation_id: int = payload.get("installation", {}).get("id", 0)
-    pr_url = ""
-    try:
-        pr = payload.get("pull_request", {})
-        if not pr.get("merged"):
-            return
-
-        owner = payload["repository"]["owner"]["login"]
-        repo = payload["repository"]["name"]
-        number = pr["number"]
-        pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
-
-        token = await app_auth.get_installation_token(installation_id)
-        provider = create_provider("github", token)
-
-        from mira.models import PRInfo
-
-        pr_info = PRInfo(
-            title=pr.get("title", ""),
-            description=pr.get("body") or "",
-            base_branch=pr["base"]["ref"],
-            head_branch=pr["head"]["ref"],
-            url=pr_url,
-            number=number,
-            owner=owner,
-            repo=repo,
-            head_sha=pr["head"].get("sha") or "",
-        )
-        merged_by = (pr.get("merged_by") or {}).get("login", "")
-        await run_pr_merged_learning(provider, pr_info, bot_name, merged_by)
-    except Exception:
-        logger.exception("Error handling pr_merged event on %s", pr_url)
-
-
-async def handle_pause_resume(
-    payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
-    bot_name: str,
-    command: str,
-) -> None:
-    """Handle a pause or resume command from an issue comment."""
-    installation_id: int = payload.get("installation", {}).get("id", 0)
-    try:
-        token = await app_auth.get_installation_token(installation_id)
-
-        owner = payload["repository"]["owner"]["login"]
-        repo = payload["repository"]["name"]
-        number = payload["issue"]["number"]
-
-        from mira.models import PRInfo
-
-        pr_info = PRInfo(
-            title="",
-            description="",
-            base_branch="",
-            head_branch="",
-            url=f"https://github.com/{owner}/{repo}/pull/{number}",
-            number=number,
-            owner=owner,
-            repo=repo,
-        )
-
-        provider = create_provider("github", token)
-
-        if command in _PAUSE_KEYWORDS:
-            await provider.add_label(pr_info, PAUSE_LABEL)
-            await provider.post_comment(
-                pr_info,
-                f"Automatic reviews paused. You can still request a manual review "
-                f"by commenting `@{bot_name} review`.",
-            )
-            logger.info("Paused automatic reviews on PR %s/%s#%d", owner, repo, number)
-        elif command in _RESUME_KEYWORDS:
-            await provider.remove_label(pr_info, PAUSE_LABEL)
-            await provider.post_comment(
-                pr_info,
-                "Automatic reviews resumed.",
-            )
-            logger.info("Resumed automatic reviews on PR %s/%s#%d", owner, repo, number)
-
-    except Exception:
-        logger.exception("Error handling pause/resume event")

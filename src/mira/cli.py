@@ -312,9 +312,9 @@ def serve(
         import uvicorn
 
         from mira.config import set_global_defaults
-        from mira.github_app.auth import GitHubAppAuth
-        from mira.github_app.webhooks import create_app
-        from mira.platforms.auth import GitLabTokenAuth
+        from mira.platforms.github.auth import GitHubAppAuth
+        from mira.platforms.gitlab.auth import GitLabTokenAuth
+        from mira.platforms.server import create_app
     except ImportError as exc:
         raise click.ClickException(
             f"Missing dependency: {exc}. Install with: pip install mira-reviewer[serve]"
