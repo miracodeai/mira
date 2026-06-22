@@ -115,6 +115,8 @@ _SKIP_PATTERNS = [
 ]
 
 _FILE_FETCH_SEMAPHORE = 10
+
+
 # Concurrent LLM summarization batches per repo. The indexing model
 # typically handles 6-8 comfortably on OpenRouter; bumping from 3 nearly
 # halves file-phase wall time without changing quality. Env-overridable so

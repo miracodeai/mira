@@ -577,7 +577,9 @@ class TestParam400SelfHeal:
         config = LLMConfig(model="databricks-claude-opus-4-8")
         provider = LLMProvider(config)
 
-        err = self._err("Model us.anthropic.claude-opus-4-8 does not support the temperature parameter.")
+        err = self._err(
+            "Model us.anthropic.claude-opus-4-8 does not support the temperature parameter."
+        )
         ok = _mock_httpx_response(_make_response_json("done"))
         bodies, responses = [], [err, ok]
 
@@ -592,9 +594,7 @@ class TestParam400SelfHeal:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            result = await provider.complete(
-                [{"role": "user", "content": "hi"}], json_mode=False
-            )
+            result = await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
 
         assert result == "done"
         assert len(bodies) == 2
