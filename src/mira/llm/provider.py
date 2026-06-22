@@ -405,6 +405,9 @@ class LLMProvider:
         next unsupported param, so we heal in a short loop.
         """
         resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+        # One heal per rejected param; bounded by the 4 healable params above
+        # (tool_choice, response_format, reasoning, temperature). So this is up
+        # to 1 initial POST + 4 heal-retries = 5 requests in the worst case.
         for _ in range(4):
             if resp.status_code != 400:
                 return resp
