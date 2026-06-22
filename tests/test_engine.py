@@ -900,6 +900,36 @@ class TestThreadResolution:
         assert resolved_ids == ["T1"]
 
     @pytest.mark.asyncio
+    async def test_auto_resolve_disabled_skips_resolution(
+        self,
+        sample_llm_response_text: str,
+        provider_with_threads: AsyncMock,
+    ):
+        """With auto_resolve_conversations off, no threads are fetched or resolved."""
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        llm.complete = AsyncMock(return_value=json.dumps({"results": []}))
+        llm.walkthrough = AsyncMock(
+            return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
+        )
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
+
+        config = MiraConfig()
+        config.review.auto_resolve_conversations = False
+        engine = ReviewEngine(
+            config=config, llm=llm, provider=provider_with_threads, bot_name="mira"
+        )
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # The verified-fix resolution path is short-circuited entirely.
+        provider_with_threads.get_unresolved_bot_threads.assert_not_awaited()
+        provider_with_threads.resolve_threads.assert_not_awaited()
+        assert result.thread_decisions == []
+        # Review itself still completed.
+        provider_with_threads.post_review.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_full_flow_passes_full_file_for_small_files(
         self,
         sample_llm_response_text: str,

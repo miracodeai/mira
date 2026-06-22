@@ -352,7 +352,10 @@ class ReviewEngine:
         async def _resolve_threads() -> tuple[
             int, int, list[UnresolvedThread], list[ThreadDecision]
         ]:
-            if not self.bot_name:
+            # When auto-resolve is off we skip the thread-resolution path
+            # entirely — no fetch, no verify, no resolve. Round detection is
+            # unaffected; it runs off the separate get_all_bot_threads call below.
+            if not self.bot_name or not self.config.review.auto_resolve_conversations:
                 return 0, 0, [], []
             try:
                 assert self.provider is not None

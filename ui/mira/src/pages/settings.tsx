@@ -476,6 +476,12 @@ export function SettingsPage() {
                   "Blast radius",
                   "Lists dependent repositories that import code touched by this PR in the walkthrough comment."
                 )}
+                {boolField(
+                  "review",
+                  "auto_resolve_conversations",
+                  "Auto-resolve conversations",
+                  "Automatically resolve bot review threads the LLM verifies as fixed on each review. Turn off to leave comments open until a human resolves them."
+                )}
                 {numField(
                   "review",
                   "max_concurrent_chunks",

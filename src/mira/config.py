@@ -160,6 +160,11 @@ class ReviewConfig(BaseModel):
     # skip the relationship-store lookup and trim the walkthrough.
     blast_radius: bool = True
 
+    # Automatically resolve bot review threads that the LLM verifies as fixed
+    # on each review pass. Disable to leave all bot comments open until a human
+    # resolves them (user-initiated reject/resolve replies still work).
+    auto_resolve_conversations: bool = True
+
 
 class IndexConfig(BaseModel):
     # Skip indexing any file larger than this (bytes). Generated SDKs, vendored
