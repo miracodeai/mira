@@ -50,7 +50,7 @@ def register_dashboard(app: FastAPI) -> None:
 
 # Standalone app — initialized at module load, but routes are registered at
 # the bottom of this file, *after* all @router decorators have run.
-app = FastAPI(title="Mira Dashboard API", version="0.4.0")
+app = FastAPI(title="Mira Dashboard API", version="0.4.1")
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
@@ -187,6 +187,16 @@ class ReviewEventModel(BaseModel):
     duration_ms: int
     categories: str
     created_at: float
+
+
+class ActivityEventModel(ReviewEventModel):
+    owner: str
+    repo: str
+
+
+class ActivityResponse(BaseModel):
+    events: list[ActivityEventModel]
+    repos: list[str]
 
 
 class ReviewStatsModel(BaseModel):
@@ -2165,6 +2175,64 @@ def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventMode
             )
             for e in events
         ]
+
+
+@router.get("/api/activity", response_model=ActivityResponse)
+def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResponse:
+    """Org-wide feed of review events across all repos.
+
+    Flattens per-repo review_events into a single list sorted by created_at
+    (newest first), attaching owner/repo to each. Supports an optional repo
+    filter ("owner/repo") and a case-insensitive search `q` matched across the
+    PR title, PR number, repo slug, and categories (multi-word queries AND).
+    """
+    terms = [t for t in q.lower().split() if t]
+
+    repos = _app_db.list_repos()
+    repo_slugs = sorted(f"{r.owner}/{r.repo}" for r in repos)
+
+    events: list[ActivityEventModel] = []
+    for repo_record in repos:
+        slug = f"{repo_record.owner}/{repo_record.repo}"
+        if repo and slug != repo:
+            continue
+        try:
+            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            for e in store.list_review_events(limit=500):
+                if terms:
+                    haystack = (
+                        f"{e.pr_title} #{e.pr_number} {slug} {e.categories}".lower()
+                    )
+                    if not all(t in haystack for t in terms):
+                        continue
+                events.append(
+                    ActivityEventModel(
+                        id=e.id,
+                        pr_number=e.pr_number,
+                        pr_title=e.pr_title,
+                        pr_url=e.pr_url,
+                        comments_posted=e.comments_posted,
+                        blockers=e.blockers,
+                        warnings=e.warnings,
+                        suggestions=e.suggestions,
+                        files_reviewed=e.files_reviewed,
+                        lines_changed=e.lines_changed,
+                        tokens_used=e.tokens_used,
+                        duration_ms=e.duration_ms,
+                        categories=e.categories,
+                        created_at=e.created_at,
+                        owner=repo_record.owner,
+                        repo=repo_record.repo,
+                    )
+                )
+            store.close()
+        except Exception:
+            logger.warning(
+                "Failed to read activity for %s", slug, exc_info=True
+            )
+
+    events.sort(key=lambda ev: ev.created_at, reverse=True)
+    return ActivityResponse(events=events[:limit], repos=repo_slugs)
 
 
 # Wire dashboard routes + middleware onto the standalone app, after all
