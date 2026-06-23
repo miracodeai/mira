@@ -1,4 +1,5 @@
 import {
+  Activity,
   BookOpen,
   Brain,
   ChevronRight,
@@ -68,6 +69,7 @@ import { UserAvatar } from "@/components/ui/user-avatar"
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/activity", icon: Activity, label: "Activity" },
   { to: "/repos", icon: Database, label: "Repositories" },
   { to: "/packages", icon: Package, label: "Packages" },
   { to: "/vulnerabilities", icon: ShieldAlert, label: "Vulnerabilities" },
@@ -86,6 +88,7 @@ const settingsSubItems = [
 ]
 
 const PAGE_LABELS: Record<string, string> = {
+  activity: "Activity",
   repos: "Repositories",
   packages: "Packages",
   vulnerabilities: "Vulnerabilities",
@@ -222,6 +225,11 @@ export function DashboardLayout() {
                   </div>
                   <div className="flex flex-col leading-tight">
                     <span className="text-sm font-semibold">Mira</span>
+                    {version && (
+                      <span className="text-[10px] text-muted-foreground tabular-nums">
+                        v{version}
+                      </span>
+                    )}
                   </div>
                 </a>
               </SidebarMenuButton>
@@ -296,11 +304,6 @@ export function DashboardLayout() {
           <SidebarMenu>
             <UserMenu />
           </SidebarMenu>
-          {version && (
-            <span className="px-2 pb-1 text-[10px] text-muted-foreground tabular-nums group-data-[collapsible=icon]:hidden">
-              v{version}
-            </span>
-          )}
         </SidebarFooter>
 
         <SidebarRail />

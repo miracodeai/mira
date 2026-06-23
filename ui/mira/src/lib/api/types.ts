@@ -162,6 +162,16 @@ export interface ReviewEventModel {
   created_at: number
 }
 
+export interface ActivityEventModel extends ReviewEventModel {
+  owner: string
+  repo: string
+}
+
+export interface ActivityResponse {
+  events: ActivityEventModel[]
+  repos: string[]
+}
+
 export interface ReviewStatsModel {
   total_reviews: number
   total_comments: number
