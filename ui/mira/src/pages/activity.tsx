@@ -871,17 +871,14 @@ const SEV_DOT: Record<string, string> = {
   nitpick: "bg-sky-500",
 }
 
-type TimelineItem =
-  | { kind: "review"; at: number; review: ActivityReviewModel }
-  | { kind: "reply"; at: number; reply: PRReplyModel }
+type ReviewThread = { review: ActivityReviewModel; replies: PRReplyModel[] }
 
-// Merged conversation timeline. Review passes run newest-first (latest at the
-// top), but each pass's human replies stay grouped *under* that pass in
-// chronological order — so a reply never floats above the review it answers.
-// The dot + connecting line share one centered gutter column so the line runs
-// straight through the middle of each dot.
+// The timeline as a stack of self-contained threads — one card per review
+// pass, with that pass's human replies nested beneath it. Threads run
+// newest-first; replies within a thread stay chronological. Each thread is
+// visually separated rather than strung along one continuous line.
 function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
-  const items: TimelineItem[] = useMemo(() => {
+  const threads: ReviewThread[] = useMemo(() => {
     const passesAsc = [...detail.reviews].sort((a, b) => a.created_at - b.created_at)
     // Attach each reply to the latest pass that precedes it (falling back to the
     // earliest pass for replies older than every pass).
@@ -898,49 +895,35 @@ function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
       repliesByReview.set(target.id, arr)
     }
 
-    const out: TimelineItem[] = []
-    const passesDesc = [...detail.reviews].sort((a, b) => b.created_at - a.created_at)
-    for (const review of passesDesc) {
-      out.push({ kind: "review", at: review.created_at, review })
-      const reps = (repliesByReview.get(review.id) ?? []).sort(
-        (a, b) => a.created_at - b.created_at,
-      )
-      for (const reply of reps) out.push({ kind: "reply", at: reply.created_at, reply })
-    }
-    return out
+    return [...detail.reviews]
+      .sort((a, b) => b.created_at - a.created_at)
+      .map((review) => ({
+        review,
+        replies: (repliesByReview.get(review.id) ?? []).sort(
+          (a, b) => a.created_at - b.created_at,
+        ),
+      }))
   }, [detail])
 
-  if (items.length === 0) {
+  if (threads.length === 0) {
     return <div className="text-xs text-muted-foreground">No activity recorded.</div>
   }
 
   return (
-    <ol>
-      {items.map((it, i) => {
-        const last = i === items.length - 1
-        const id = it.kind === "review" ? `r${it.review.id}` : `h${it.reply.id}`
-        return (
-          <li key={id} className="flex gap-3">
-            <div className="flex flex-col items-center">
-              <span
-                className={cn(
-                  "mt-1 h-2.5 w-2.5 shrink-0 rounded-full ring-4 ring-background",
-                  it.kind === "reply" ? "bg-muted-foreground" : "bg-primary",
-                )}
-              />
-              {!last && <span className="w-px grow bg-border" />}
+    <div className="space-y-3">
+      {threads.map((t) => (
+        <div key={t.review.id} className="rounded-lg border bg-card p-3 shadow-xs">
+          <ReviewEntry review={t.review} />
+          {t.replies.length > 0 && (
+            <div className="mt-3 space-y-3 border-l-2 border-border pl-3">
+              {t.replies.map((r) => (
+                <ReplyEntry key={r.id} reply={r} />
+              ))}
             </div>
-            <div className={cn("flex-1", last ? "pb-1" : "pb-6")}>
-              {it.kind === "review" ? (
-                <ReviewEntry review={it.review} />
-              ) : (
-                <ReplyEntry reply={it.reply} />
-              )}
-            </div>
-          </li>
-        )
-      })}
-    </ol>
+          )}
+        </div>
+      ))}
+    </div>
   )
 }
 
