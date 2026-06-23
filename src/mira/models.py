@@ -378,6 +378,9 @@ class PRInfo:
     repo: str
     # Round 2+ reviews diff against last_reviewed_sha → head_sha; empty falls back to full diff.
     head_sha: str = ""
+    # PR author (the human who opened it) — surfaced in the activity dashboard.
+    author_username: str = ""
+    author_avatar_url: str = ""
 
 
 @dataclass

@@ -40,7 +40,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { api, type ActivityEventModel } from "@/lib/api"
+import {
+  api,
+  type ActivityDetailModel,
+  type ActivityEventModel,
+  type ActivityReviewModel,
+  type PRReplyModel,
+} from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 
@@ -91,6 +97,8 @@ type PRGroup = {
   pr_number: number
   pr_title: string
   pr_url: string
+  author_username: string
+  author_avatar_url: string
   reviews: ActivityEventModel[] // newest first
   latest: ActivityEventModel
   reviewCount: number
@@ -143,6 +151,8 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
       pr_number: latest.pr_number,
       pr_title: latest.pr_title,
       pr_url: latest.pr_url,
+      author_username: latest.author_username,
+      author_avatar_url: latest.author_avatar_url,
       reviews,
       latest,
       reviewCount: reviews.length,
@@ -233,6 +243,33 @@ function splitCategories(categories: string): string[] {
     .split(",")
     .map((c) => c.trim())
     .filter(Boolean)
+}
+
+function AuthorAvatar({
+  username,
+  avatarUrl,
+  className,
+}: {
+  username: string
+  avatarUrl?: string
+  className?: string
+}) {
+  const initial = (username || "?").charAt(0).toUpperCase()
+  return (
+    <span
+      title={username || undefined}
+      className={cn(
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-[10px] font-medium text-muted-foreground ring-1 ring-foreground/10",
+        className,
+      )}
+    >
+      {avatarUrl ? (
+        <img src={avatarUrl} alt={username} className="h-full w-full object-cover" />
+      ) : (
+        initial
+      )}
+    </span>
+  )
 }
 
 function SeverityBadges({
@@ -326,6 +363,15 @@ export function ActivityPage() {
         repo: repo === ALL_REPOS ? undefined : repo,
       }),
     [debouncedSearch, repo, refreshKey],
+  )
+
+  // Full per-PR detail (reviews + comments + files + replies) for the panel.
+  const { data: detail, loading: detailLoading } = useAsync(
+    () =>
+      selected
+        ? api.getActivityDetail(selected.owner, selected.repo, selected.pr_number)
+        : Promise.resolve(null),
+    [selected?.owner, selected?.repo, selected?.pr_number],
   )
 
   const events = useMemo(() => activity?.events ?? [], [activity?.events])
@@ -536,6 +582,7 @@ export function ActivityPage() {
                 <TableHeader className="sticky top-0 z-10 bg-background shadow-[0_1px_0_0_var(--border)]">
                   <TableRow>
                     <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} />
+                    <TableHead>Author</TableHead>
                     <SortHead label="PR" sortKey="pr_number" sort={sort} onSort={toggleSort} />
                     <SortHead label="Reviews" sortKey="reviews" sort={sort} onSort={toggleSort} />
                     <SortHead label="Last reviewed" sortKey="last_reviewed" sort={sort} onSort={toggleSort} />
@@ -554,6 +601,17 @@ export function ActivityPage() {
                     >
                       <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                         {g.owner}/{g.repo}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <AuthorAvatar
+                            username={g.author_username}
+                            avatarUrl={g.author_avatar_url}
+                          />
+                          <span className="truncate text-xs text-muted-foreground">
+                            {g.author_username || "—"}
+                          </span>
+                        </div>
                       </TableCell>
                       <TableCell className="max-w-xs">
                         <div className="flex items-center gap-2">
@@ -680,11 +738,23 @@ export function ActivityPage() {
                     <ExternalLink className="h-4 w-4" />
                   </a>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {selected.owner}/{selected.repo} ·{" "}
-                  {plural(selected.reviewCount, "review")} · last{" "}
-                  {relativeTime(selected.lastReviewedAt)}
-                </p>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <AuthorAvatar
+                    username={selected.author_username}
+                    avatarUrl={selected.author_avatar_url}
+                    className="h-5 w-5"
+                  />
+                  {selected.author_username && (
+                    <span className="font-medium text-foreground">
+                      {selected.author_username}
+                    </span>
+                  )}
+                  <span>
+                    {selected.owner}/{selected.repo} ·{" "}
+                    {plural(selected.reviewCount, "review")} · last{" "}
+                    {relativeTime(selected.lastReviewedAt)}
+                  </span>
+                </div>
               </div>
               <Button
                 variant="ghost"
@@ -735,12 +805,27 @@ export function ActivityPage() {
                 </div>
               )}
 
-              {/* Timeline of review passes */}
+              {/* Conversation timeline — review passes + human replies */}
               <div>
                 <h3 className="mb-4 text-xs font-medium uppercase text-muted-foreground">
                   Timeline
                 </h3>
-                <ReviewTimeline reviews={selected.reviews} />
+                {(() => {
+                  const matched =
+                    detail &&
+                    detail.pr_number === selected.pr_number &&
+                    detail.repo === selected.repo
+                      ? detail
+                      : null
+                  if (!matched) {
+                    return (
+                      <div className="text-xs text-muted-foreground">
+                        {detailLoading ? "Loading timeline…" : "No timeline recorded."}
+                      </div>
+                    )
+                  }
+                  return <ConversationTimeline detail={matched} />
+                })()}
               </div>
             </div>
           </>
@@ -750,56 +835,165 @@ export function ActivityPage() {
   )
 }
 
-// Vertical timeline of a PR's review passes, newest first. The dot and the
-// connecting line live in one centered gutter column so the line always runs
-// straight through the middle of each dot.
-function ReviewTimeline({ reviews }: { reviews: ActivityEventModel[] }) {
+// Per-severity dot color for individual comments in the timeline.
+const SEV_DOT: Record<string, string> = {
+  blocker: "bg-destructive",
+  warning: "bg-amber-500",
+  suggestion: "bg-sky-500",
+  nitpick: "bg-sky-500",
+}
+
+type TimelineItem =
+  | { kind: "review"; at: number; review: ActivityReviewModel }
+  | { kind: "reply"; at: number; reply: PRReplyModel }
+
+// Merged conversation timeline: Mira's review passes interleaved with human
+// replies, oldest first. The dot + connecting line share one centered gutter
+// column so the line runs straight through the middle of each dot.
+function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
+  const items: TimelineItem[] = [
+    ...detail.reviews.map((r) => ({ kind: "review" as const, at: r.created_at, review: r })),
+    ...detail.replies.map((r) => ({ kind: "reply" as const, at: r.created_at, reply: r })),
+  ].sort((a, b) => a.at - b.at)
+
+  if (items.length === 0) {
+    return <div className="text-xs text-muted-foreground">No activity recorded.</div>
+  }
+
   return (
     <ol>
-      {reviews.map((r, i) => {
-        const last = i === reviews.length - 1
+      {items.map((it, i) => {
+        const last = i === items.length - 1
+        const id = it.kind === "review" ? `r${it.review.id}` : `h${it.reply.id}`
         return (
-          <li key={r.id} className="flex gap-3">
+          <li key={id} className="flex gap-3">
             <div className="flex flex-col items-center">
-              <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-primary ring-4 ring-background" />
+              <span
+                className={cn(
+                  "mt-1 h-2.5 w-2.5 shrink-0 rounded-full ring-4 ring-background",
+                  it.kind === "reply" ? "bg-muted-foreground" : "bg-primary",
+                )}
+              />
               {!last && <span className="w-px grow bg-border" />}
             </div>
             <div className={cn("flex-1", last ? "pb-1" : "pb-6")}>
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="text-sm font-medium">
-                  Reviewed {plural(r.files_reviewed, "file")}
-                </span>
-                <span
-                  className="shrink-0 text-xs text-muted-foreground"
-                  title={formatTimestamp(r.created_at)}
-                >
-                  {relativeTime(r.created_at)}
-                </span>
-              </div>
-
-              <div className="mt-2">
-                <SeverityBadges counts={r} />
-              </div>
-
-              {splitCategories(r.categories).length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {splitCategories(r.categories).map((c) => (
-                    <Badge key={c} variant="secondary" className={PILL_RING}>
-                      {c}
-                    </Badge>
-                  ))}
-                </div>
+              {it.kind === "review" ? (
+                <ReviewEntry review={it.review} />
+              ) : (
+                <ReplyEntry reply={it.reply} />
               )}
-
-              <div className="mt-2 text-xs text-muted-foreground">
-                {plural(r.comments_posted, "comment")} · {r.lines_changed.toLocaleString()} lines ·{" "}
-                {r.tokens_used.toLocaleString()} tokens · {(r.duration_ms / 1000).toFixed(1)}s
-              </div>
             </div>
           </li>
         )
       })}
     </ol>
+  )
+}
+
+function ReviewEntry({ review }: { review: ActivityReviewModel }) {
+  return (
+    <>
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-sm font-medium">
+          Mira reviewed {plural(review.files_reviewed, "file")}
+        </span>
+        <span
+          className="shrink-0 text-xs text-muted-foreground"
+          title={formatTimestamp(review.created_at)}
+        >
+          {relativeTime(review.created_at)}
+        </span>
+      </div>
+
+      <div className="mt-2">
+        <SeverityBadges counts={review} />
+      </div>
+
+      {review.comments.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {review.comments.map((c) => (
+            <li key={c.id} className="rounded-md border bg-muted/30 p-2">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 shrink-0 rounded-full",
+                    SEV_DOT[c.severity?.toLowerCase()] ?? "bg-muted-foreground",
+                  )}
+                />
+                <span className="truncate font-mono text-[11px] text-muted-foreground">
+                  {c.path}
+                  {c.line ? `:${c.line}` : ""}
+                </span>
+              </div>
+              {c.title && <div className="mt-1 text-xs font-medium">{c.title}</div>}
+              {c.body && (
+                <div className="mt-0.5 whitespace-pre-wrap text-xs text-muted-foreground">
+                  {c.body}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {review.reviewed_paths.length > 0 && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-muted-foreground">
+            {plural(review.reviewed_paths.length, "file")} reviewed
+          </summary>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {review.reviewed_paths.map((p) => (
+              <span
+                key={p}
+                className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+              >
+                {p}
+              </span>
+            ))}
+          </div>
+        </details>
+      )}
+
+      <div className="mt-2 text-xs text-muted-foreground">
+        {plural(review.comments_posted, "comment")} · {review.lines_changed.toLocaleString()} lines ·{" "}
+        {review.tokens_used.toLocaleString()} tokens · {(review.duration_ms / 1000).toFixed(1)}s
+      </div>
+    </>
+  )
+}
+
+function ReplyEntry({ reply }: { reply: PRReplyModel }) {
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <AuthorAvatar
+            username={reply.author}
+            avatarUrl={reply.author_avatar_url}
+            className="h-5 w-5"
+          />
+          <span className="truncate text-sm font-medium">
+            {reply.author || "Someone"}
+          </span>
+          <span className="shrink-0 text-xs text-muted-foreground">replied</span>
+        </div>
+        <span
+          className="shrink-0 text-xs text-muted-foreground"
+          title={formatTimestamp(reply.created_at)}
+        >
+          {relativeTime(reply.created_at)}
+        </span>
+      </div>
+      {reply.comment_path && (
+        <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+          {reply.comment_path}
+          {reply.comment_line ? `:${reply.comment_line}` : ""}
+        </div>
+      )}
+      {reply.body && (
+        <div className="mt-1 whitespace-pre-wrap text-xs">{reply.body}</div>
+      )}
+    </>
   )
 }
 

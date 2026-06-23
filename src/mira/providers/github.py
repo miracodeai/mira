@@ -171,6 +171,7 @@ class GitHubProvider(BaseProvider):
         def _fetch() -> PRInfo:
             gh_repo = self._github.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
+            user = pr.user
             return PRInfo(
                 title=pr.title or "",
                 description=pr.body or "",
@@ -181,6 +182,8 @@ class GitHubProvider(BaseProvider):
                 owner=owner,
                 repo=repo,
                 head_sha=pr.head.sha or "",
+                author_username=(user.login or "") if user else "",
+                author_avatar_url=(user.avatar_url or "") if user else "",
             )
 
         try:
