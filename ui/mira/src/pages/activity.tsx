@@ -875,14 +875,40 @@ type TimelineItem =
   | { kind: "review"; at: number; review: ActivityReviewModel }
   | { kind: "reply"; at: number; reply: PRReplyModel }
 
-// Merged conversation timeline: Mira's review passes interleaved with human
-// replies, oldest first. The dot + connecting line share one centered gutter
-// column so the line runs straight through the middle of each dot.
+// Merged conversation timeline. Review passes run newest-first (latest at the
+// top), but each pass's human replies stay grouped *under* that pass in
+// chronological order — so a reply never floats above the review it answers.
+// The dot + connecting line share one centered gutter column so the line runs
+// straight through the middle of each dot.
 function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
-  const items: TimelineItem[] = [
-    ...detail.reviews.map((r) => ({ kind: "review" as const, at: r.created_at, review: r })),
-    ...detail.replies.map((r) => ({ kind: "reply" as const, at: r.created_at, reply: r })),
-  ].sort((a, b) => b.at - a.at) // newest first
+  const items: TimelineItem[] = useMemo(() => {
+    const passesAsc = [...detail.reviews].sort((a, b) => a.created_at - b.created_at)
+    // Attach each reply to the latest pass that precedes it (falling back to the
+    // earliest pass for replies older than every pass).
+    const repliesByReview = new Map<number, PRReplyModel[]>()
+    for (const reply of detail.replies) {
+      if (passesAsc.length === 0) break
+      let target = passesAsc[0]
+      for (const p of passesAsc) {
+        if (p.created_at <= reply.created_at) target = p
+        else break
+      }
+      const arr = repliesByReview.get(target.id) ?? []
+      arr.push(reply)
+      repliesByReview.set(target.id, arr)
+    }
+
+    const out: TimelineItem[] = []
+    const passesDesc = [...detail.reviews].sort((a, b) => b.created_at - a.created_at)
+    for (const review of passesDesc) {
+      out.push({ kind: "review", at: review.created_at, review })
+      const reps = (repliesByReview.get(review.id) ?? []).sort(
+        (a, b) => a.created_at - b.created_at,
+      )
+      for (const reply of reps) out.push({ kind: "reply", at: reply.created_at, reply })
+    }
+    return out
+  }, [detail])
 
   if (items.length === 0) {
     return <div className="text-xs text-muted-foreground">No activity recorded.</div>
