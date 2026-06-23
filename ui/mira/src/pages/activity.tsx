@@ -274,6 +274,23 @@ function AuthorAvatar({
   )
 }
 
+// Mira's identity mark — mirrors AuthorAvatar so a review pass is visually
+// distinct from a human reply in the timeline.
+function MiraMark({ className }: { className?: string }) {
+  return (
+    <span
+      title="Mira"
+      className={cn(
+        "inline-flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-primary/10 ring-1 ring-primary/20",
+        className,
+      )}
+    >
+      <img src="/logo.png" alt="Mira" className="hidden h-3.5 w-3.5 dark:block" />
+      <img src="/logo-light.png" alt="Mira" className="h-3.5 w-3.5 dark:hidden" />
+    </span>
+  )
+}
+
 function SeverityBadges({
   counts,
 }: {
@@ -922,7 +939,7 @@ function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
             <div className={cn("flex-1", last ? "pb-1" : "pb-8")}>
               <ReviewEntry review={t.review} />
               {t.replies.length > 0 && (
-                <div className="mt-3 space-y-3 border-l-2 border-border pl-3">
+                <div className="mt-3 space-y-2">
                   {t.replies.map((r) => (
                     <ReplyEntry key={r.id} reply={r} />
                   ))}
@@ -939,10 +956,13 @@ function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
 function ReviewEntry({ review }: { review: ActivityReviewModel }) {
   return (
     <>
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="text-sm font-medium">
-          Mira reviewed {plural(review.files_reviewed, "file")}
-        </span>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <MiraMark />
+          <span className="truncate text-sm font-medium">
+            Mira reviewed {plural(review.files_reviewed, "file")}
+          </span>
+        </div>
         <span
           className="shrink-0 text-xs text-muted-foreground"
           title={formatTimestamp(review.created_at)}
@@ -1008,9 +1028,11 @@ function ReviewEntry({ review }: { review: ActivityReviewModel }) {
   )
 }
 
+// A human reply, styled as a tinted message bubble so it's clearly distinct
+// from Mira's review entries on the timeline.
 function ReplyEntry({ reply }: { reply: PRReplyModel }) {
   return (
-    <>
+    <div className="rounded-lg bg-muted/60 p-2.5">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <AuthorAvatar
@@ -1039,7 +1061,7 @@ function ReplyEntry({ reply }: { reply: PRReplyModel }) {
       {reply.body && (
         <div className="mt-1 whitespace-pre-wrap text-xs">{reply.body}</div>
       )}
-    </>
+    </div>
   )
 }
 
