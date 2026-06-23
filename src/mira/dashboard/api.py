@@ -2198,34 +2198,36 @@ def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResp
             continue
         try:
             store = IndexStore.open(repo_record.owner, repo_record.repo)
-            for e in store.list_review_events(limit=500):
-                if terms:
-                    haystack = (
-                        f"{e.pr_title} #{e.pr_number} {slug} {e.categories}".lower()
+            try:
+                for e in store.list_review_events(limit=500):
+                    if terms:
+                        haystack = (
+                            f"{e.pr_title} #{e.pr_number} {slug} {e.categories}".lower()
+                        )
+                        if not all(t in haystack for t in terms):
+                            continue
+                    events.append(
+                        ActivityEventModel(
+                            id=e.id,
+                            pr_number=e.pr_number,
+                            pr_title=e.pr_title,
+                            pr_url=e.pr_url,
+                            comments_posted=e.comments_posted,
+                            blockers=e.blockers,
+                            warnings=e.warnings,
+                            suggestions=e.suggestions,
+                            files_reviewed=e.files_reviewed,
+                            lines_changed=e.lines_changed,
+                            tokens_used=e.tokens_used,
+                            duration_ms=e.duration_ms,
+                            categories=e.categories,
+                            created_at=e.created_at,
+                            owner=repo_record.owner,
+                            repo=repo_record.repo,
+                        )
                     )
-                    if not all(t in haystack for t in terms):
-                        continue
-                events.append(
-                    ActivityEventModel(
-                        id=e.id,
-                        pr_number=e.pr_number,
-                        pr_title=e.pr_title,
-                        pr_url=e.pr_url,
-                        comments_posted=e.comments_posted,
-                        blockers=e.blockers,
-                        warnings=e.warnings,
-                        suggestions=e.suggestions,
-                        files_reviewed=e.files_reviewed,
-                        lines_changed=e.lines_changed,
-                        tokens_used=e.tokens_used,
-                        duration_ms=e.duration_ms,
-                        categories=e.categories,
-                        created_at=e.created_at,
-                        owner=repo_record.owner,
-                        repo=repo_record.repo,
-                    )
-                )
-            store.close()
+            finally:
+                store.close()
         except Exception:
             logger.warning(
                 "Failed to read activity for %s", slug, exc_info=True
