@@ -910,20 +910,29 @@ function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
   }
 
   return (
-    <div className="space-y-3">
-      {threads.map((t) => (
-        <div key={t.review.id} className="rounded-lg border bg-card p-3 shadow-xs">
-          <ReviewEntry review={t.review} />
-          {t.replies.length > 0 && (
-            <div className="mt-3 space-y-3 border-l-2 border-border pl-3">
-              {t.replies.map((r) => (
-                <ReplyEntry key={r.id} reply={r} />
-              ))}
+    <ol>
+      {threads.map((t, i) => {
+        const last = i === threads.length - 1
+        return (
+          <li key={t.review.id} className="flex gap-3">
+            <div className="flex flex-col items-center">
+              <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-primary ring-4 ring-background" />
+              {!last && <span className="w-px grow bg-border" />}
             </div>
-          )}
-        </div>
-      ))}
-    </div>
+            <div className={cn("flex-1", last ? "pb-1" : "pb-8")}>
+              <ReviewEntry review={t.review} />
+              {t.replies.length > 0 && (
+                <div className="mt-3 space-y-3 border-l-2 border-border pl-3">
+                  {t.replies.map((r) => (
+                    <ReplyEntry key={r.id} reply={r} />
+                  ))}
+                </div>
+              )}
+            </div>
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
@@ -947,27 +956,27 @@ function ReviewEntry({ review }: { review: ActivityReviewModel }) {
       </div>
 
       {review.comments.length > 0 && (
-        <ul className="mt-3 space-y-2">
+        <ul className="mt-3 space-y-3">
           {review.comments.map((c) => (
-            <li key={c.id} className="rounded-md border bg-muted/30 p-2">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={cn(
-                    "h-1.5 w-1.5 shrink-0 rounded-full",
-                    SEV_DOT[c.severity?.toLowerCase()] ?? "bg-muted-foreground",
-                  )}
-                />
+            <li key={c.id} className="flex gap-2">
+              <span
+                className={cn(
+                  "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                  SEV_DOT[c.severity?.toLowerCase()] ?? "bg-muted-foreground",
+                )}
+              />
+              <div className="min-w-0 flex-1">
                 <span className="truncate font-mono text-[11px] text-muted-foreground">
                   {c.path}
                   {c.line ? `:${c.line}` : ""}
                 </span>
+                {c.title && <div className="mt-0.5 text-xs font-medium">{c.title}</div>}
+                {c.body && (
+                  <div className="mt-0.5 whitespace-pre-wrap text-xs text-muted-foreground">
+                    {c.body}
+                  </div>
+                )}
               </div>
-              {c.title && <div className="mt-1 text-xs font-medium">{c.title}</div>}
-              {c.body && (
-                <div className="mt-0.5 whitespace-pre-wrap text-xs text-muted-foreground">
-                  {c.body}
-                </div>
-              )}
             </li>
           ))}
         </ul>
