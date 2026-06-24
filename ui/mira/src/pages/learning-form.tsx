@@ -1,9 +1,10 @@
-import { ChevronLeft, Loader2 } from "lucide-react"
+import { ChevronLeft, Loader2, Trash2 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { ConfirmButton } from "@/components/ui/confirm-button"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -114,6 +115,17 @@ export function LearningFormPage() {
     }
   }
 
+  const remove = async () => {
+    if (!editId) return
+    setError(null)
+    try {
+      await api.deleteLearnedRule(editOwner, editRepo, Number(editId))
+      navigate("/learnings")
+    } catch (e) {
+      setError(parseDetail(e))
+    }
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6">
       <button
@@ -206,14 +218,29 @@ export function LearningFormPage() {
 
           {error && <p className="text-sm break-words text-destructive">{error}</p>}
 
-          <div className="flex gap-2">
-            <Button onClick={save} disabled={saving || !ruleText.trim() || !repoKey}>
-              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {isEdit ? "Save changes" : "Add learning"}
-            </Button>
-            <Button variant="ghost" onClick={() => navigate("/learnings")}>
-              Cancel
-            </Button>
+          <div className="flex items-center justify-between">
+            <div className="flex gap-2">
+              <Button onClick={save} disabled={saving || !ruleText.trim() || !repoKey}>
+                {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {isEdit ? "Save changes" : "Add learning"}
+              </Button>
+              <Button variant="ghost" onClick={() => navigate("/learnings")}>
+                Cancel
+              </Button>
+            </div>
+            {isEdit && (
+              <ConfirmButton
+                variant="ghost"
+                className="text-destructive"
+                destructive
+                dialogTitle="Delete learning?"
+                dialogDescription="This permanently removes the rule. This cannot be undone."
+                confirmLabel="Delete"
+                onConfirm={remove}
+              >
+                <Trash2 className="mr-2 h-4 w-4" /> Delete
+              </ConfirmButton>
+            )}
           </div>
         </>
       )}

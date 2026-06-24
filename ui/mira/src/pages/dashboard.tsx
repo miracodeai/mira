@@ -1,4 +1,4 @@
-import { Brain } from "lucide-react"
+import { Clock } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useNavigate } from "react-router"
 import {
@@ -590,7 +590,7 @@ function PendingLearningsCard({ rules }: { rules: OrgLearnedRuleModel[] }) {
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 ring-1 ring-amber-500/30 dark:text-amber-400">
-              <Brain className="h-4 w-4" />
+              <Clock className="h-4 w-4" />
             </span>
             <div>
               <CardTitle className="text-base">
