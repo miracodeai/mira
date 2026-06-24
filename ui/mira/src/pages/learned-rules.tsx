@@ -199,14 +199,14 @@ export function LearnedRulesPage() {
             {pending.length > 0 && (
               <button
                 onClick={() => setTab("pending")}
-                className="flex w-full items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-left text-xs text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-400"
+                className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-400"
               >
                 <Clock className="h-3 w-3 shrink-0" />
                 <span>
                   <span className="font-medium">{pending.length}</span> awaiting
                   approval
                 </span>
-                <span className="ml-auto font-medium">Review →</span>
+                <span className="font-medium">· Review →</span>
               </button>
             )}
             <LearningsTable
@@ -303,7 +303,9 @@ function LearningsTable({
       const bv = sortValue(b, sort.key, tab)
       if (av < bv) return -1 * dir
       if (av > bv) return 1 * dir
-      return 0
+      // Stable tiebreaker by id so toggling a row (which bumps updated_at and
+      // reorders the refetch) doesn't make rows jump around.
+      return a.id - b.id
     })
   }, [rows, sort, tab])
 
