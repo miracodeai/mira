@@ -1612,6 +1612,7 @@ class LearnedRuleModel(BaseModel):
     sample_count: int = 0
     active: bool = True
     status: str = "approved"  # 'pending' | 'approved' | 'rejected'
+    created_by: str = ""  # admin username for manual rules; '' for synthesized
     updated_at: float = 0.0
 
 
@@ -1648,6 +1649,7 @@ def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
                 sample_count=r.sample_count,
                 active=r.active,
                 status=r.status,
+                created_by=r.created_by,
                 updated_at=r.updated_at,
             )
             for r in rules
@@ -1684,6 +1686,7 @@ def list_org_learned_rules(limit: int = 500, status: str = "") -> list[OrgLearne
             sample_count=r["sample_count"],
             active=r.get("active", True),
             status=r.get("status", "approved"),
+            created_by=r.get("created_by", ""),
             updated_at=r["updated_at"] or 0.0,
         )
         for r in rows
@@ -1719,6 +1722,7 @@ def get_learned_rule_detail(
         sample_count=r.sample_count,
         active=r.active,
         status=r.status,
+        created_by=r.created_by,
         updated_at=r.updated_at,
     )
 
@@ -1754,11 +1758,13 @@ def create_learned_rule(
     owner: str, repo: str, body: LearnedRuleInput, request: Request
 ) -> LearnedRuleModel:
     _require_admin(request)
+    user = getattr(request.state, "user", None)
     with _open_store(owner, repo) as store:
         r = store.create_learned_rule(
             rule_text=body.rule_text,
             category=body.category,
             path_pattern=body.path_pattern,
+            created_by=getattr(user, "username", "") if user else "",
         )
     return LearnedRuleModel(
         id=r.id,
@@ -1769,6 +1775,7 @@ def create_learned_rule(
         sample_count=r.sample_count,
         active=r.active,
         status=r.status,
+        created_by=r.created_by,
         updated_at=r.updated_at,
     )
 

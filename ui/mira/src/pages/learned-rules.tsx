@@ -23,6 +23,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { ConfirmButton } from "@/components/ui/confirm-button"
 import { GitHubIcon } from "@/components/ui/github-icon"
 import { Input } from "@/components/ui/input"
+import { UserAvatar } from "@/components/ui/user-avatar"
 import {
   Select,
   SelectContent,
@@ -66,6 +67,34 @@ type SortDir = "asc" | "desc"
 
 function ruleKey(r: OrgLearnedRuleModel) {
   return `${r.owner}/${r.repo}#${r.id}`
+}
+
+// Who added a learning: the admin's avatar for manual rules, a Mira mark for
+// auto-synthesized ones (no single human author).
+function AddedBy({
+  rule,
+  withName = false,
+}: {
+  rule: OrgLearnedRuleModel
+  withName?: boolean
+}) {
+  if (rule.created_by) {
+    return (
+      <span className="flex items-center gap-1.5" title={`Added by ${rule.created_by}`}>
+        <UserAvatar seed={rule.created_by} className="h-5 w-5" />
+        {withName && <span className="truncate text-xs">{rule.created_by}</span>}
+      </span>
+    )
+  }
+  return (
+    <span className="flex items-center gap-1.5" title="Synthesized by Mira">
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-primary/10 ring-1 ring-primary/20">
+        <img src="/logo.png" alt="Mira" className="hidden h-3 w-3 dark:block" />
+        <img src="/logo-light.png" alt="Mira" className="h-3 w-3 dark:hidden" />
+      </span>
+      {withName && <span className="truncate text-xs text-muted-foreground">Mira</span>}
+    </span>
+  )
 }
 
 function formatDate(epochSeconds: number) {
@@ -394,6 +423,12 @@ export function LearnedRulesPage() {
                 />
                 <Meta label="Samples" value={String(selected.sample_count)} />
                 <Meta label="Updated" value={formatDate(selected.updated_at)} />
+                <div>
+                  <dt className="text-xs text-muted-foreground">Added by</dt>
+                  <dd className="mt-1">
+                    <AddedBy rule={selected} withName />
+                  </dd>
+                </div>
               </dl>
             </div>
 
@@ -491,6 +526,7 @@ function LearningsTable({
             <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} className="w-56" />
             <SortHead label="Learning" sortKey="learning" sort={sort} onSort={toggleSort} />
             <SortHead label="Status" sortKey="status" sort={sort} onSort={toggleSort} className="w-28" />
+            <TableHead className="w-40">Created by</TableHead>
             <SortHead label="Updated" sortKey="updated" sort={sort} onSort={toggleSort} className="w-28" />
           </TableRow>
         </TableHeader>
@@ -523,6 +559,9 @@ function LearningsTable({
                 </TableCell>
                 <TableCell className="align-top">
                   <StatusBadge rule={r} />
+                </TableCell>
+                <TableCell className="align-top">
+                  <AddedBy rule={r} withName />
                 </TableCell>
                 <TableCell
                   className="align-top whitespace-nowrap text-xs text-muted-foreground"

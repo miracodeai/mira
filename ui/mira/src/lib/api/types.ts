@@ -115,6 +115,7 @@ export interface LearnedRuleModel {
   sample_count: number
   active: boolean
   status: "pending" | "approved" | "rejected"
+  created_by: string
   updated_at: number
 }
 

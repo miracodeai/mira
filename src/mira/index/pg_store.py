@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     sample_count INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'approved',
+    created_by TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
@@ -210,6 +211,10 @@ def _get_conn(url: str):
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
                     "TEXT NOT NULL DEFAULT 'approved'"
                 )
+                cur.execute(
+                    "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS created_by "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
             _schema_initialized = True
         return _pg_conn
 
@@ -226,7 +231,8 @@ def list_learned_rules_org_wide(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, owner, repo, rule_text, source_signal, category, "
-            "path_pattern, sample_count, active, status, created_at, updated_at "
+            "path_pattern, sample_count, active, status, created_by, "
+            "created_at, updated_at "
             f"FROM learned_rules {where} "
             "ORDER BY updated_at DESC LIMIT %s",
             params,
@@ -244,8 +250,9 @@ def list_learned_rules_org_wide(
             "sample_count": r[7],
             "active": bool(r[8]),
             "status": r[9],
-            "created_at": r[10],
-            "updated_at": r[11],
+            "created_by": r[10],
+            "created_at": r[11],
+            "updated_at": r[12],
         }
         for r in rows
     ]
@@ -1097,7 +1104,7 @@ class PgIndexStore(_StoreSharedMixin):
 
     _LR_COLS = (
         "id, rule_text, source_signal, category, path_pattern, "
-        "sample_count, active, status, created_at, updated_at"
+        "sample_count, active, status, created_by, created_at, updated_at"
     )
 
     def _row_to_learned_rule(self, r: tuple) -> LearnedRuleRow:
@@ -1110,8 +1117,9 @@ class PgIndexStore(_StoreSharedMixin):
             sample_count=r[5],
             active=bool(r[6]),
             status=r[7],
-            created_at=r[8],
-            updated_at=r[9],
+            created_by=r[8],
+            created_at=r[9],
+            updated_at=r[10],
         )
 
     def list_active_learned_rules(self) -> list[LearnedRuleRow]:
@@ -1153,14 +1161,15 @@ class PgIndexStore(_StoreSharedMixin):
         source_signal: str = "manual",
         status: str = "approved",
         active: bool = True,
+        created_by: str = "",
     ) -> LearnedRuleRow:
         now = time.time()
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO learned_rules "
                 "(owner, repo, rule_text, source_signal, category, path_pattern, "
-                "sample_count, active, status, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s) RETURNING id",
+                "sample_count, active, status, created_by, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -1170,6 +1179,7 @@ class PgIndexStore(_StoreSharedMixin):
                     path_pattern,
                     int(active),
                     status,
+                    created_by,
                     now,
                     now,
                 ),

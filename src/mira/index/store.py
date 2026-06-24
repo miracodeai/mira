@@ -116,6 +116,8 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     -- 'pending' | 'approved' | 'rejected'. Auto-synthesized rules start
     -- 'pending' and only feed reviews once an admin approves them.
     status TEXT NOT NULL DEFAULT 'approved',
+    -- Username of the admin who authored a manual rule; '' for synthesized.
+    created_by TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0
 );
@@ -245,6 +247,7 @@ class LearnedRuleRow:
     sample_count: int
     active: bool = True
     status: str = "approved"  # 'pending' | 'approved' | 'rejected'
+    created_by: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -302,6 +305,10 @@ class IndexStore(_StoreSharedMixin):
         if "status" not in lr_cols:
             self._conn.execute(
                 "ALTER TABLE learned_rules ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'"
+            )
+        if "created_by" not in lr_cols:
+            self._conn.execute(
+                "ALTER TABLE learned_rules ADD COLUMN created_by TEXT NOT NULL DEFAULT ''"
             )
         self._conn.commit()
 
@@ -942,13 +949,14 @@ class IndexStore(_StoreSharedMixin):
             sample_count=r[5],
             active=bool(r[6]),
             status=r[7],
-            created_at=r[8],
-            updated_at=r[9],
+            created_by=r[8],
+            created_at=r[9],
+            updated_at=r[10],
         )
 
     _LR_COLS = (
         "id, rule_text, source_signal, category, path_pattern, "
-        "sample_count, active, status, created_at, updated_at"
+        "sample_count, active, status, created_by, created_at, updated_at"
     )
 
     def list_active_learned_rules(self) -> list[LearnedRuleRow]:
@@ -987,14 +995,26 @@ class IndexStore(_StoreSharedMixin):
         source_signal: str = "manual",
         status: str = "approved",
         active: bool = True,
+        created_by: str = "",
     ) -> LearnedRuleRow:
         """Insert an admin-authored rule (not deduped against existing)."""
         now = time.time()
         cur = self._conn.execute(
             "INSERT INTO learned_rules "
             "(rule_text, source_signal, category, path_pattern, sample_count, "
-            "active, status, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
-            (rule_text, source_signal, category, path_pattern, int(active), status, now, now),
+            "active, status, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            (
+                rule_text,
+                source_signal,
+                category,
+                path_pattern,
+                int(active),
+                status,
+                created_by,
+                now,
+                now,
+            ),
         )
         self._conn.commit()
         return self.get_learned_rule(cur.lastrowid or 0)  # type: ignore[return-value]
@@ -1369,12 +1389,14 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = No
                 if status and not has_status and status != "approved":
                     continue
                 status_sel = "status" if has_status else "'approved'"
+                created_by_sel = "created_by" if "created_by" in cols else "''"
                 where, params = "", ()
                 if status and has_status:
                     where, params = " WHERE status = ?", (status,)
                 cur = conn.execute(
                     "SELECT id, rule_text, source_signal, category, path_pattern, "
-                    f"sample_count, active, {status_sel}, created_at, updated_at "
+                    f"sample_count, active, {status_sel}, {created_by_sel}, "
+                    "created_at, updated_at "
                     f"FROM learned_rules{where} ORDER BY updated_at DESC",
                     params,
                 )
@@ -1391,8 +1413,9 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = No
                             "sample_count": r[5],
                             "active": bool(r[6]),
                             "status": r[7],
-                            "created_at": r[8],
-                            "updated_at": r[9],
+                            "created_by": r[8],
+                            "created_at": r[9],
+                            "updated_at": r[10],
                         }
                     )
             finally:
