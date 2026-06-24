@@ -12,6 +12,9 @@ export const rulesApi = {
   listRepoLearnedRules: (owner: string, repo: string) =>
     fetchJson<LearnedRuleModel[]>(`/api/repos/${owner}/${repo}/learned-rules`),
 
+  getLearnedRule: (owner: string, repo: string, id: number) =>
+    fetchJson<OrgLearnedRuleModel>(`/api/learned-rules/${owner}/${repo}/${id}`),
+
   approveLearnedRule: (owner: string, repo: string, id: number) =>
     postJson<{ ok: boolean }>(
       `/api/learned-rules/${owner}/${repo}/${id}/approve`,

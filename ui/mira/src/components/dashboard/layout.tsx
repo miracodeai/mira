@@ -98,6 +98,7 @@ const PAGE_LABELS: Record<string, string> = {
   settings: "Settings",
   users: "Users",
   new: "New",
+  edit: "Edit",
   account: "Account",
   password: "Password",
   models: "Models",

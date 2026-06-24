@@ -1695,6 +1695,34 @@ def list_org_learned_rules(limit: int = 500, status: str = "") -> list[OrgLearne
 # before they influence reviews. Admins can also author/edit/delete rules.
 
 
+@router.get(
+    "/api/learned-rules/{owner}/{repo}/{rule_id}",
+    response_model=OrgLearnedRuleModel,
+)
+def get_learned_rule_detail(
+    owner: str, repo: str, rule_id: int, request: Request
+) -> OrgLearnedRuleModel:
+    """Single learned rule — backs the edit page."""
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        r = store.get_learned_rule(rule_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Learning not found")
+    return OrgLearnedRuleModel(
+        id=r.id,
+        owner=owner,
+        repo=repo,
+        rule_text=r.rule_text,
+        source_signal=r.source_signal,
+        category=r.category,
+        path_pattern=r.path_pattern,
+        sample_count=r.sample_count,
+        active=r.active,
+        status=r.status,
+        updated_at=r.updated_at,
+    )
+
+
 @router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/approve")
 def approve_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
     _require_admin(request)

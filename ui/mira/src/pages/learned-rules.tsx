@@ -7,6 +7,7 @@ import {
   ChevronsUpDown,
   ChevronUp,
   Clock,
+  Lock,
   Pencil,
   Plus,
   Power,
@@ -14,20 +15,13 @@ import {
   X,
 } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
+import { useNavigate } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { ConfirmButton } from "@/components/ui/confirm-button"
 import { GitHubIcon } from "@/components/ui/github-icon"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -50,7 +44,6 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs"
-import { Textarea } from "@/components/ui/textarea"
 import { api, type OrgLearnedRuleModel } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
@@ -68,7 +61,6 @@ const SIGNAL_LABEL: Record<string, string> = {
   manual: "Added by admin",
 }
 
-type RuleDraft = { rule_text: string; category: string; path_pattern: string }
 type SortKey = "repo" | "learning" | "status"
 type SortDir = "asc" | "desc"
 
@@ -85,6 +77,7 @@ export function LearnedRulesPage() {
   useDocumentTitle("Learnings")
   const { user } = useAuth()
   const isAdmin = !!user?.is_admin
+  const navigate = useNavigate()
 
   const [refreshKey, setRefreshKey] = useState(0)
   const refresh = () => setRefreshKey((k) => k + 1)
@@ -94,9 +87,10 @@ export function LearnedRulesPage() {
   const [enabledFilter, setEnabledFilter] = useState<"all" | "enabled" | "disabled">(
     "all",
   )
-  const [editing, setEditing] = useState<OrgLearnedRuleModel | null>(null)
-  const [creating, setCreating] = useState(false)
   const [selected, setSelected] = useState<OrgLearnedRuleModel | null>(null)
+
+  const editHref = (r: OrgLearnedRuleModel) =>
+    `/learnings/edit?owner=${r.owner}&repo=${r.repo}&id=${r.id}`
   const [panelOpen, setPanelOpen] = useState(false)
 
   const openDetail = (r: OrgLearnedRuleModel) => {
@@ -113,12 +107,8 @@ export function LearnedRulesPage() {
   }, [panelOpen])
 
   const { data: rules, loading } = useAsync(
-    () => api.listLearnedRules(isAdmin ? "" : "approved").catch(() => []),
-    [refreshKey, isAdmin],
-  )
-  const { data: repos } = useAsync(
-    () => (isAdmin ? api.listRepos().catch(() => []) : Promise.resolve([])),
-    [isAdmin],
+    () => api.listLearnedRules("").catch(() => []),
+    [refreshKey],
   )
 
   const approved = useMemo(
@@ -229,7 +219,7 @@ export function LearnedRulesPage() {
           </p>
         </div>
         {isAdmin && (
-          <Button size="sm" onClick={() => setCreating(true)}>
+          <Button size="sm" onClick={() => navigate("/learnings/new")}>
             <Plus className="mr-1 h-4 w-4" /> Add learning
           </Button>
         )}
@@ -237,16 +227,6 @@ export function LearnedRulesPage() {
 
       {firstLoad ? (
         <div className="text-sm text-muted-foreground">Loading…</div>
-      ) : !isAdmin ? (
-        <div className="space-y-3">
-          {filters}
-          <LearningsTable
-            rows={applyFilter(approved)}
-            onSelect={openDetail}
-            selectedKey={panelOpen ? selectedKey : null}
-            resetKey={`${query}|${repoFilter}|${enabledFilter}`}
-          />
-        </div>
       ) : (
         <Tabs value={tab} onValueChange={(v) => setTab(v as "approved" | "pending")}>
           <TabsList>
@@ -270,7 +250,7 @@ export function LearnedRulesPage() {
           <div className="mt-4">{filters}</div>
 
           <TabsContent value="approved" className="mt-3 space-y-2">
-            {pending.length > 0 && (
+            {isAdmin && pending.length > 0 && (
               <button
                 onClick={() => setTab("pending")}
                 className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-400"
@@ -291,7 +271,13 @@ export function LearnedRulesPage() {
             />
           </TabsContent>
 
-          <TabsContent value="pending" className="mt-3">
+          <TabsContent value="pending" className="mt-3 space-y-2">
+            {!isAdmin && (
+              <div className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
+                <Lock className="h-3 w-3 shrink-0" />
+                Only admins can approve learnings.
+              </div>
+            )}
             <LearningsTable
               rows={applyFilter(pending)}
               onSelect={openDetail}
@@ -355,7 +341,7 @@ export function LearnedRulesPage() {
                     </Button>
                   )
                 ) : null}
-                <Button variant="outline" onClick={() => setEditing(selected)}>
+                <Button variant="outline" onClick={() => navigate(editHref(selected))}>
                   <Pencil className="mr-1 h-4 w-4" /> Edit
                 </Button>
               </div>
@@ -383,24 +369,6 @@ export function LearnedRulesPage() {
           </>
         )}
       </div>
-
-      {(creating || editing) && (
-        <RuleDialog
-          mode={editing ? "edit" : "create"}
-          rule={editing}
-          repos={(repos ?? []).map((r) => `${r.owner}/${r.repo}`)}
-          onClose={() => {
-            setCreating(false)
-            setEditing(null)
-          }}
-          onSaved={() => {
-            setCreating(false)
-            setEditing(null)
-            closeDetail()
-            refresh()
-          }}
-        />
-      )}
     </div>
   )
 }
@@ -644,136 +612,5 @@ function SortHead({
         />
       </button>
     </TableHead>
-  )
-}
-
-function RuleDialog({
-  mode,
-  rule,
-  repos,
-  onClose,
-  onSaved,
-}: {
-  mode: "create" | "edit"
-  rule: OrgLearnedRuleModel | null
-  repos: string[]
-  onClose: () => void
-  onSaved: () => void
-}) {
-  const [repoKey, setRepoKey] = useState(
-    rule ? `${rule.owner}/${rule.repo}` : (repos[0] ?? ""),
-  )
-  const [draft, setDraft] = useState<RuleDraft>({
-    rule_text: rule?.rule_text ?? "",
-    category: rule?.category ?? "other",
-    path_pattern: rule?.path_pattern ?? "",
-  })
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const save = async () => {
-    if (!repoKey || !draft.rule_text.trim()) {
-      setError("Pick a repo and enter the rule text.")
-      return
-    }
-    const [owner, repo] = repoKey.split("/")
-    setSaving(true)
-    setError(null)
-    try {
-      if (mode === "edit" && rule) {
-        await api.updateLearnedRule(owner, repo, rule.id, draft)
-      } else {
-        await api.createLearnedRule(owner, repo, draft)
-      }
-      onSaved()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
-            {mode === "edit" ? "Edit learning" : "Add learning"}
-          </DialogTitle>
-          <DialogDescription>
-            {mode === "edit"
-              ? "Update this learned rule. Admin-edited rules stay approved."
-              : "Author a rule directly. It's approved immediately and feeds future reviews."}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <span className="text-xs font-medium text-muted-foreground">Repo</span>
-            {mode === "edit" ? (
-              <div className="font-mono text-sm">{repoKey}</div>
-            ) : (
-              <Select value={repoKey} onValueChange={setRepoKey}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a repo" />
-                </SelectTrigger>
-                <SelectContent>
-                  {repos.map((r) => (
-                    <SelectItem key={r} value={r}>
-                      {r}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
-
-          <div className="space-y-1">
-            <span className="text-xs font-medium text-muted-foreground">Rule</span>
-            <Textarea
-              rows={4}
-              placeholder="e.g. Don't flag missing docstrings on internal helpers."
-              value={draft.rule_text}
-              onChange={(e) => setDraft({ ...draft, rule_text: e.target.value })}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <span className="text-xs font-medium text-muted-foreground">
-                Category
-              </span>
-              <Input
-                value={draft.category}
-                onChange={(e) => setDraft({ ...draft, category: e.target.value })}
-              />
-            </div>
-            <div className="space-y-1">
-              <span className="text-xs font-medium text-muted-foreground">
-                Path pattern (optional)
-              </span>
-              <Input
-                placeholder="e.g. tests/"
-                value={draft.path_pattern}
-                onChange={(e) =>
-                  setDraft({ ...draft, path_pattern: e.target.value })
-                }
-              />
-            </div>
-          </div>
-
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button onClick={save} disabled={saving}>
-            {saving ? "Saving…" : mode === "edit" ? "Save" : "Add"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }
