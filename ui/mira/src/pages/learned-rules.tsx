@@ -1,15 +1,19 @@
-import { Brain, Check, Clock, Pencil, Plus, X } from "lucide-react"
+import {
+  Brain,
+  Check,
+  Clock,
+  Pencil,
+  Plus,
+  Power,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react"
 import { useMemo, useState } from "react"
-import { Link } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { ConfirmButton } from "@/components/ui/confirm-button"
 import {
   Dialog,
@@ -28,6 +32,14 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import {
   Tabs,
   TabsContent,
   TabsList,
@@ -39,34 +51,9 @@ import { useAuth } from "@/lib/auth"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 
-const SIGNAL_LABEL: Record<string, string> = {
-  reject_pattern: "Rejected pattern",
-  accept_pattern: "Accepted pattern",
-  human_pattern: "Human reviewer style",
-  manual: "Added by admin",
-}
-
-const SIGNAL_STYLE: Record<string, string> = {
-  reject_pattern: "text-red-300 border-red-500/40 bg-red-500/10",
-  accept_pattern: "text-emerald-300 border-emerald-500/40 bg-emerald-500/10",
-  human_pattern: "text-violet-300 border-violet-500/40 bg-violet-500/10",
-  manual: "text-sky-300 border-sky-500/40 bg-sky-500/10",
-}
+const ALL_REPOS = "__all__"
 
 type RuleDraft = { rule_text: string; category: string; path_pattern: string }
-
-function groupByRepo(
-  rules: OrgLearnedRuleModel[],
-): [string, OrgLearnedRuleModel[]][] {
-  const map = new Map<string, OrgLearnedRuleModel[]>()
-  for (const r of rules) {
-    const key = `${r.owner}/${r.repo}`
-    const list = map.get(key)
-    if (list) list.push(r)
-    else map.set(key, [r])
-  }
-  return [...map.entries()].sort((a, b) => b[1].length - a[1].length)
-}
 
 export function LearnedRulesPage() {
   useDocumentTitle("Learnings")
@@ -76,10 +63,11 @@ export function LearnedRulesPage() {
   const [refreshKey, setRefreshKey] = useState(0)
   const refresh = () => setRefreshKey((k) => k + 1)
   const [tab, setTab] = useState<"approved" | "pending">("approved")
+  const [query, setQuery] = useState("")
+  const [repoFilter, setRepoFilter] = useState(ALL_REPOS)
   const [editing, setEditing] = useState<OrgLearnedRuleModel | null>(null)
   const [creating, setCreating] = useState(false)
 
-  // Admins fetch everything (to populate the queue); others see approved only.
   const { data: rules, loading } = useAsync(
     () => api.listLearnedRules(isAdmin ? "" : "approved").catch(() => []),
     [refreshKey, isAdmin],
@@ -88,8 +76,6 @@ export function LearnedRulesPage() {
     () => (isAdmin ? api.listRepos().catch(() => []) : Promise.resolve([])),
     [isAdmin],
   )
-  const { data: version } = useAsync(() => api.getVersion().catch(() => null), [])
-  const botName = version?.bot_name ?? "miracodeai"
 
   const approved = useMemo(
     () => (rules ?? []).filter((r) => r.status === "approved"),
@@ -100,7 +86,52 @@ export function LearnedRulesPage() {
     [rules],
   )
 
+  const repoOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const r of rules ?? []) set.add(`${r.owner}/${r.repo}`)
+    return [...set].sort()
+  }, [rules])
+
+  const applyFilter = (list: OrgLearnedRuleModel[]) => {
+    const q = query.trim().toLowerCase()
+    return list.filter((r) => {
+      const slug = `${r.owner}/${r.repo}`
+      if (repoFilter !== ALL_REPOS && slug !== repoFilter) return false
+      if (!q) return true
+      return `${r.rule_text} ${r.category} ${r.path_pattern} ${slug}`
+        .toLowerCase()
+        .includes(q)
+    })
+  }
+
   const act = (fn: () => Promise<unknown>) => fn().then(refresh).catch(() => {})
+
+  const filters = (
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+      <div className="relative flex-1">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          placeholder="Filter learnings…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="pl-8"
+        />
+      </div>
+      <Select value={repoFilter} onValueChange={setRepoFilter}>
+        <SelectTrigger className="sm:w-64">
+          <SelectValue placeholder="All repos" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ALL_REPOS}>All repos</SelectItem>
+          {repoOptions.map((r) => (
+            <SelectItem key={r} value={r}>
+              {r}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  )
 
   return (
     <div className="space-y-6 p-6">
@@ -122,10 +153,10 @@ export function LearnedRulesPage() {
       {loading ? (
         <div className="text-sm text-muted-foreground">Loading…</div>
       ) : !isAdmin ? (
-        <RuleGroups
-          groups={groupByRepo(approved)}
-          emptyBotName={botName}
-        />
+        <div className="space-y-3">
+          {filters}
+          <LearningsTable rows={applyFilter(approved)} />
+        </div>
       ) : (
         <Tabs value={tab} onValueChange={(v) => setTab(v as "approved" | "pending")}>
           <TabsList>
@@ -146,44 +177,43 @@ export function LearnedRulesPage() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="approved" className="mt-4">
-            <RuleGroups
-              groups={groupByRepo(approved)}
+          <TabsContent value="approved" className="mt-4 space-y-3">
+            {pending.length > 0 && (
+              <button
+                onClick={() => setTab("pending")}
+                className="flex w-full items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-left text-sm text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-400"
+              >
+                <Clock className="h-4 w-4 shrink-0" />
+                <span>
+                  <span className="font-medium">{pending.length}</span> learning
+                  {pending.length !== 1 ? "s" : ""} awaiting approval
+                </span>
+                <span className="ml-auto font-medium">Review queue →</span>
+              </button>
+            )}
+            {filters}
+            <LearningsTable
+              rows={applyFilter(approved)}
               admin
               tab="approved"
               onEdit={setEditing}
               onAct={act}
-              emptyBotName={botName}
             />
           </TabsContent>
 
-          <TabsContent value="pending" className="mt-4">
-            {pending.length === 0 ? (
-              <Card>
-                <CardContent className="space-y-2 py-12 text-center">
-                  <Clock className="mx-auto h-8 w-8 text-muted-foreground" />
-                  <p className="text-sm font-medium">Nothing awaiting approval</p>
-                  <p className="mx-auto max-w-md text-sm text-muted-foreground">
-                    New patterns Mira synthesizes from feedback land here for an
-                    admin to approve before they affect reviews.
-                  </p>
-                </CardContent>
-              </Card>
-            ) : (
-              <RuleGroups
-                groups={groupByRepo(pending)}
-                admin
-                tab="pending"
-                onEdit={setEditing}
-                onAct={act}
-                emptyBotName={botName}
-              />
-            )}
+          <TabsContent value="pending" className="mt-4 space-y-3">
+            {filters}
+            <LearningsTable
+              rows={applyFilter(pending)}
+              admin
+              tab="pending"
+              onEdit={setEditing}
+              onAct={act}
+            />
           </TabsContent>
         </Tabs>
       )}
 
-      {/* Create / edit dialog */}
       {(creating || editing) && (
         <RuleDialog
           mode={editing ? "edit" : "create"}
@@ -204,179 +234,128 @@ export function LearnedRulesPage() {
   )
 }
 
-function RuleGroups({
-  groups,
+function LearningsTable({
+  rows,
   admin = false,
   tab,
   onEdit,
   onAct,
-  emptyBotName,
 }: {
-  groups: [string, OrgLearnedRuleModel[]][]
+  rows: OrgLearnedRuleModel[]
   admin?: boolean
   tab?: "approved" | "pending"
   onEdit?: (r: OrgLearnedRuleModel) => void
   onAct?: (fn: () => Promise<unknown>) => void
-  emptyBotName: string
 }) {
-  if (groups.length === 0) {
+  if (rows.length === 0) {
     return (
       <Card>
-        <CardContent className="space-y-3 py-12 text-center">
-          <Brain className="mx-auto h-8 w-8 text-muted-foreground" />
-          <p className="text-sm font-medium">No learnings yet</p>
-          <p className="mx-auto max-w-md text-sm text-muted-foreground">
-            Mira learns from{" "}
-            <code className="font-mono">@{emptyBotName} reject</code> dismissals
-            and from human review comments on merged PRs.
-          </p>
+        <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
+          <Brain className="h-8 w-8 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">No learnings here.</p>
         </CardContent>
       </Card>
     )
   }
 
   return (
-    <div className="space-y-4">
-      {groups.map(([repoKey, repoRules]) => {
-        const [owner, repo] = repoKey.split("/")
-        return (
-          <Card key={repoKey}>
-            <CardHeader>
-              <div className="flex items-center gap-2">
-                <CardTitle className="text-base">
-                  <Link
-                    to={`/repos/${owner}/${repo}`}
-                    className="font-mono hover:underline"
-                  >
-                    {repoKey}
-                  </Link>
-                </CardTitle>
-                <Badge variant="secondary" className="tabular-nums">
-                  {repoRules.length}
-                </Badge>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {repoRules.map((rule) => (
-                  <RuleRow
-                    key={rule.id}
-                    rule={rule}
-                    admin={admin}
-                    tab={tab}
-                    onEdit={onEdit}
-                    onAct={onAct}
-                  />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )
-      })}
-    </div>
-  )
-}
-
-function RuleRow({
-  rule,
-  admin,
-  tab,
-  onEdit,
-  onAct,
-}: {
-  rule: OrgLearnedRuleModel
-  admin?: boolean
-  tab?: "approved" | "pending"
-  onEdit?: (r: OrgLearnedRuleModel) => void
-  onAct?: (fn: () => Promise<unknown>) => void
-}) {
-  const { owner, repo, id } = rule
-  return (
-    <div className="space-y-1.5 rounded-lg border p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge
-          variant="outline"
-          className={`text-[10px] ${SIGNAL_STYLE[rule.source_signal] ?? ""}`}
-        >
-          {SIGNAL_LABEL[rule.source_signal] ?? rule.source_signal}
-        </Badge>
-        {rule.category && (
-          <span className="text-xs font-medium text-muted-foreground">
-            {rule.category}
-          </span>
-        )}
-        {rule.path_pattern && (
-          <span className="font-mono text-xs text-muted-foreground">
-            {rule.path_pattern}
-          </span>
-        )}
-        {admin && tab === "approved" && !rule.active && (
-          <Badge variant="outline" className="text-[10px] text-muted-foreground">
-            Disabled
-          </Badge>
-        )}
-        <span className="ml-auto text-xs text-muted-foreground">
-          {rule.sample_count} sample{rule.sample_count !== 1 ? "s" : ""}
-        </span>
-      </div>
-
-      <p
-        className={cn(
-          "text-sm text-foreground/90",
-          admin && tab === "approved" && !rule.active && "opacity-60",
-        )}
-      >
-        {rule.rule_text}
-      </p>
-
-      {admin && onAct && (
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          {tab === "pending" ? (
-            <>
-              <Button
-                size="sm"
-                onClick={() => onAct(() => api.approveLearnedRule(owner, repo, id))}
-              >
-                <Check className="mr-1 h-3.5 w-3.5" /> Approve
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onAct(() => api.rejectLearnedRule(owner, repo, id))}
-              >
-                <X className="mr-1 h-3.5 w-3.5" /> Reject
-              </Button>
-            </>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                onAct(() =>
-                  api.setLearnedRuleActive(owner, repo, id, !rule.active),
-                )
-              }
-            >
-              {rule.active ? "Disable" : "Enable"}
-            </Button>
-          )}
-          <Button size="sm" variant="ghost" onClick={() => onEdit?.(rule)}>
-            <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
-          </Button>
-          <ConfirmButton
-            size="sm"
-            variant="ghost"
-            destructive
-            dialogTitle="Delete learning?"
-            dialogDescription="This permanently removes the rule. This cannot be undone."
-            confirmLabel="Delete"
-            onConfirm={() => onAct(() => api.deleteLearnedRule(owner, repo, id))}
-          >
-            Delete
-          </ConfirmButton>
-        </div>
-      )}
-    </div>
+    <Card className="overflow-hidden py-0">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-48">Repo</TableHead>
+            <TableHead>Learning</TableHead>
+            {admin && <TableHead className="w-px text-right">Actions</TableHead>}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r) => (
+            <TableRow key={`${r.owner}/${r.repo}#${r.id}`}>
+              <TableCell className="whitespace-nowrap align-top font-mono text-xs text-muted-foreground">
+                {r.owner}/{r.repo}
+              </TableCell>
+              <TableCell className="align-top">
+                <div
+                  className={cn(
+                    "text-sm",
+                    admin && tab === "approved" && !r.active && "opacity-50",
+                  )}
+                >
+                  {r.rule_text}
+                </div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {r.category}
+                  {r.path_pattern ? ` · ${r.path_pattern}` : ""}
+                  {admin && tab === "approved" && !r.active ? " · disabled" : ""}
+                </div>
+              </TableCell>
+              {admin && onAct && (
+                <TableCell className="align-top text-right whitespace-nowrap">
+                  {tab === "pending" ? (
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          onAct(() => api.approveLearnedRule(r.owner, r.repo, r.id))
+                        }
+                      >
+                        <Check className="mr-1 h-3.5 w-3.5" /> Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          onAct(() => api.rejectLearnedRule(r.owner, r.repo, r.id))
+                        }
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex justify-end gap-0.5">
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        title={r.active ? "Disable" : "Enable"}
+                        onClick={() =>
+                          onAct(() =>
+                            api.setLearnedRuleActive(r.owner, r.repo, r.id, !r.active),
+                          )
+                        }
+                      >
+                        <Power className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        title="Edit"
+                        onClick={() => onEdit?.(r)}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <ConfirmButton
+                        size="icon-sm"
+                        variant="ghost"
+                        destructive
+                        tooltip="Delete"
+                        dialogTitle="Delete learning?"
+                        dialogDescription="This permanently removes the rule. This cannot be undone."
+                        confirmLabel="Delete"
+                        onConfirm={() =>
+                          onAct(() => api.deleteLearnedRule(r.owner, r.repo, r.id))
+                        }
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </ConfirmButton>
+                    </div>
+                  )}
+                </TableCell>
+              )}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </Card>
   )
 }
 
