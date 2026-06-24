@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router"
 
 import { DashboardLayout } from "@/components/dashboard/layout"
 import { SetupModal } from "@/components/dashboard/setup-modal"
+import { Toaster } from "@/components/ui/sonner"
 import { UninstallModal } from "@/components/dashboard/uninstall-modal"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
@@ -177,6 +178,7 @@ function AppShell() {
 export function App() {
   return (
     <BrowserRouter>
+      <Toaster />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route

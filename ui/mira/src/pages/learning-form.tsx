@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import { toast } from "@/components/ui/sonner"
 import { useDocumentTitle } from "@/lib/hooks"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
@@ -107,9 +108,11 @@ export function LearningFormPage() {
       } else {
         await api.createLearnedRule(owner, repo, body)
       }
+      toast.success(isEdit ? "Learning saved" : "Learning added")
       navigate("/learnings")
     } catch (e) {
       setError(parseDetail(e))
+      toast.error("Couldn't save learning", { description: parseDetail(e) })
     } finally {
       setSaving(false)
     }
@@ -120,9 +123,11 @@ export function LearningFormPage() {
     setError(null)
     try {
       await api.deleteLearnedRule(editOwner, editRepo, Number(editId))
+      toast.success("Learning deleted")
       navigate("/learnings")
     } catch (e) {
       setError(parseDetail(e))
+      toast.error("Couldn't delete learning", { description: parseDetail(e) })
     }
   }
 

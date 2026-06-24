@@ -46,6 +46,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs"
+import { toast } from "@/components/ui/sonner"
 import { api, type OrgLearnedRuleModel } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
@@ -157,8 +158,8 @@ export function LearnedRulesPage() {
     return () => window.removeEventListener("keydown", onKey)
   }, [panelOpen])
 
-  const { data: rules, loading } = useAsync(
-    () => api.listLearnedRules("").catch(() => []),
+  const { data: rules, loading, error } = useAsync(
+    () => api.listLearnedRules(""),
     [refreshKey],
   )
 
@@ -193,7 +194,17 @@ export function LearnedRulesPage() {
     })
   }
 
-  const act = (fn: () => Promise<unknown>) => fn().then(refresh).catch(() => {})
+  const act = (fn: () => Promise<unknown>, successMsg?: string) =>
+    fn()
+      .then(() => {
+        refresh()
+        if (successMsg) toast.success(successMsg)
+      })
+      .catch((e) =>
+        toast.error("Action failed", {
+          description: e instanceof Error ? e.message : String(e),
+        }),
+      )
 
   // After approving/rejecting in the queue, advance to the next pending rule
   // so the admin can clear the queue without reopening the panel — close only
@@ -213,17 +224,20 @@ export function LearnedRulesPage() {
   // Panel actions operate on the selected rule.
   const approveSel = () => {
     if (!selected) return
-    act(() => api.approveLearnedRule(selected.owner, selected.repo, selected.id))
+    act(() => api.approveLearnedRule(selected.owner, selected.repo, selected.id), "Approved")
     advancePending()
   }
   const rejectSel = () => {
     if (!selected) return
-    act(() => api.rejectLearnedRule(selected.owner, selected.repo, selected.id))
+    act(() => api.rejectLearnedRule(selected.owner, selected.repo, selected.id), "Rejected")
     advancePending()
   }
   const toggleSel = (active: boolean) => {
     if (!selected) return
-    act(() => api.setLearnedRuleActive(selected.owner, selected.repo, selected.id, active))
+    act(
+      () => api.setLearnedRuleActive(selected.owner, selected.repo, selected.id, active),
+      active ? "Enabled" : "Disabled",
+    )
     setSelected({ ...selected, active })
   }
   // Enabled/disabled only applies to approved rules, so only offer it there.
@@ -234,6 +248,7 @@ export function LearnedRulesPage() {
       <div className="relative flex-1">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
+          aria-label="Filter learnings"
           placeholder="Filter learnings…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -277,6 +292,7 @@ export function LearnedRulesPage() {
         onClick={refresh}
         disabled={loading}
         title="Refresh"
+        aria-label="Refresh learnings"
       >
         <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
         Refresh
@@ -307,6 +323,10 @@ export function LearnedRulesPage() {
 
       {firstLoad ? (
         <div className="text-sm text-muted-foreground">Loading…</div>
+      ) : error ? (
+        <div className="text-sm text-destructive">
+          Couldn't load learnings: {error}
+        </div>
       ) : (
         <Tabs
           value={tab}

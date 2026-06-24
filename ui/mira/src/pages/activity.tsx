@@ -298,8 +298,9 @@ export function ActivityPage() {
   }, [panelOpen])
 
   // Live mode: tick a 1s countdown; when it hits zero, refetch and reset.
+  // Pause while a detail panel is open so the table doesn't shift underneath.
   useEffect(() => {
-    if (!live) return
+    if (!live || panelOpen) return
     setCountdown(LIVE_INTERVAL_SECS)
     const id = setInterval(() => {
       setCountdown((c) => {
@@ -311,14 +312,14 @@ export function ActivityPage() {
       })
     }, 1000)
     return () => clearInterval(id)
-  }, [live])
+  }, [live, panelOpen])
 
   const { data: timeseries, loading: chartLoading } = useAsync(
     () => api.getTimeseries(period),
     [period, refreshKey],
   )
 
-  const { data: activity, loading } = useAsync(
+  const { data: activity, loading, error } = useAsync(
     () =>
       api.listActivity({
         limit: 1000,
@@ -447,6 +448,7 @@ export function ActivityPage() {
         <div className="relative flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
+            aria-label="Search activity"
             placeholder="Search by PR title, number, repo, or category…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -484,6 +486,7 @@ export function ActivityPage() {
           onClick={refresh}
           disabled={loading}
           title="Refresh"
+          aria-label="Refresh activity"
         >
           <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
           Refresh
@@ -493,6 +496,8 @@ export function ActivityPage() {
           size="sm"
           onClick={() => setLive((v) => !v)}
           title={live ? "Live — auto-refreshing" : "Enable live auto-refresh"}
+          aria-label={live ? "Disable live auto-refresh" : "Enable live auto-refresh"}
+          aria-pressed={live}
         >
           <span
             className={cn(
@@ -519,6 +524,10 @@ export function ActivityPage() {
         {loading ? (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
             Loading…
+          </div>
+        ) : error ? (
+          <div className="flex flex-1 items-center justify-center p-12 text-center text-sm text-destructive">
+            Couldn't load activity: {error}
           </div>
         ) : sortedPRs.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-12 text-center">
