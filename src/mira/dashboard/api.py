@@ -1604,17 +1604,30 @@ class RuleCreate(BaseModel):
 
 
 class LearnedRuleModel(BaseModel):
+    id: int = 0
     rule_text: str
-    source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern"
+    source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern" | "manual"
     category: str
     path_pattern: str = ""
     sample_count: int = 0
+    active: bool = True
+    status: str = "approved"  # 'pending' | 'approved' | 'rejected'
     updated_at: float = 0.0
 
 
 class OrgLearnedRuleModel(LearnedRuleModel):
     owner: str
     repo: str
+
+
+class LearnedRuleInput(BaseModel):
+    rule_text: str
+    category: str = "other"
+    path_pattern: str = ""
+
+
+class LearnedRuleActiveInput(BaseModel):
+    active: bool
 
 
 @router.get(
@@ -1627,11 +1640,14 @@ def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
         rules = store.list_active_learned_rules()
         return [
             LearnedRuleModel(
+                id=r.id,
                 rule_text=r.rule_text,
                 source_signal=r.source_signal,
                 category=r.category,
                 path_pattern=r.path_pattern,
                 sample_count=r.sample_count,
+                active=r.active,
+                status=r.status,
                 updated_at=r.updated_at,
             )
             for r in rules
@@ -1639,20 +1655,26 @@ def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
 
 
 @router.get("/api/learned-rules", response_model=list[OrgLearnedRuleModel])
-def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
-    """Active learned rules across every repo in the org."""
+def list_org_learned_rules(limit: int = 500, status: str = "") -> list[OrgLearnedRuleModel]:
+    """Learned rules across every repo in the org.
+
+    `status` filters by approval state ('pending'|'approved'|'rejected');
+    empty returns all so admins can manage the full set.
+    """
     db_url = os.environ.get("DATABASE_URL", "")
     capped = max(1, min(limit, 2000))
+    status_filter = status or None
     if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
         from mira.index.pg_store import list_learned_rules_org_wide
 
-        rows = list_learned_rules_org_wide(db_url, limit=capped)
+        rows = list_learned_rules_org_wide(db_url, limit=capped, status=status_filter)
     else:
         from mira.index.store import list_learned_rules_org_wide_sqlite
 
-        rows = list_learned_rules_org_wide_sqlite(limit=capped)
+        rows = list_learned_rules_org_wide_sqlite(limit=capped, status=status_filter)
     return [
         OrgLearnedRuleModel(
+            id=r.get("id", 0),
             owner=r["owner"],
             repo=r["repo"],
             rule_text=r["rule_text"],
@@ -1660,10 +1682,85 @@ def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
             category=r["category"],
             path_pattern=r["path_pattern"],
             sample_count=r["sample_count"],
+            active=r.get("active", True),
+            status=r.get("status", "approved"),
             updated_at=r["updated_at"] or 0.0,
         )
         for r in rows
     ]
+
+
+# ── Learnings approval queue + CRUD (admin only) ───────────────────────────
+# Auto-synthesized learnings land 'pending' and must be approved by an admin
+# before they influence reviews. Admins can also author/edit/delete rules.
+
+
+@router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/approve")
+def approve_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.set_learned_rule_status(rule_id, "approved")
+    return {"ok": True}
+
+
+@router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/reject")
+def reject_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.set_learned_rule_status(rule_id, "rejected")
+    return {"ok": True}
+
+
+@router.patch("/api/learned-rules/{owner}/{repo}/{rule_id}/active")
+def set_learned_rule_active(
+    owner: str, repo: str, rule_id: int, body: LearnedRuleActiveInput, request: Request
+) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.set_learned_rule_active(rule_id, body.active)
+    return {"ok": True}
+
+
+@router.post("/api/learned-rules/{owner}/{repo}", response_model=LearnedRuleModel)
+def create_learned_rule(
+    owner: str, repo: str, body: LearnedRuleInput, request: Request
+) -> LearnedRuleModel:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        r = store.create_learned_rule(
+            rule_text=body.rule_text,
+            category=body.category,
+            path_pattern=body.path_pattern,
+        )
+    return LearnedRuleModel(
+        id=r.id,
+        rule_text=r.rule_text,
+        source_signal=r.source_signal,
+        category=r.category,
+        path_pattern=r.path_pattern,
+        sample_count=r.sample_count,
+        active=r.active,
+        status=r.status,
+        updated_at=r.updated_at,
+    )
+
+
+@router.put("/api/learned-rules/{owner}/{repo}/{rule_id}")
+def update_learned_rule(
+    owner: str, repo: str, rule_id: int, body: LearnedRuleInput, request: Request
+) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.update_learned_rule(rule_id, body.rule_text, body.category, body.path_pattern)
+    return {"ok": True}
+
+
+@router.delete("/api/learned-rules/{owner}/{repo}/{rule_id}")
+def delete_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.delete_learned_rule(rule_id)
+    return {"ok": True}
 
 
 @router.get("/api/repos/{owner}/{repo}/rules", response_model=list[RuleModel])

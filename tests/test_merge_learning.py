@@ -136,7 +136,7 @@ class TestSynthesizeRules:
             _fb(store, signal="rejected", category="style", pr=i)
         n = synthesize_rules(store)
         assert n >= 1
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert any(r.source_signal == "reject_pattern" for r in rules)
 
     def test_positive_rule_on_high_accept_rate(self, store):
@@ -145,7 +145,7 @@ class TestSynthesizeRules:
             _fb(store, signal="accepted", category="bug", pr=i)
         n = synthesize_rules(store)
         assert n >= 1
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert any(r.source_signal == "accept_pattern" and r.category == "bug" for r in rules)
 
     def test_low_accept_rate_no_positive_rule(self, store):
@@ -155,7 +155,7 @@ class TestSynthesizeRules:
         for i in range(3, 6):
             _fb(store, signal="rejected", category="clarity", pr=i)
         synthesize_rules(store)
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert not any(r.source_signal == "accept_pattern" for r in rules)
 
     def test_reject_pattern_suppresses_accept_rule(self, store):
@@ -166,7 +166,7 @@ class TestSynthesizeRules:
         for i in range(5, 15):
             _fb(store, signal="accepted", category="style", pr=i)
         synthesize_rules(store)
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         # Only the reject_pattern rule should exist for this category.
         style_rules = [r for r in rules if r.category == "style"]
         assert all(r.source_signal == "reject_pattern" for r in style_rules)
@@ -227,7 +227,7 @@ class TestSynthesizeFromHumanReviews:
         assert n == 2
         llm.complete.assert_called_once()
         # Verify stored as human_pattern source
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         human_rules = [r for r in rules if r.source_signal == "human_pattern"]
         assert len(human_rules) == 2
 
@@ -556,7 +556,7 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
     fake_llm.complete.assert_called_once()
 
     # One human_pattern rule stored.
-    rules = store.list_active_learned_rules()
+    rules = store.list_learned_rules()
     human_rules = [r for r in rules if r.source_signal == "human_pattern"]
     assert len(human_rules) == 1
     assert "raw sql" in human_rules[0].rule_text.lower()
