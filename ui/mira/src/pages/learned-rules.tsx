@@ -59,10 +59,28 @@ import { cn } from "@/lib/utils"
 
 const ALL_REPOS = "__all__"
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
+// Blue highlight on a filter control when it's narrowing results (matches Activity).
+const ACTIVE_FILTER = "border-blue-500 ring-1 ring-blue-500/30"
+
+const SIGNAL_LABEL: Record<string, string> = {
+  reject_pattern: "Rejected pattern",
+  accept_pattern: "Accepted pattern",
+  human_pattern: "Human reviewer style",
+  manual: "Added by admin",
+}
 
 type RuleDraft = { rule_text: string; category: string; path_pattern: string }
 type SortKey = "repo" | "learning" | "status"
 type SortDir = "asc" | "desc"
+
+function ruleKey(r: OrgLearnedRuleModel) {
+  return `${r.owner}/${r.repo}#${r.id}`
+}
+
+function formatDate(epochSeconds: number) {
+  if (!epochSeconds) return "—"
+  return new Date(epochSeconds * 1000).toLocaleString()
+}
 
 export function LearnedRulesPage() {
   useDocumentTitle("Learnings")
@@ -76,6 +94,21 @@ export function LearnedRulesPage() {
   const [repoFilter, setRepoFilter] = useState(ALL_REPOS)
   const [editing, setEditing] = useState<OrgLearnedRuleModel | null>(null)
   const [creating, setCreating] = useState(false)
+  const [selected, setSelected] = useState<OrgLearnedRuleModel | null>(null)
+  const [panelOpen, setPanelOpen] = useState(false)
+
+  const openDetail = (r: OrgLearnedRuleModel) => {
+    setSelected(r)
+    setPanelOpen(true)
+  }
+  const closeDetail = () => setPanelOpen(false)
+
+  useEffect(() => {
+    if (!panelOpen) return
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeDetail()
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [panelOpen])
 
   const { data: rules, loading } = useAsync(
     () => api.listLearnedRules(isAdmin ? "" : "approved").catch(() => []),
@@ -115,6 +148,28 @@ export function LearnedRulesPage() {
 
   const act = (fn: () => Promise<unknown>) => fn().then(refresh).catch(() => {})
 
+  // Panel actions operate on the selected rule.
+  const approveSel = () => {
+    if (!selected) return
+    act(() => api.approveLearnedRule(selected.owner, selected.repo, selected.id))
+    closeDetail()
+  }
+  const rejectSel = () => {
+    if (!selected) return
+    act(() => api.rejectLearnedRule(selected.owner, selected.repo, selected.id))
+    closeDetail()
+  }
+  const toggleSel = (active: boolean) => {
+    if (!selected) return
+    act(() => api.setLearnedRuleActive(selected.owner, selected.repo, selected.id, active))
+    setSelected({ ...selected, active })
+  }
+  const deleteSel = () => {
+    if (!selected) return
+    act(() => api.deleteLearnedRule(selected.owner, selected.repo, selected.id))
+    closeDetail()
+  }
+
   const filters = (
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
       <div className="relative flex-1">
@@ -123,11 +178,11 @@ export function LearnedRulesPage() {
           placeholder="Filter learnings…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="pl-8"
+          className={cn("pl-8", query && ACTIVE_FILTER)}
         />
       </div>
       <Select value={repoFilter} onValueChange={setRepoFilter}>
-        <SelectTrigger className="sm:w-64">
+        <SelectTrigger className={cn("sm:w-64", repoFilter !== ALL_REPOS && ACTIVE_FILTER)}>
           <SelectValue placeholder="All repos" />
         </SelectTrigger>
         <SelectContent>
@@ -142,9 +197,8 @@ export function LearnedRulesPage() {
     </div>
   )
 
-  // Only show the full-page loader on first load — refetches (after an
-  // approve/edit) keep the current table mounted so it doesn't flicker.
   const firstLoad = loading && !rules
+  const selectedKey = selected ? ruleKey(selected) : null
 
   return (
     <div className="space-y-6 p-6">
@@ -170,6 +224,8 @@ export function LearnedRulesPage() {
           {filters}
           <LearningsTable
             rows={applyFilter(approved)}
+            onSelect={openDetail}
+            selectedKey={panelOpen ? selectedKey : null}
             resetKey={`${query}|${repoFilter}`}
           />
         </div>
@@ -211,10 +267,8 @@ export function LearnedRulesPage() {
             )}
             <LearningsTable
               rows={applyFilter(approved)}
-              admin
-              tab="approved"
-              onEdit={setEditing}
-              onAct={act}
+              onSelect={openDetail}
+              selectedKey={panelOpen ? selectedKey : null}
               resetKey={`approved|${query}|${repoFilter}`}
             />
           </TabsContent>
@@ -222,15 +276,110 @@ export function LearnedRulesPage() {
           <TabsContent value="pending" className="mt-3">
             <LearningsTable
               rows={applyFilter(pending)}
-              admin
-              tab="pending"
-              onEdit={setEditing}
-              onAct={act}
+              onSelect={openDetail}
+              selectedKey={panelOpen ? selectedKey : null}
               resetKey={`pending|${query}|${repoFilter}`}
             />
           </TabsContent>
         </Tabs>
       )}
+
+      {/* Detail side panel */}
+      <div
+        aria-hidden={!panelOpen}
+        className={cn(
+          "fixed right-0 top-12 bottom-0 z-30 flex w-full max-w-[560px] flex-col border-l bg-background shadow-2xl transition-transform duration-300 ease-in-out",
+          panelOpen ? "translate-x-0" : "pointer-events-none translate-x-full",
+        )}
+      >
+        {selected && (
+          <>
+            <div className="flex items-start justify-between gap-3 border-b p-6">
+              <div className="min-w-0 space-y-1.5">
+                <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                  <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
+                  {selected.owner}/{selected.repo}
+                </div>
+                <StatusBadge rule={selected} />
+              </div>
+              <Button variant="ghost" size="icon-sm" onClick={closeDetail} aria-label="Close">
+                <X />
+              </Button>
+            </div>
+
+            <div className="flex-1 space-y-6 overflow-y-auto p-6">
+              <div>
+                <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">
+                  Learning
+                </h3>
+                <p className="whitespace-pre-wrap text-sm">{selected.rule_text}</p>
+              </div>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
+                <Meta label="Category" value={selected.category || "—"} />
+                <Meta label="Path pattern" value={selected.path_pattern || "Any"} />
+                <Meta
+                  label="Source"
+                  value={SIGNAL_LABEL[selected.source_signal] ?? selected.source_signal}
+                />
+                <Meta label="Samples" value={String(selected.sample_count)} />
+                <Meta label="Updated" value={formatDate(selected.updated_at)} />
+              </dl>
+            </div>
+
+            {isAdmin && (
+              <div className="space-y-2 border-t p-6">
+                {selected.status === "pending" ? (
+                  <div className="flex gap-2">
+                    <Button className="flex-1" onClick={approveSel}>
+                      <Check className="mr-1 h-4 w-4" /> Approve
+                    </Button>
+                    <Button variant="outline" className="flex-1" onClick={rejectSel}>
+                      <X className="mr-1 h-4 w-4" /> Reject
+                    </Button>
+                  </div>
+                ) : selected.status === "approved" ? (
+                  selected.active ? (
+                    <ConfirmButton
+                      variant="outline"
+                      className="w-full"
+                      dialogTitle="Disable learning?"
+                      dialogDescription="It will stop influencing reviews until you re-enable it."
+                      confirmLabel="Disable"
+                      onConfirm={() => toggleSel(false)}
+                    >
+                      <Power className="mr-1 h-4 w-4" /> Disable
+                    </ConfirmButton>
+                  ) : (
+                    <Button variant="outline" className="w-full" onClick={() => toggleSel(true)}>
+                      <Power className="mr-1 h-4 w-4" /> Enable
+                    </Button>
+                  )
+                ) : null}
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    className="flex-1"
+                    onClick={() => setEditing(selected)}
+                  >
+                    <Pencil className="mr-1 h-4 w-4" /> Edit
+                  </Button>
+                  <ConfirmButton
+                    variant="ghost"
+                    className="flex-1"
+                    destructive
+                    dialogTitle="Delete learning?"
+                    dialogDescription="This permanently removes the rule. This cannot be undone."
+                    confirmLabel="Delete"
+                    onConfirm={deleteSel}
+                  >
+                    <Trash2 className="mr-1 h-4 w-4" /> Delete
+                  </ConfirmButton>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {(creating || editing) && (
         <RuleDialog
@@ -244,6 +393,7 @@ export function LearnedRulesPage() {
           onSaved={() => {
             setCreating(false)
             setEditing(null)
+            closeDetail()
             refresh()
           }}
         />
@@ -252,30 +402,35 @@ export function LearnedRulesPage() {
   )
 }
 
-function sortValue(r: OrgLearnedRuleModel, key: SortKey, tab?: string): string {
+function Meta({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="text-sm font-medium">{value}</dd>
+    </div>
+  )
+}
+
+function sortValue(r: OrgLearnedRuleModel, key: SortKey): string {
   switch (key) {
     case "repo":
       return `${r.owner}/${r.repo}`.toLowerCase()
     case "learning":
       return r.rule_text.toLowerCase()
     case "status":
-      return tab === "pending" ? "pending" : r.active ? "enabled" : "disabled"
+      return r.status === "approved" ? (r.active ? "enabled" : "disabled") : r.status
   }
 }
 
 function LearningsTable({
   rows,
-  admin = false,
-  tab,
-  onEdit,
-  onAct,
+  onSelect,
+  selectedKey,
   resetKey,
 }: {
   rows: OrgLearnedRuleModel[]
-  admin?: boolean
-  tab?: "approved" | "pending"
-  onEdit?: (r: OrgLearnedRuleModel) => void
-  onAct?: (fn: () => Promise<unknown>) => void
+  onSelect: (r: OrgLearnedRuleModel) => void
+  selectedKey: string | null
   resetKey: string
 }) {
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({
@@ -299,15 +454,13 @@ function LearningsTable({
   const sorted = useMemo(() => {
     const dir = sort.dir === "asc" ? 1 : -1
     return [...rows].sort((a, b) => {
-      const av = sortValue(a, sort.key, tab)
-      const bv = sortValue(b, sort.key, tab)
+      const av = sortValue(a, sort.key)
+      const bv = sortValue(b, sort.key)
       if (av < bv) return -1 * dir
       if (av > bv) return 1 * dir
-      // Stable tiebreaker by id so toggling a row (which bumps updated_at and
-      // reorders the refetch) doesn't make rows jump around.
-      return a.id - b.id
+      return a.id - b.id // stable tiebreaker
     })
-  }, [rows, sort, tab])
+  }, [rows, sort])
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize))
   const safePage = Math.min(page, totalPages - 1)
@@ -334,119 +487,41 @@ function LearningsTable({
             <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} className="w-56" />
             <SortHead label="Learning" sortKey="learning" sort={sort} onSort={toggleSort} />
             <SortHead label="Status" sortKey="status" sort={sort} onSort={toggleSort} className="w-28" />
-            {admin && <TableHead className="w-px text-right">Actions</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
-          {paged.map((r) => (
-            <TableRow key={`${r.owner}/${r.repo}#${r.id}`}>
-              <TableCell className="whitespace-nowrap align-top font-mono text-xs text-muted-foreground">
-                <span className="flex items-center gap-1.5">
-                  <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
-                  {r.owner}/{r.repo}
-                </span>
-              </TableCell>
-              <TableCell className="align-top">
-                <div
-                  className={cn(
-                    "text-sm",
-                    admin && tab === "approved" && !r.active && "opacity-50",
-                  )}
-                >
-                  {r.rule_text}
-                </div>
-                {(r.category || r.path_pattern) && (
-                  <div className="mt-0.5 text-xs text-muted-foreground">
-                    {r.category}
-                    {r.path_pattern ? ` · ${r.path_pattern}` : ""}
+          {paged.map((r) => {
+            const disabled = r.status === "approved" && !r.active
+            return (
+              <TableRow
+                key={ruleKey(r)}
+                data-active={selectedKey === ruleKey(r)}
+                className="cursor-pointer data-[active=true]:bg-muted/60"
+                onClick={() => onSelect(r)}
+              >
+                <TableCell className="whitespace-nowrap align-top font-mono text-xs text-muted-foreground">
+                  <span className="flex items-center gap-1.5">
+                    <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
+                    {r.owner}/{r.repo}
+                  </span>
+                </TableCell>
+                <TableCell className="align-top">
+                  <div className={cn("line-clamp-2 text-sm", disabled && "opacity-50")}>
+                    {r.rule_text}
                   </div>
-                )}
-              </TableCell>
-              <TableCell className="align-top">
-                <StatusBadge rule={r} tab={tab} />
-              </TableCell>
-              {admin && onAct && (
-                <TableCell className="align-top text-right whitespace-nowrap">
-                  {tab === "pending" ? (
-                    <div className="flex justify-end gap-1">
-                      <Button
-                        size="sm"
-                        onClick={() =>
-                          onAct(() => api.approveLearnedRule(r.owner, r.repo, r.id))
-                        }
-                      >
-                        <Check className="mr-1 h-3.5 w-3.5" /> Approve
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() =>
-                          onAct(() => api.rejectLearnedRule(r.owner, r.repo, r.id))
-                        }
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex justify-end gap-0.5">
-                      {r.active ? (
-                        <ConfirmButton
-                          size="icon-sm"
-                          variant="ghost"
-                          tooltip="Disable"
-                          dialogTitle="Disable learning?"
-                          dialogDescription="It will stop influencing reviews until you re-enable it."
-                          confirmLabel="Disable"
-                          onConfirm={() =>
-                            onAct(() =>
-                              api.setLearnedRuleActive(r.owner, r.repo, r.id, false),
-                            )
-                          }
-                        >
-                          <Power className="h-3.5 w-3.5" />
-                        </ConfirmButton>
-                      ) : (
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          title="Enable"
-                          onClick={() =>
-                            onAct(() =>
-                              api.setLearnedRuleActive(r.owner, r.repo, r.id, true),
-                            )
-                          }
-                        >
-                          <Power className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        title="Edit"
-                        onClick={() => onEdit?.(r)}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      <ConfirmButton
-                        size="icon-sm"
-                        variant="ghost"
-                        destructive
-                        tooltip="Delete"
-                        dialogTitle="Delete learning?"
-                        dialogDescription="This permanently removes the rule. This cannot be undone."
-                        confirmLabel="Delete"
-                        onConfirm={() =>
-                          onAct(() => api.deleteLearnedRule(r.owner, r.repo, r.id))
-                        }
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </ConfirmButton>
+                  {(r.category || r.path_pattern) && (
+                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {r.category}
+                      {r.path_pattern ? ` · ${r.path_pattern}` : ""}
                     </div>
                   )}
                 </TableCell>
-              )}
-            </TableRow>
-          ))}
+                <TableCell className="align-top">
+                  <StatusBadge rule={r} />
+                </TableCell>
+              </TableRow>
+            )
+          })}
         </TableBody>
       </Table>
 
@@ -499,20 +574,21 @@ function LearningsTable({
   )
 }
 
-function StatusBadge({
-  rule,
-  tab,
-}: {
-  rule: OrgLearnedRuleModel
-  tab?: "approved" | "pending"
-}) {
-  if (tab === "pending") {
+function StatusBadge({ rule }: { rule: OrgLearnedRuleModel }) {
+  if (rule.status === "pending") {
     return (
       <Badge
         variant="outline"
         className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
       >
         Pending
+      </Badge>
+    )
+  }
+  if (rule.status === "rejected") {
+    return (
+      <Badge variant="outline" className="text-muted-foreground">
+        Rejected
       </Badge>
     )
   }
@@ -652,7 +728,7 @@ function RuleDialog({
           <div className="space-y-1">
             <span className="text-xs font-medium text-muted-foreground">Rule</span>
             <Textarea
-              rows={3}
+              rows={4}
               placeholder="e.g. Don't flag missing docstrings on internal helpers."
               value={draft.rule_text}
               onChange={(e) => setDraft({ ...draft, rule_text: e.target.value })}
