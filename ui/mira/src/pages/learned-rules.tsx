@@ -61,7 +61,7 @@ const SIGNAL_LABEL: Record<string, string> = {
   manual: "Added by admin",
 }
 
-type SortKey = "repo" | "learning" | "status"
+type SortKey = "repo" | "learning" | "status" | "updated"
 type SortDir = "asc" | "desc"
 
 function ruleKey(r: OrgLearnedRuleModel) {
@@ -71,6 +71,19 @@ function ruleKey(r: OrgLearnedRuleModel) {
 function formatDate(epochSeconds: number) {
   if (!epochSeconds) return "—"
   return new Date(epochSeconds * 1000).toLocaleString()
+}
+
+function relativeTime(epochSeconds: number) {
+  if (!epochSeconds) return "—"
+  const s = Math.floor(Date.now() / 1000 - epochSeconds)
+  if (s < 60) return "just now"
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  if (d < 30) return `${d}d ago`
+  return new Date(epochSeconds * 1000).toLocaleDateString()
 }
 
 export function LearnedRulesPage() {
@@ -400,7 +413,7 @@ function Meta({ label, value }: { label: string; value: string }) {
   )
 }
 
-function sortValue(r: OrgLearnedRuleModel, key: SortKey): string {
+function sortValue(r: OrgLearnedRuleModel, key: SortKey): string | number {
   switch (key) {
     case "repo":
       return `${r.owner}/${r.repo}`.toLowerCase()
@@ -408,6 +421,8 @@ function sortValue(r: OrgLearnedRuleModel, key: SortKey): string {
       return r.rule_text.toLowerCase()
     case "status":
       return r.status === "approved" ? (r.active ? "enabled" : "disabled") : r.status
+    case "updated":
+      return r.updated_at
   }
 }
 
@@ -476,6 +491,7 @@ function LearningsTable({
             <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} className="w-56" />
             <SortHead label="Learning" sortKey="learning" sort={sort} onSort={toggleSort} />
             <SortHead label="Status" sortKey="status" sort={sort} onSort={toggleSort} className="w-28" />
+            <SortHead label="Updated" sortKey="updated" sort={sort} onSort={toggleSort} className="w-28" />
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -507,6 +523,12 @@ function LearningsTable({
                 </TableCell>
                 <TableCell className="align-top">
                   <StatusBadge rule={r} />
+                </TableCell>
+                <TableCell
+                  className="align-top whitespace-nowrap text-xs text-muted-foreground"
+                  title={formatDate(r.updated_at)}
+                >
+                  {relativeTime(r.updated_at)}
                 </TableCell>
               </TableRow>
             )
