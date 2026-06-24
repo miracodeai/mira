@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
-import { useNavigate } from "react-router"
+import { useNavigate, useSearchParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -78,10 +78,13 @@ export function LearnedRulesPage() {
   const { user } = useAuth()
   const isAdmin = !!user?.is_admin
   const navigate = useNavigate()
+  const [params] = useSearchParams()
 
   const [refreshKey, setRefreshKey] = useState(0)
   const refresh = () => setRefreshKey((k) => k + 1)
-  const [tab, setTab] = useState<"approved" | "pending">("approved")
+  const [tab, setTab] = useState<"approved" | "pending">(
+    params.get("tab") === "pending" ? "pending" : "approved",
+  )
   const [query, setQuery] = useState("")
   const [repoFilter, setRepoFilter] = useState(ALL_REPOS)
   const [enabledFilter, setEnabledFilter] = useState<"all" | "enabled" | "disabled">(
@@ -144,16 +147,31 @@ export function LearnedRulesPage() {
 
   const act = (fn: () => Promise<unknown>) => fn().then(refresh).catch(() => {})
 
+  // After approving/rejecting in the queue, advance to the next pending rule
+  // so the admin can clear the queue without reopening the panel — close only
+  // when none are left.
+  const advancePending = () => {
+    if (!selected) return
+    const list = applyFilter(pending)
+    const idx = list.findIndex((r) => ruleKey(r) === ruleKey(selected))
+    const remaining = list.filter((r) => ruleKey(r) !== ruleKey(selected))
+    if (remaining.length === 0) {
+      closeDetail()
+      return
+    }
+    setSelected(remaining[Math.min(idx, remaining.length - 1)])
+  }
+
   // Panel actions operate on the selected rule.
   const approveSel = () => {
     if (!selected) return
     act(() => api.approveLearnedRule(selected.owner, selected.repo, selected.id))
-    closeDetail()
+    advancePending()
   }
   const rejectSel = () => {
     if (!selected) return
     act(() => api.rejectLearnedRule(selected.owner, selected.repo, selected.id))
-    closeDetail()
+    advancePending()
   }
   const toggleSel = (active: boolean) => {
     if (!selected) return

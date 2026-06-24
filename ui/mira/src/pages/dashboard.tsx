@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts"
 
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -27,7 +28,7 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart"
 import { Skeleton } from "@/components/ui/skeleton"
-import { api } from "@/lib/api"
+import { api, type OrgLearnedRuleModel } from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function DashboardPage() {
@@ -241,7 +242,7 @@ export function DashboardPage() {
 
       {/* Nudge to review learnings waiting on admin approval. */}
       {pendingLearnings && pendingLearnings.length > 0 && (
-        <PendingLearningsCard count={pendingLearnings.length} />
+        <PendingLearningsCard rules={pendingLearnings} />
       )}
 
       {/* Period selector */}
@@ -570,27 +571,51 @@ function CategoryBarChart({ categories }: { categories: Record<string, number> }
   )
 }
 
-function PendingLearningsCard({ count }: { count: number }) {
+function PendingLearningsCard({ rules }: { rules: OrgLearnedRuleModel[] }) {
+  const top = rules.slice(0, 3)
+  const more = rules.length - top.length
+  const href = "/learnings?tab=pending"
   return (
     <Card>
-      <CardContent className="flex items-center gap-3 py-4">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 ring-1 ring-amber-500/30 dark:text-amber-400">
-          <Brain className="h-4 w-4" />
-        </span>
-        <div className="min-w-0">
-          <div className="text-sm font-medium">
-            {count} learning{count !== 1 ? "s" : ""} awaiting approval
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 ring-1 ring-amber-500/30 dark:text-amber-400">
+              <Brain className="h-4 w-4" />
+            </span>
+            <div>
+              <CardTitle className="text-base">
+                {rules.length} learning{rules.length !== 1 ? "s" : ""} awaiting approval
+              </CardTitle>
+              <CardDescription>Approve before they affect reviews.</CardDescription>
+            </div>
           </div>
-          <div className="text-xs text-muted-foreground">
-            Review and approve before they affect reviews.
-          </div>
+          <Button asChild size="sm">
+            <a href={href}>Review &amp; approve</a>
+          </Button>
         </div>
-        <a
-          href="/learnings"
-          className="ml-auto shrink-0 text-xs font-medium text-muted-foreground underline-offset-2 hover:underline"
-        >
-          Review →
-        </a>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {top.map((r) => (
+          <a
+            key={`${r.owner}/${r.repo}#${r.id}`}
+            href={href}
+            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-muted"
+          >
+            <span className="shrink-0 font-mono text-xs text-muted-foreground">
+              {r.owner}/{r.repo}
+            </span>
+            <span className="truncate text-muted-foreground">{r.rule_text}</span>
+          </a>
+        ))}
+        {more > 0 && (
+          <a
+            href={href}
+            className="block px-2 pt-1 text-xs font-medium text-muted-foreground hover:underline"
+          >
+            +{more} more
+          </a>
+        )}
       </CardContent>
     </Card>
   )
