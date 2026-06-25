@@ -121,6 +121,10 @@ export function LearnedRulesPage() {
   useDocumentTitle("Learnings")
   const { user } = useAuth()
   const isAdmin = !!user?.is_admin
+  const username = user?.username ?? ""
+  // Admins can edit any rule; a creator can edit their own while it's pending.
+  const canEdit = (r: OrgLearnedRuleModel) =>
+    isAdmin || (!!username && r.created_by === username && r.status === "pending")
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
 
@@ -315,11 +319,9 @@ export function LearnedRulesPage() {
             inject into every review automatically.
           </p>
         </div>
-        {isAdmin && (
-          <Button size="sm" onClick={() => navigate("/learnings/new")}>
-            <Plus className="mr-1 h-4 w-4" /> Add learning
-          </Button>
-        )}
+        <Button size="sm" onClick={() => navigate("/learnings/new")}>
+          <Plus className="mr-1 h-4 w-4" /> Add learning
+        </Button>
       </div>
 
       {firstLoad ? (
@@ -424,9 +426,9 @@ export function LearnedRulesPage() {
               </div>
             </div>
 
-            {isAdmin && (
+            {(isAdmin || canEdit(selected)) && (
               <div className="flex flex-wrap gap-2 border-b bg-muted/30 p-4">
-                {selected.status === "pending" ? (
+                {isAdmin && selected.status === "pending" ? (
                   <>
                     <Button onClick={approveSel}>
                       <Check className="mr-1 h-4 w-4" /> Approve
@@ -435,7 +437,7 @@ export function LearnedRulesPage() {
                       <X className="mr-1 h-4 w-4" /> Reject
                     </Button>
                   </>
-                ) : selected.status === "approved" ? (
+                ) : isAdmin && selected.status === "approved" ? (
                   selected.active ? (
                     <ConfirmButton
                       variant="destructive"
@@ -454,9 +456,11 @@ export function LearnedRulesPage() {
                     </Button>
                   )
                 ) : null}
-                <Button variant="outline" onClick={() => navigate(editHref(selected))}>
-                  <Pencil className="mr-1 h-4 w-4" /> Edit
-                </Button>
+                {canEdit(selected) && (
+                  <Button variant="outline" onClick={() => navigate(editHref(selected))}>
+                    <Pencil className="mr-1 h-4 w-4" /> Edit
+                  </Button>
+                )}
               </div>
             )}
 

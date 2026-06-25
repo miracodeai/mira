@@ -1705,8 +1705,8 @@ def list_org_learned_rules(limit: int = 500, status: str = "") -> list[OrgLearne
 def get_learned_rule_detail(
     owner: str, repo: str, rule_id: int, request: Request
 ) -> OrgLearnedRuleModel:
-    """Single learned rule — backs the edit page."""
-    _require_admin(request)
+    """Single learned rule — backs the edit page. Readable by any authenticated
+    user (so a creator can load their own pending rule to edit)."""
     with _open_store(owner, repo) as store:
         r = store.get_learned_rule(rule_id)
     if not r:
@@ -1757,13 +1757,16 @@ def set_learned_rule_active(
 def create_learned_rule(
     owner: str, repo: str, body: LearnedRuleInput, request: Request
 ) -> LearnedRuleModel:
-    _require_admin(request)
+    # Anyone authenticated may author a learning; admins' land approved, while
+    # everyone else's go to the pending queue for an admin to approve.
     user = getattr(request.state, "user", None)
+    is_admin = bool(getattr(user, "is_admin", False))
     with _open_store(owner, repo) as store:
         r = store.create_learned_rule(
             rule_text=body.rule_text,
             category=body.category,
             path_pattern=body.path_pattern,
+            status="approved" if is_admin else "pending",
             created_by=getattr(user, "username", "") if user else "",
         )
     return LearnedRuleModel(
@@ -1784,8 +1787,20 @@ def create_learned_rule(
 def update_learned_rule(
     owner: str, repo: str, rule_id: int, body: LearnedRuleInput, request: Request
 ) -> dict:
-    _require_admin(request)
+    # Admins may edit any rule; a non-admin may edit only their own rule while
+    # it's still pending approval.
+    user = getattr(request.state, "user", None)
+    is_admin = bool(getattr(user, "is_admin", False))
+    username = getattr(user, "username", "") if user else ""
     with _open_store(owner, repo) as store:
+        existing = store.get_learned_rule(rule_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Learning not found")
+        if not (
+            is_admin
+            or (existing.created_by == username and existing.status == "pending")
+        ):
+            raise HTTPException(status_code=403, detail="Not allowed to edit this learning")
         store.update_learned_rule(rule_id, body.rule_text, body.category, body.path_pattern)
     return {"ok": True}
 

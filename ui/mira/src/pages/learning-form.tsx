@@ -35,6 +35,8 @@ function parseDetail(e: unknown): string {
 
 export function LearningFormPage() {
   const { user } = useAuth()
+  const isAdmin = !!user?.is_admin
+  const username = user?.username ?? ""
   const navigate = useNavigate()
   const [params] = useSearchParams()
 
@@ -47,6 +49,8 @@ export function LearningFormPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // For edit: whether the current user may edit the loaded rule.
+  const [canEdit, setCanEdit] = useState(true)
 
   const [repos, setRepos] = useState<string[]>([])
   const [repoKey, setRepoKey] = useState("")
@@ -55,7 +59,6 @@ export function LearningFormPage() {
   const [pathPattern, setPathPattern] = useState("")
 
   useEffect(() => {
-    if (!user?.is_admin) return
     const reposP = api.listRepos().catch(() => [])
     const ruleP =
       isEdit && editOwner && editRepo && editId
@@ -70,6 +73,10 @@ export function LearningFormPage() {
           setRuleText(rule.rule_text)
           setCategory(rule.category || "other")
           setPathPattern(rule.path_pattern || "")
+          setCanEdit(
+            isAdmin ||
+              (rule.created_by === username && rule.status === "pending"),
+          )
         } else {
           setRepoKey(slugs[0] ?? "")
         }
@@ -79,12 +86,12 @@ export function LearningFormPage() {
         setError(parseDetail(e))
         setLoading(false)
       })
-  }, [user, isEdit, editOwner, editRepo, editId])
+  }, [isAdmin, username, isEdit, editOwner, editRepo, editId])
 
-  if (!user?.is_admin) {
+  if (isEdit && !loading && !canEdit) {
     return (
       <div className="p-6 text-sm text-muted-foreground">
-        Admin access required.
+        You can only edit your own learnings while they're pending approval.
       </div>
     )
   }
@@ -108,8 +115,14 @@ export function LearningFormPage() {
       } else {
         await api.createLearnedRule(owner, repo, body)
       }
-      toast.success(isEdit ? "Learning saved" : "Learning added")
-      navigate("/learnings")
+      toast.success(
+        isEdit
+          ? "Learning saved"
+          : isAdmin
+            ? "Learning added"
+            : "Submitted for approval",
+      )
+      navigate(isEdit || isAdmin ? "/learnings" : "/learnings?tab=pending")
     } catch (e) {
       setError(parseDetail(e))
       toast.error("Couldn't save learning", { description: parseDetail(e) })
@@ -146,8 +159,10 @@ export function LearningFormPage() {
         </h1>
         <p className="text-sm text-muted-foreground">
           {isEdit
-            ? "Update this learned rule. Admin-edited rules stay approved."
-            : "Author a rule directly. It's approved immediately and feeds future reviews."}
+            ? "Update this learned rule."
+            : isAdmin
+              ? "Author a rule directly — it's approved immediately and feeds future reviews."
+              : "Suggest a rule — it'll be sent to the approval queue for an admin to review before it affects reviews."}
         </p>
       </div>
 
@@ -233,7 +248,7 @@ export function LearningFormPage() {
                 Cancel
               </Button>
             </div>
-            {isEdit && (
+            {isEdit && isAdmin && (
               <ConfirmButton
                 variant="ghost"
                 className="text-destructive"

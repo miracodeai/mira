@@ -24,8 +24,8 @@ def patched_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppDatabase:
 class _Req:
     """Minimal stand-in for a Starlette Request carrying request.state.user."""
 
-    def __init__(self, is_admin: bool):
-        self.state = type("S", (), {"user": User(id=1, username="u", is_admin=is_admin)})()
+    def __init__(self, is_admin: bool, username: str = "u"):
+        self.state = type("S", (), {"user": User(id=1, username=username, is_admin=is_admin)})()
 
 
 def test_synthesized_rules_are_pending(patched_db: AppDatabase):
@@ -120,4 +120,106 @@ def test_admin_crud(patched_db: AppDatabase):
     api.delete_learned_rule("acme", "web", created.id, _Req(is_admin=True))
     store = IndexStore.open("acme", "web")
     assert store.get_learned_rule(created.id) is None
+    store.close()
+
+
+def test_non_admin_create_is_pending(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = api.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="Be nice", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    assert created.status == "pending"
+    assert created.created_by == "junior"
+
+
+def test_admin_create_is_approved(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = api.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="Be safe", category="security"),
+        _Req(is_admin=True, username="boss"),
+    )
+    assert created.status == "approved"
+
+
+def test_creator_can_edit_own_pending(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = api.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="original", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    api.update_learned_rule(
+        "acme",
+        "web",
+        created.id,
+        api.LearnedRuleInput(rule_text="edited", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    store = IndexStore.open("acme", "web")
+    assert store.get_learned_rule(created.id).rule_text == "edited"
+    store.close()
+
+
+def test_other_non_admin_cannot_edit(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = api.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="original", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    with pytest.raises(HTTPException) as exc:
+        api.update_learned_rule(
+            "acme",
+            "web",
+            created.id,
+            api.LearnedRuleInput(rule_text="hijacked", category="style"),
+            _Req(is_admin=False, username="someone-else"),
+        )
+    assert exc.value.status_code == 403
+
+
+def test_creator_cannot_edit_once_approved(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = api.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="original", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    api.approve_learned_rule("acme", "web", created.id, _Req(is_admin=True))
+    with pytest.raises(HTTPException) as exc:
+        api.update_learned_rule(
+            "acme",
+            "web",
+            created.id,
+            api.LearnedRuleInput(rule_text="edited", category="style"),
+            _Req(is_admin=False, username="junior"),
+        )
+    assert exc.value.status_code == 403
+
+
+def test_admin_can_edit_anyones_rule(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = api.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="original", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    api.update_learned_rule(
+        "acme",
+        "web",
+        created.id,
+        api.LearnedRuleInput(rule_text="admin edited", category="style"),
+        _Req(is_admin=True, username="boss"),
+    )
+    store = IndexStore.open("acme", "web")
+    assert store.get_learned_rule(created.id).rule_text == "admin edited"
     store.close()
