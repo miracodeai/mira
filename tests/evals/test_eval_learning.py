@@ -66,6 +66,13 @@ def _engine() -> tuple[ReviewEngine, LLMProvider]:
     return engine, llm
 
 
+def _approve_all(store: IndexStore) -> None:
+    """Synthesized rules land quarantined as pending; evals exercise the
+    approved path."""
+    for r in store.list_learned_rules():
+        store.set_learned_rule_status(r.id, "approved")
+
+
 def _fake_pr_info(owner: str, repo: str) -> PRInfo:
     return PRInfo(
         title="Eval PR",
@@ -94,6 +101,7 @@ class TestSynthesis:
         n_pat = synthesize_rules(store)
         _, llm = _engine()
         n_llm = await synthesize_from_human_reviews(store, llm)
+        _approve_all(store)
         store.close()
 
         assert n_pat + n_llm >= 1, "no rules emerged from null-check feedback"
@@ -117,6 +125,7 @@ class TestSynthesis:
         synthesize_rules(store)
         _, llm = _engine()
         n_llm = await synthesize_from_human_reviews(store, llm)
+        _approve_all(store)
         store.close()
 
         assert n_llm >= 1, "LLM did not produce a rule from 8 'where are the tests' comments"
@@ -145,6 +154,7 @@ class TestRulesInfluenceReview:
         synthesize_rules(store)
         engine, llm = _engine()
         await synthesize_from_human_reviews(store, llm)
+        _approve_all(store)
         store.close()
 
         engine._pr_info = _fake_pr_info(owner, repo)
@@ -177,6 +187,7 @@ class TestRulesInfluenceReview:
         synthesize_rules(store)
         engine, llm = _engine()
         await synthesize_from_human_reviews(store, llm)
+        _approve_all(store)
 
         # Part A — deterministic: at least one learned rule must be persisted
         # and retrievable via the same code path the engine uses at review time.

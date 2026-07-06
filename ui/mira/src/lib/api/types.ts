@@ -107,11 +107,13 @@ export interface VulnerabilitySummary {
 }
 
 export interface LearnedRuleModel {
+  id: number
   rule_text: string
   source_signal: string
   category: string
   path_pattern: string
   sample_count: number
+  status: "pending" | "approved" | "declined"
   updated_at: number
 }
 

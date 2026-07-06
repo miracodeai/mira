@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     path_pattern TEXT NOT NULL DEFAULT '',
     sample_count INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'approved',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
@@ -205,6 +206,10 @@ def _get_conn(url: str):
                 cur.execute(
                     "ALTER TABLE files ADD COLUMN IF NOT EXISTS loc INTEGER NOT NULL DEFAULT 0"
                 )
+                cur.execute(
+                    "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS "
+                    "status TEXT NOT NULL DEFAULT 'approved'"
+                )
             _schema_initialized = True
         return _pg_conn
 
@@ -216,8 +221,8 @@ def list_learned_rules_org_wide(url: str, limit: int = 1000) -> list[dict]:
     conn = _get_conn(url)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT owner, repo, rule_text, source_signal, category, "
-            "path_pattern, sample_count, updated_at "
+            "SELECT owner, repo, id, rule_text, source_signal, category, "
+            "path_pattern, sample_count, status, updated_at "
             "FROM learned_rules WHERE active = 1 "
             "ORDER BY sample_count DESC, updated_at DESC LIMIT %s",
             (limit,),
@@ -227,12 +232,14 @@ def list_learned_rules_org_wide(url: str, limit: int = 1000) -> list[dict]:
         {
             "owner": r[0],
             "repo": r[1],
-            "rule_text": r[2],
-            "source_signal": r[3],
-            "category": r[4],
-            "path_pattern": r[5],
-            "sample_count": r[6],
-            "updated_at": r[7],
+            "id": r[2],
+            "rule_text": r[3],
+            "source_signal": r[4],
+            "category": r[5],
+            "path_pattern": r[6],
+            "sample_count": r[7],
+            "status": r[8],
+            "updated_at": r[9],
         }
         for r in rows
     ]
@@ -1024,34 +1031,33 @@ class PgIndexStore(_StoreSharedMixin):
     ) -> LearnedRuleRow:
         now = time.time()
         existing = self._fetchone(
-            "SELECT id FROM learned_rules WHERE owner=%s AND repo=%s "
+            "SELECT id, status FROM learned_rules WHERE owner=%s AND repo=%s "
             "AND category=%s AND path_pattern=%s",
             (self._owner, self._repo, category, path_pattern),
         )
         if existing:
             with self._conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
-                    "sample_count=%s, updated_at=%s WHERE id=%s",
-                    (rule_text, source_signal, sample_count, now, existing[0]),
-                )
+                if existing[1] == "pending":
+                    cur.execute(
+                        "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
+                        "sample_count=%s, updated_at=%s WHERE id=%s",
+                        (rule_text, source_signal, sample_count, now, existing[0]),
+                    )
+                else:
+                    # Approved/declined rows keep their text (and any manual
+                    # edits); only the evidence counters refresh.
+                    cur.execute(
+                        "UPDATE learned_rules SET sample_count=%s, updated_at=%s WHERE id=%s",
+                        (sample_count, now, existing[0]),
+                    )
             self._conn.commit()
-            return LearnedRuleRow(
-                id=existing[0],
-                rule_text=rule_text,
-                source_signal=source_signal,
-                category=category,
-                path_pattern=path_pattern,
-                sample_count=sample_count,
-                created_at=now,
-                updated_at=now,
-            )
+            return self.get_learned_rule(existing[0])  # type: ignore[return-value]
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO learned_rules "
                 "(owner, repo, rule_text, source_signal, category, path_pattern, "
-                "sample_count, active, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s) RETURNING id",
+                "sample_count, active, status, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, 1, 'pending', %s, %s) RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -1073,32 +1079,84 @@ class PgIndexStore(_StoreSharedMixin):
             category=category,
             path_pattern=path_pattern,
             sample_count=sample_count,
+            status="pending",
             created_at=now,
             updated_at=now,
         )
 
+    _LEARNED_RULE_COLS = (
+        "id, rule_text, source_signal, category, path_pattern, "
+        "sample_count, active, status, created_at, updated_at"
+    )
+
+    @staticmethod
+    def _learned_rule_row(r: tuple) -> LearnedRuleRow:
+        return LearnedRuleRow(
+            id=r[0],
+            rule_text=r[1],
+            source_signal=r[2],
+            category=r[3],
+            path_pattern=r[4],
+            sample_count=r[5],
+            active=bool(r[6]),
+            status=r[7],
+            created_at=r[8],
+            updated_at=r[9],
+        )
+
     def list_active_learned_rules(self) -> list[LearnedRuleRow]:
         rows = self._fetchall(
-            "SELECT id, rule_text, source_signal, category, path_pattern, "
-            "sample_count, active, created_at, updated_at "
+            f"SELECT {self._LEARNED_RULE_COLS} "
             "FROM learned_rules WHERE owner=%s AND repo=%s AND active=1 "
-            "ORDER BY sample_count DESC",
+            "AND status='approved' ORDER BY sample_count DESC",
             (self._owner, self._repo),
         )
-        return [
-            LearnedRuleRow(
-                id=r[0],
-                rule_text=r[1],
-                source_signal=r[2],
-                category=r[3],
-                path_pattern=r[4],
-                sample_count=r[5],
-                active=bool(r[6]),
-                created_at=r[7],
-                updated_at=r[8],
+        return [self._learned_rule_row(r) for r in rows]
+
+    def list_learned_rules(self) -> list[LearnedRuleRow]:
+        """All learned rules regardless of status."""
+        rows = self._fetchall(
+            f"SELECT {self._LEARNED_RULE_COLS} "
+            "FROM learned_rules WHERE owner=%s AND repo=%s ORDER BY sample_count DESC",
+            (self._owner, self._repo),
+        )
+        return [self._learned_rule_row(r) for r in rows]
+
+    def get_learned_rule(self, rule_id: int) -> LearnedRuleRow | None:
+        row = self._fetchone(
+            f"SELECT {self._LEARNED_RULE_COLS} "
+            "FROM learned_rules WHERE owner=%s AND repo=%s AND id=%s",
+            (self._owner, self._repo, rule_id),
+        )
+        return self._learned_rule_row(row) if row else None
+
+    def set_learned_rule_status(self, rule_id: int, status: str) -> LearnedRuleRow | None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE learned_rules SET status=%s, updated_at=%s "
+                "WHERE owner=%s AND repo=%s AND id=%s",
+                (status, time.time(), self._owner, self._repo, rule_id),
             )
-            for r in rows
-        ]
+        self._conn.commit()
+        return self.get_learned_rule(rule_id)
+
+    def update_learned_rule_text(self, rule_id: int, rule_text: str) -> LearnedRuleRow | None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE learned_rules SET rule_text=%s, updated_at=%s "
+                "WHERE owner=%s AND repo=%s AND id=%s",
+                (rule_text, time.time(), self._owner, self._repo, rule_id),
+            )
+        self._conn.commit()
+        return self.get_learned_rule(rule_id)
+
+    def delete_learned_rule(self, rule_id: int) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM learned_rules WHERE owner=%s AND repo=%s AND id=%s",
+                (self._owner, self._repo, rule_id),
+            )
+        self._conn.commit()
 
     def replace_manifest_packages(
         self,

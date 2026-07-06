@@ -136,7 +136,7 @@ class TestSynthesizeRules:
             _fb(store, signal="rejected", category="style", pr=i)
         n = synthesize_rules(store)
         assert n >= 1
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert any(r.source_signal == "reject_pattern" for r in rules)
 
     def test_positive_rule_on_high_accept_rate(self, store):
@@ -145,7 +145,7 @@ class TestSynthesizeRules:
             _fb(store, signal="accepted", category="bug", pr=i)
         n = synthesize_rules(store)
         assert n >= 1
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert any(r.source_signal == "accept_pattern" and r.category == "bug" for r in rules)
 
     def test_low_accept_rate_no_positive_rule(self, store):
@@ -155,7 +155,7 @@ class TestSynthesizeRules:
         for i in range(3, 6):
             _fb(store, signal="rejected", category="clarity", pr=i)
         synthesize_rules(store)
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert not any(r.source_signal == "accept_pattern" for r in rules)
 
     def test_reject_pattern_suppresses_accept_rule(self, store):
@@ -166,7 +166,7 @@ class TestSynthesizeRules:
         for i in range(5, 15):
             _fb(store, signal="accepted", category="style", pr=i)
         synthesize_rules(store)
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         # Only the reject_pattern rule should exist for this category.
         style_rules = [r for r in rules if r.category == "style"]
         assert all(r.source_signal == "reject_pattern" for r in style_rules)
@@ -175,6 +175,109 @@ class TestSynthesizeRules:
         for i in range(5):
             _fb(store, signal="rejected", category="", pr=i)
         assert synthesize_rules(store) == 0
+
+
+# ── Quarantine (status lifecycle) ──
+
+
+class TestLearnedRuleQuarantine:
+    def _synthesize_reject_rule(self, store, count=5, start_pr=0):
+        for i in range(start_pr, start_pr + count):
+            _fb(store, signal="rejected", category="style", pr=i)
+        synthesize_rules(store)
+        return next(r for r in store.list_learned_rules() if r.source_signal == "reject_pattern")
+
+    def test_new_rules_are_pending_and_not_applied(self, store):
+        rule = self._synthesize_reject_rule(store)
+        assert rule.status == "pending"
+        assert store.list_active_learned_rules() == []
+        assert store.get_learned_rules_text() == []
+
+    def test_approve_makes_rule_applied(self, store):
+        rule = self._synthesize_reject_rule(store)
+        updated = store.set_learned_rule_status(rule.id, "approved")
+        assert updated.status == "approved"
+        assert [r.id for r in store.list_active_learned_rules()] == [rule.id]
+        assert store.get_learned_rules_text() == [rule.rule_text]
+
+    def test_decline_persists_across_resynthesis(self, store):
+        rule = self._synthesize_reject_rule(store)
+        store.set_learned_rule_status(rule.id, "declined")
+        # More feedback and another synthesis pass must not resurrect it.
+        self._synthesize_reject_rule(store, count=3, start_pr=100)
+        after = store.get_learned_rule(rule.id)
+        assert after.status == "declined"
+        assert after.sample_count > rule.sample_count
+        assert store.list_active_learned_rules() == []
+
+    def test_approved_rule_keeps_manual_edits_on_resynthesis(self, store):
+        rule = self._synthesize_reject_rule(store)
+        store.set_learned_rule_status(rule.id, "approved")
+        store.update_learned_rule_text(rule.id, "my custom wording")
+        self._synthesize_reject_rule(store, count=3, start_pr=100)
+        after = store.get_learned_rule(rule.id)
+        assert after.status == "approved"
+        assert after.rule_text == "my custom wording"
+        assert after.sample_count > rule.sample_count
+
+    def test_pending_rule_text_refreshed_on_resynthesis(self, store):
+        rule = self._synthesize_reject_rule(store)
+        self._synthesize_reject_rule(store, count=3, start_pr=100)
+        after = store.get_learned_rule(rule.id)
+        assert after.status == "pending"
+        assert after.rule_text != rule.rule_text  # embeds the new reject count
+
+    def test_edit_does_not_change_status(self, store):
+        rule = self._synthesize_reject_rule(store)
+        updated = store.update_learned_rule_text(rule.id, "edited")
+        assert updated.rule_text == "edited"
+        assert updated.status == "pending"
+
+    def test_delete_then_resynthesis_creates_fresh_pending(self, store):
+        rule = self._synthesize_reject_rule(store)
+        store.set_learned_rule_status(rule.id, "approved")
+        store.delete_learned_rule(rule.id)
+        assert store.get_learned_rule(rule.id) is None
+        fresh = self._synthesize_reject_rule(store, count=3, start_pr=100)
+        assert fresh.status == "pending"
+
+    def test_migration_grandfathers_existing_rows_as_approved(self, tmp_path):
+        import sqlite3
+        import time
+
+        # Build a legacy DB with a pre-status learned_rules table.
+        db_path = str(tmp_path / "legacy.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE learned_rules ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "rule_text TEXT NOT NULL DEFAULT '', "
+            "source_signal TEXT NOT NULL DEFAULT '', "
+            "category TEXT NOT NULL DEFAULT '', "
+            "path_pattern TEXT NOT NULL DEFAULT '', "
+            "sample_count INTEGER NOT NULL DEFAULT 0, "
+            "active INTEGER NOT NULL DEFAULT 1, "
+            "created_at REAL NOT NULL DEFAULT 0, "
+            "updated_at REAL NOT NULL DEFAULT 0)"
+        )
+        now = time.time()
+        conn.execute(
+            "INSERT INTO learned_rules (rule_text, source_signal, category, "
+            "path_pattern, sample_count, created_at, updated_at) "
+            "VALUES ('old rule', 'reject_pattern', 'style', '', 5, ?, ?)",
+            (now, now),
+        )
+        conn.commit()
+        conn.close()
+
+        s = IndexStore(db_path)
+        try:
+            rules = s.list_learned_rules()
+            assert len(rules) == 1
+            assert rules[0].status == "approved"
+            assert s.get_learned_rules_text() == ["old rule"]
+        finally:
+            s.close()
 
 
 # ── synthesize_from_human_reviews (LLM) ──
@@ -227,7 +330,7 @@ class TestSynthesizeFromHumanReviews:
         assert n == 2
         llm.complete.assert_called_once()
         # Verify stored as human_pattern source
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         human_rules = [r for r in rules if r.source_signal == "human_pattern"]
         assert len(human_rules) == 2
 
@@ -555,11 +658,12 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
     # LLM was invoked exactly once for this merge.
     fake_llm.complete.assert_called_once()
 
-    # One human_pattern rule stored.
-    rules = store.list_active_learned_rules()
+    # One human_pattern rule stored, quarantined as pending.
+    rules = store.list_learned_rules()
     human_rules = [r for r in rules if r.source_signal == "human_pattern"]
     assert len(human_rules) == 1
     assert "raw sql" in human_rules[0].rule_text.lower()
+    assert human_rules[0].status == "pending"
 
     # ── Dedup on retry ──
     fake_llm.complete.reset_mock()

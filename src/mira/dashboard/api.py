@@ -1604,11 +1604,13 @@ class RuleCreate(BaseModel):
 
 
 class LearnedRuleModel(BaseModel):
+    id: int
     rule_text: str
     source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern"
     category: str
     path_pattern: str = ""
     sample_count: int = 0
+    status: str = "approved"  # "pending" | "approved" | "declined"
     updated_at: float = 0.0
 
 
@@ -1617,25 +1619,74 @@ class OrgLearnedRuleModel(LearnedRuleModel):
     repo: str
 
 
+class LearnedRuleStatusUpdate(BaseModel):
+    status: str  # "approved" | "declined"
+
+
+class LearnedRuleTextUpdate(BaseModel):
+    rule_text: str
+
+
+def _learned_rule_model(r) -> LearnedRuleModel:
+    return LearnedRuleModel(
+        id=r.id,
+        rule_text=r.rule_text,
+        source_signal=r.source_signal,
+        category=r.category,
+        path_pattern=r.path_pattern,
+        sample_count=r.sample_count,
+        status=r.status,
+        updated_at=r.updated_at,
+    )
+
+
 @router.get(
     "/api/repos/{owner}/{repo}/learned-rules",
     response_model=list[LearnedRuleModel],
 )
 def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
-    """Active learned rules synthesized from feedback signals on this repo."""
+    """All learned rules for this repo, including pending and declined."""
     with _open_store(owner, repo) as store:
-        rules = store.list_active_learned_rules()
-        return [
-            LearnedRuleModel(
-                rule_text=r.rule_text,
-                source_signal=r.source_signal,
-                category=r.category,
-                path_pattern=r.path_pattern,
-                sample_count=r.sample_count,
-                updated_at=r.updated_at,
-            )
-            for r in rules
-        ]
+        return [_learned_rule_model(r) for r in store.list_learned_rules()]
+
+
+@router.patch(
+    "/api/repos/{owner}/{repo}/learned-rules/{rule_id}/status",
+    response_model=LearnedRuleModel,
+)
+def set_learned_rule_status(
+    owner: str, repo: str, rule_id: int, body: LearnedRuleStatusUpdate
+) -> LearnedRuleModel:
+    if body.status not in ("approved", "declined"):
+        raise HTTPException(status_code=400, detail="Status must be 'approved' or 'declined'")
+    with _open_store(owner, repo) as store:
+        if not store.get_learned_rule(rule_id):
+            raise HTTPException(status_code=404, detail="Learning not found")
+        r = store.set_learned_rule_status(rule_id, body.status)
+        return _learned_rule_model(r)
+
+
+@router.put(
+    "/api/repos/{owner}/{repo}/learned-rules/{rule_id}",
+    response_model=LearnedRuleModel,
+)
+def update_learned_rule(
+    owner: str, repo: str, rule_id: int, body: LearnedRuleTextUpdate
+) -> LearnedRuleModel:
+    if not body.rule_text.strip():
+        raise HTTPException(status_code=400, detail="Rule text cannot be empty")
+    with _open_store(owner, repo) as store:
+        if not store.get_learned_rule(rule_id):
+            raise HTTPException(status_code=404, detail="Learning not found")
+        r = store.update_learned_rule_text(rule_id, body.rule_text.strip())
+        return _learned_rule_model(r)
+
+
+@router.delete("/api/repos/{owner}/{repo}/learned-rules/{rule_id}")
+def delete_learned_rule(owner: str, repo: str, rule_id: int) -> dict:
+    with _open_store(owner, repo) as store:
+        store.delete_learned_rule(rule_id)
+        return {"ok": True}
 
 
 @router.get("/api/learned-rules", response_model=list[OrgLearnedRuleModel])
@@ -1655,11 +1706,13 @@ def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
         OrgLearnedRuleModel(
             owner=r["owner"],
             repo=r["repo"],
+            id=r["id"],
             rule_text=r["rule_text"],
             source_signal=r["source_signal"],
             category=r["category"],
             path_pattern=r["path_pattern"],
             sample_count=r["sample_count"],
+            status=r["status"],
             updated_at=r["updated_at"] or 0.0,
         )
         for r in rows

@@ -262,8 +262,11 @@ async def run(scenario: Scenario, *, owner: str = "play", repo: str = "demo") ->
     n_llm = await synthesize_from_human_reviews(store, llm)
     print(f"LLM rules upserted: {n_llm}")
 
-    # 4. Inspect rules
+    # 4. Inspect rules — approve them first so the review step injects them
+    # (synthesized rules land quarantined as pending)
     _print_header("Step 3 — learned rules now in store")
+    for r in store.list_learned_rules():
+        store.set_learned_rule_status(r.id, "approved")
     rules = store.list_active_learned_rules()
     if not rules:
         print("(none)")

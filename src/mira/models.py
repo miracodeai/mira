@@ -461,5 +461,6 @@ class LearnedRule:
     path_pattern: str  # e.g. 'tests/**' or '' for all
     sample_count: int
     active: bool = True
+    status: str = "approved"  # 'pending' | 'approved' | 'declined'
     created_at: float = 0.0
     updated_at: float = 0.0

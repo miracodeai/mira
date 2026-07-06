@@ -10,6 +10,25 @@ export const rulesApi = {
   listRepoLearnedRules: (owner: string, repo: string) =>
     fetchJson<LearnedRuleModel[]>(`/api/repos/${owner}/${repo}/learned-rules`),
 
+  setLearnedRuleStatus: (
+    owner: string,
+    repo: string,
+    id: number,
+    status: "approved" | "declined"
+  ) =>
+    patchJson<LearnedRuleModel>(
+      `/api/repos/${owner}/${repo}/learned-rules/${id}/status`,
+      { status }
+    ),
+
+  updateLearnedRule: (owner: string, repo: string, id: number, rule_text: string) =>
+    putJson<LearnedRuleModel>(`/api/repos/${owner}/${repo}/learned-rules/${id}`, {
+      rule_text,
+    }),
+
+  deleteLearnedRule: (owner: string, repo: string, id: number) =>
+    deleteJson(`/api/repos/${owner}/${repo}/learned-rules/${id}`),
+
   // Global rules
   listGlobalRules: () => fetchJson<RuleModel[]>("/api/rules/global"),
 

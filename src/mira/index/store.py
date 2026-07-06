@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     path_pattern TEXT NOT NULL DEFAULT '',
     sample_count INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'approved',
     created_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0
 );
@@ -241,6 +242,7 @@ class LearnedRuleRow:
     path_pattern: str
     sample_count: int
     active: bool = True
+    status: str = "approved"  # 'pending' | 'approved' | 'declined'
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -292,6 +294,11 @@ class IndexStore(_StoreSharedMixin):
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)").fetchall()}
         if "loc" not in cols:
             self._conn.execute("ALTER TABLE files ADD COLUMN loc INTEGER NOT NULL DEFAULT 0")
+        lr_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(learned_rules)").fetchall()}
+        if "status" not in lr_cols:
+            self._conn.execute(
+                "ALTER TABLE learned_rules ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'"
+            )
         self._conn.commit()
 
     @classmethod
@@ -878,30 +885,29 @@ class IndexStore(_StoreSharedMixin):
     ) -> LearnedRuleRow:
         now = time.time()
         existing = self._conn.execute(
-            "SELECT id FROM learned_rules WHERE category = ? AND path_pattern = ?",
+            "SELECT id, status FROM learned_rules WHERE category = ? AND path_pattern = ?",
             (category, path_pattern),
         ).fetchone()
         if existing:
-            self._conn.execute(
-                "UPDATE learned_rules SET rule_text = ?, source_signal = ?, "
-                "sample_count = ?, updated_at = ? WHERE id = ?",
-                (rule_text, source_signal, sample_count, now, existing[0]),
-            )
+            if existing[1] == "pending":
+                self._conn.execute(
+                    "UPDATE learned_rules SET rule_text = ?, source_signal = ?, "
+                    "sample_count = ?, updated_at = ? WHERE id = ?",
+                    (rule_text, source_signal, sample_count, now, existing[0]),
+                )
+            else:
+                # Approved/declined rows keep their text (and any manual edits);
+                # only the evidence counters refresh.
+                self._conn.execute(
+                    "UPDATE learned_rules SET sample_count = ?, updated_at = ? WHERE id = ?",
+                    (sample_count, now, existing[0]),
+                )
             self._conn.commit()
-            return LearnedRuleRow(
-                id=existing[0],
-                rule_text=rule_text,
-                source_signal=source_signal,
-                category=category,
-                path_pattern=path_pattern,
-                sample_count=sample_count,
-                created_at=now,
-                updated_at=now,
-            )
+            return self.get_learned_rule(existing[0])  # type: ignore[return-value]
         cur = self._conn.execute(
             "INSERT INTO learned_rules "
             "(rule_text, source_signal, category, path_pattern, sample_count, "
-            "active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+            "active, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 'pending', ?, ?)",
             (rule_text, source_signal, category, path_pattern, sample_count, now, now),
         )
         self._conn.commit()
@@ -912,30 +918,71 @@ class IndexStore(_StoreSharedMixin):
             category=category,
             path_pattern=path_pattern,
             sample_count=sample_count,
+            status="pending",
             created_at=now,
             updated_at=now,
         )
 
+    _LEARNED_RULE_COLS = (
+        "id, rule_text, source_signal, category, path_pattern, "
+        "sample_count, active, status, created_at, updated_at"
+    )
+
+    @staticmethod
+    def _learned_rule_row(r: tuple) -> LearnedRuleRow:
+        return LearnedRuleRow(
+            id=r[0],
+            rule_text=r[1],
+            source_signal=r[2],
+            category=r[3],
+            path_pattern=r[4],
+            sample_count=r[5],
+            active=bool(r[6]),
+            status=r[7],
+            created_at=r[8],
+            updated_at=r[9],
+        )
+
     def list_active_learned_rules(self) -> list[LearnedRuleRow]:
         rows = self._conn.execute(
-            "SELECT id, rule_text, source_signal, category, path_pattern, "
-            "sample_count, active, created_at, updated_at "
-            "FROM learned_rules WHERE active = 1 ORDER BY sample_count DESC"
+            f"SELECT {self._LEARNED_RULE_COLS} FROM learned_rules "
+            "WHERE active = 1 AND status = 'approved' ORDER BY sample_count DESC"
         ).fetchall()
-        return [
-            LearnedRuleRow(
-                id=r[0],
-                rule_text=r[1],
-                source_signal=r[2],
-                category=r[3],
-                path_pattern=r[4],
-                sample_count=r[5],
-                active=bool(r[6]),
-                created_at=r[7],
-                updated_at=r[8],
-            )
-            for r in rows
-        ]
+        return [self._learned_rule_row(r) for r in rows]
+
+    def list_learned_rules(self) -> list[LearnedRuleRow]:
+        """All learned rules regardless of status."""
+        rows = self._conn.execute(
+            f"SELECT {self._LEARNED_RULE_COLS} FROM learned_rules ORDER BY sample_count DESC"
+        ).fetchall()
+        return [self._learned_rule_row(r) for r in rows]
+
+    def get_learned_rule(self, rule_id: int) -> LearnedRuleRow | None:
+        row = self._conn.execute(
+            f"SELECT {self._LEARNED_RULE_COLS} FROM learned_rules WHERE id = ?",
+            (rule_id,),
+        ).fetchone()
+        return self._learned_rule_row(row) if row else None
+
+    def set_learned_rule_status(self, rule_id: int, status: str) -> LearnedRuleRow | None:
+        self._conn.execute(
+            "UPDATE learned_rules SET status = ?, updated_at = ? WHERE id = ?",
+            (status, time.time(), rule_id),
+        )
+        self._conn.commit()
+        return self.get_learned_rule(rule_id)
+
+    def update_learned_rule_text(self, rule_id: int, rule_text: str) -> LearnedRuleRow | None:
+        self._conn.execute(
+            "UPDATE learned_rules SET rule_text = ?, updated_at = ? WHERE id = ?",
+            (rule_text, time.time(), rule_id),
+        )
+        self._conn.commit()
+        return self.get_learned_rule(rule_id)
+
+    def delete_learned_rule(self, rule_id: int) -> None:
+        self._conn.execute("DELETE FROM learned_rules WHERE id = ?", (rule_id,))
+        self._conn.commit()
 
     def replace_manifest_packages(
         self,
@@ -1269,22 +1316,29 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500) -> list[dict]:
         try:
             conn = sqlite3.connect(db_path)
             try:
+                # Raw connection bypasses IndexStore migrations; older repo DBs
+                # may not have the status column yet.
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(learned_rules)").fetchall()}
+                has_status = "status" in cols
+                status_col = "status" if has_status else "'approved'"
                 cur = conn.execute(
-                    "SELECT rule_text, source_signal, category, path_pattern, "
-                    "sample_count, updated_at FROM learned_rules WHERE active = 1 "
-                    "ORDER BY updated_at DESC"
+                    f"SELECT id, rule_text, source_signal, category, path_pattern, "
+                    f"sample_count, {status_col}, updated_at FROM learned_rules "
+                    "WHERE active = 1 ORDER BY updated_at DESC"
                 )
                 for r in cur.fetchall():
                     rows.append(
                         {
                             "owner": owner,
                             "repo": repo,
-                            "rule_text": r[0],
-                            "source_signal": r[1],
-                            "category": r[2],
-                            "path_pattern": r[3],
-                            "sample_count": r[4],
-                            "updated_at": r[5],
+                            "id": r[0],
+                            "rule_text": r[1],
+                            "source_signal": r[2],
+                            "category": r[3],
+                            "path_pattern": r[4],
+                            "sample_count": r[5],
+                            "status": r[6],
+                            "updated_at": r[7],
                         }
                     )
             finally:
