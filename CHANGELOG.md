@@ -4,6 +4,13 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-07-09
+
+### Fixed
+
+- **One malformed walkthrough entry no longer drops the whole walkthrough** — when the LLM omits a required `path` or `label` on a single `change_groups` entry (plausible on large diffs), that entry is now skipped with a warning instead of failing the entire response, so the walkthrough comment still posts. Closes #162.
+- **The walkthrough placeholder is always finalized** — when a review produces no walkthrough (all files matched exclusion rules, empty diff, size limits, or walkthrough generation failed), the "Reviewing this PR…" placeholder comment is now updated with the reason instead of staying stuck forever. Part of #162.
+
 ## [0.5.0] — 2026-07-07
 
 ### Added
@@ -219,6 +226,7 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.5.1]: https://github.com/miracodeai/mira/releases/tag/v0.5.1
 [0.5.0]: https://github.com/miracodeai/mira/releases/tag/v0.5.0
 [0.4.1]: https://github.com/miracodeai/mira/releases/tag/v0.4.1
 [0.4.0]: https://github.com/miracodeai/mira/releases/tag/v0.4.0
