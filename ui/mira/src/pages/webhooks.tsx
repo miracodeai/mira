@@ -85,7 +85,8 @@ export function WebhooksPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Webhooks</h1>
           <p className="text-sm text-muted-foreground">
             Send a webhook to any HTTPS endpoint when Mira reviews a PR or
-            finishes indexing. Slack and Teams URLs are auto-formatted.
+            finishes indexing. Slack, Teams, and Discord (…/slack) URLs are
+            auto-formatted.
           </p>
         </div>
         {webhooks.length > 0 && (

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useNavigate } from "react-router"
 import {
   Area,
   AreaChart,
@@ -11,6 +12,7 @@ import {
   YAxis,
 } from "recharts"
 
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -25,8 +27,15 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart"
+import { GitHubIcon } from "@/components/ui/github-icon"
 import { Skeleton } from "@/components/ui/skeleton"
-import { api } from "@/lib/api"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableRow,
+} from "@/components/ui/table"
+import { api, type OrgLearnedRuleModel } from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function DashboardPage() {
@@ -42,6 +51,11 @@ export function DashboardPage() {
   // missing endpoint or transient failure just hides the card.
   const { data: vulnSummary } = useAsync(
     () => api.getVulnerabilitiesSummary().catch(() => null),
+    [],
+  )
+  // Pending learnings awaiting admin approval — surfaced as a nudge.
+  const { data: pendingLearnings } = useAsync(
+    () => api.listLearnedRules("pending").catch(() => []),
     [],
   )
 
@@ -231,6 +245,11 @@ export function DashboardPage() {
       {/* Security alerts — populated by the OSV poller. */}
       {vulnSummary && (
         <SecurityAlertsCard summary={vulnSummary} />
+      )}
+
+      {/* Nudge to review learnings waiting on admin approval. */}
+      {pendingLearnings && pendingLearnings.length > 0 && (
+        <PendingLearningsCard rules={pendingLearnings} />
       )}
 
       {/* Period selector */}
@@ -557,6 +576,61 @@ function CategoryBarChart({ categories }: { categories: Record<string, number> }
         <Bar dataKey="count" fill="var(--color-count)" radius={4} />
       </BarChart>
     </ChartContainer>
+  )
+}
+
+function PendingLearningsCard({ rules }: { rules: OrgLearnedRuleModel[] }) {
+  const navigate = useNavigate()
+  const top = rules.slice(0, 3)
+  const more = rules.length - top.length
+  const href = "/learnings?tab=pending"
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">
+              {rules.length} learning{rules.length !== 1 ? "s" : ""} awaiting approval
+            </CardTitle>
+            <CardDescription>Approve before they affect reviews.</CardDescription>
+          </div>
+          <Button asChild size="sm">
+            <a href={href}>Review &amp; approve</a>
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="px-0 pb-0">
+        <Table>
+          <TableBody>
+            {top.map((r) => (
+              <TableRow
+                key={`${r.owner}/${r.repo}#${r.id}`}
+                className="cursor-pointer"
+                onClick={() => navigate(href)}
+              >
+                <TableCell className="w-px whitespace-nowrap font-mono text-xs text-muted-foreground">
+                  <span className="flex items-center gap-1.5">
+                    <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
+                    {r.owner}/{r.repo}
+                  </span>
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  <span className="line-clamp-1">{r.rule_text}</span>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+        {more > 0 && (
+          <a
+            href={href}
+            className="block border-t px-4 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted"
+          >
+            +{more} more pending
+          </a>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 

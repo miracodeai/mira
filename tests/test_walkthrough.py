@@ -176,6 +176,53 @@ class TestParseWalkthroughResponse:
         result = parse_walkthrough_response(raw)
         assert result.effort is None
 
+    def test_skips_file_missing_path(self):
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [
+                    {
+                        "label": "Core",
+                        "files": [
+                            {"path": "src/a.py", "change_type": "added"},
+                            {"change_type": "modified", "description": "no path"},
+                        ],
+                    }
+                ],
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.summary == "Changes"
+        assert len(result.change_groups) == 1
+        assert len(result.change_groups[0].files) == 1
+        assert result.change_groups[0].files[0].path == "src/a.py"
+
+    def test_skips_group_missing_label(self):
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [
+                    {"files": [{"path": "src/a.py"}]},
+                    {"label": "Tests", "files": [{"path": "tests/b.py"}]},
+                ],
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert len(result.change_groups) == 1
+        assert result.change_groups[0].label == "Tests"
+        assert result.change_groups[0].files[0].path == "tests/b.py"
+
+    def test_skips_non_dict_group(self):
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": ["not a group", {"label": "Core", "files": []}],
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert len(result.change_groups) == 1
+        assert result.change_groups[0].label == "Core"
+
 
 class TestConvertToWalkthroughResult:
     def test_basic_conversion(self, sample_walkthrough_response_text: str):

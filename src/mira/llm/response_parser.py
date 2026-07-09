@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from pydantic import BaseModel, Field
@@ -20,6 +21,8 @@ from mira.models import (
     WalkthroughFileEntry,
     WalkthroughResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LLMComment(BaseModel):
@@ -260,6 +263,40 @@ def _try_load_json(text: str) -> object | None:
         return None
 
 
+def _validate_change_groups(raw_groups: list) -> list[LLMWalkthroughChangeGroup]:
+    """Validate change groups one at a time, skipping malformed entries.
+
+    LLMs occasionally omit a required ``path`` or ``label`` on a single
+    entry in a large diff; one bad entry shouldn't drop the whole
+    walkthrough (issue #162).
+    """
+    groups: list[LLMWalkthroughChangeGroup] = []
+    for item in raw_groups:
+        if not isinstance(item, dict):
+            logger.warning("Skipping malformed walkthrough change group: %r", item)
+            continue
+        raw_files = item.get("files")
+        if isinstance(raw_files, list):
+            files = []
+            for f in raw_files:
+                try:
+                    files.append(LLMWalkthroughFileChange.model_validate(f))
+                except Exception as exc:
+                    logger.warning("Skipping malformed walkthrough file entry: %s", exc)
+            try:
+                group = LLMWalkthroughChangeGroup.model_validate({**item, "files": []})
+                group.files = files
+                groups.append(group)
+            except Exception as exc:
+                logger.warning("Skipping malformed walkthrough change group: %s", exc)
+            continue
+        try:
+            groups.append(LLMWalkthroughChangeGroup.model_validate(item))
+        except Exception as exc:
+            logger.warning("Skipping malformed walkthrough change group: %s", exc)
+    return groups
+
+
 def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
     """Parse raw LLM text output into a validated LLMWalkthroughResponse."""
     cleaned = strip_think_blocks(raw_text)
@@ -275,10 +312,16 @@ def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
 
     data = _unstring_nested_json(data)
 
+    raw_groups = data.pop("change_groups", None)
+
     try:
-        return LLMWalkthroughResponse.model_validate(data)
+        response = LLMWalkthroughResponse.model_validate(data)
     except Exception as e:
         raise ResponseParseError(f"Walkthrough response validation failed: {e}") from e
+
+    if isinstance(raw_groups, list):
+        response.change_groups = _validate_change_groups(raw_groups)
+    return response
 
 
 _MERMAID_LABEL_RE = re.compile(r"\[([^\[\]]+)\]")

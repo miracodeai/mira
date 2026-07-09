@@ -352,7 +352,10 @@ class ReviewEngine:
         async def _resolve_threads() -> tuple[
             int, int, list[UnresolvedThread], list[ThreadDecision]
         ]:
-            if not self.bot_name:
+            # When auto-resolve is off we skip the thread-resolution path
+            # entirely — no fetch, no verify, no resolve. Round detection is
+            # unaffected; it runs off the separate get_all_bot_threads call below.
+            if not self.bot_name or not self.config.review.auto_resolve_conversations:
                 return 0, 0, [], []
             try:
                 assert self.provider is not None
@@ -570,6 +573,16 @@ class ReviewEngine:
                         await self.provider.post_comment(pr_info, markdown)
                 except Exception as exc:
                     logger.warning("Failed to post walkthrough comment: %s", exc)
+        elif placeholder_id is not None:
+            # No walkthrough (all files excluded, empty diff, or generation
+            # failed) — finalize the placeholder so it doesn't sit on
+            # "Reviewing this PR…" forever.
+            reason = result.skipped_reason or "Walkthrough was not generated."
+            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+            try:
+                await self.provider.update_comment(pr_info, placeholder_id, markdown)
+            except Exception as exc:
+                logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",
@@ -913,14 +926,14 @@ class ReviewEngine:
                 _rules_store.close()
 
                 try:
-                    from mira.dashboard.db import AppDatabase
+                    from mira.dashboard.api import _app_db
 
-                    _app_db = AppDatabase()
-                    for rule_text in _app_db.get_global_rules_text():
-                        parts = rule_text.split(": ", 1)
-                        title = parts[0] if len(parts) > 1 else "Global Rule"
-                        content = parts[1] if len(parts) > 1 else rule_text
-                        custom_rules.insert(0, {"title": title, "content": content})
+                    if _app_db is not None:
+                        for rule_text in _app_db.get_global_rules_text():
+                            parts = rule_text.split(": ", 1)
+                            title = parts[0] if len(parts) > 1 else "Global Rule"
+                            content = parts[1] if len(parts) > 1 else rule_text
+                            custom_rules.insert(0, {"title": title, "content": content})
                 except Exception:
                     pass
         except Exception:

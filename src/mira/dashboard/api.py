@@ -50,7 +50,7 @@ def register_dashboard(app: FastAPI) -> None:
 
 # Standalone app — initialized at module load, but routes are registered at
 # the bottom of this file, *after* all @router decorators have run.
-app = FastAPI(title="Mira Dashboard API", version="0.4.0")
+app = FastAPI(title="Mira Dashboard API", version="0.5.1")
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
@@ -187,6 +187,16 @@ class ReviewEventModel(BaseModel):
     duration_ms: int
     categories: str
     created_at: float
+
+
+class ActivityEventModel(ReviewEventModel):
+    owner: str
+    repo: str
+
+
+class ActivityResponse(BaseModel):
+    events: list[ActivityEventModel]
+    repos: list[str]
 
 
 class ReviewStatsModel(BaseModel):
@@ -362,6 +372,12 @@ class ModelOption(BaseModel):
 class ModelsResponse(BaseModel):
     indexing_model: str
     review_model: str
+    backend: str  # "openrouter" | "bedrock" | "openai-compatible"
+    indexing_source: str  # "dashboard" (DB override) | "config" (mira.yaml)
+    review_source: str
+    # What each model resolves to with no override — the "inherit" target.
+    config_indexing_model: str
+    config_review_model: str
     indexing_options: list[ModelOption]
     review_options: list[ModelOption]
     # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high").
@@ -376,11 +392,10 @@ class ModelsUpdate(BaseModel):
 
 
 @router.get("/api/settings/models", response_model=ModelsResponse)
-def get_models() -> ModelsResponse:
+async def get_models() -> ModelsResponse:
     from mira.config import load_config
+    from mira.dashboard.model_catalog import active_backend, build_options, fetch_catalog
     from mira.dashboard.models_config import (
-        INDEXING_MODELS,
-        REVIEW_MODELS,
         THINKING_MODES,
         get_indexing_model,
         get_review_model,
@@ -388,15 +403,25 @@ def get_models() -> ModelsResponse:
     )
 
     config = load_config()
-    indexing = get_indexing_model(config.llm, _app_db.get_setting("indexing_model"))
-    review = get_review_model(config.llm, _app_db.get_setting("review_model"))
+    db_indexing = _app_db.get_setting("indexing_model")
+    db_review = _app_db.get_setting("review_model")
+    indexing = get_indexing_model(config.llm, db_indexing)
+    review = get_review_model(config.llm, db_review)
     thinking = get_review_thinking_mode(config.llm, _app_db.get_setting("review_thinking_mode"))
+
+    backend = active_backend(config.llm)
+    catalog = await fetch_catalog(config.llm)
 
     return ModelsResponse(
         indexing_model=indexing,
         review_model=review,
-        indexing_options=[ModelOption(**m) for m in INDEXING_MODELS],
-        review_options=[ModelOption(**m) for m in REVIEW_MODELS],
+        backend=backend,
+        indexing_source="dashboard" if db_indexing else "config",
+        review_source="dashboard" if db_review else "config",
+        config_indexing_model=get_indexing_model(config.llm),
+        config_review_model=get_review_model(config.llm),
+        indexing_options=[ModelOption(**m) for m in build_options(backend, catalog, "indexing")],
+        review_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
         review_thinking_mode=thinking or "off",
         thinking_options=[ModelOption(**m) for m in THINKING_MODES],
     )
@@ -501,28 +526,18 @@ def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
 @router.put("/api/settings/models")
 def set_models(body: ModelsUpdate) -> dict:
     from mira.dashboard.models_config import THINKING_MODE_VALUES
-    from mira.llm.registry import is_supported
 
-    # Reject unsupported or wrong-purpose models. Without this, an admin can
-    # silently configure a model that's broken (no JSON mode, missing from
-    # the registry, miscategorized for the role).
-    if not is_supported(body.indexing_model, purpose="indexing"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.indexing_model!r} is not a supported indexing model.",
-        )
-    if not is_supported(body.review_model, purpose="review"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.review_model!r} is not a supported review model.",
-        )
     if body.review_thinking_mode not in THINKING_MODE_VALUES:
         raise HTTPException(
             status_code=400,
             detail=f"{body.review_thinking_mode!r} is not a valid thinking mode.",
         )
-    _app_db.set_setting("indexing_model", body.indexing_model)
-    _app_db.set_setting("review_model", body.review_model)
+    # "" clears the override so mira.yaml is authoritative again. Any other id
+    # is stored as-is — the dashboard accepts the same free-form model ids as
+    # mira.yaml (the dropdown still guides toward registry models), and the
+    # registry falls back gracefully for pricing/limits of unknown ids.
+    _app_db.set_setting("indexing_model", body.indexing_model.strip())
+    _app_db.set_setting("review_model", body.review_model.strip())
     # Clear "off" to "" rather than persisting the literal — "off" is the
     # default, and a stored value would shadow a mira.yaml
     # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
@@ -1589,17 +1604,31 @@ class RuleCreate(BaseModel):
 
 
 class LearnedRuleModel(BaseModel):
+    id: int = 0
     rule_text: str
-    source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern"
+    source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern" | "manual"
     category: str
     path_pattern: str = ""
     sample_count: int = 0
+    active: bool = True
+    status: str = "approved"  # 'pending' | 'approved' | 'rejected'
+    created_by: str = ""  # admin username for manual rules; '' for synthesized
     updated_at: float = 0.0
 
 
 class OrgLearnedRuleModel(LearnedRuleModel):
     owner: str
     repo: str
+
+
+class LearnedRuleInput(BaseModel):
+    rule_text: str
+    category: str = "other"
+    path_pattern: str = ""
+
+
+class LearnedRuleActiveInput(BaseModel):
+    active: bool
 
 
 @router.get(
@@ -1612,11 +1641,15 @@ def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
         rules = store.list_active_learned_rules()
         return [
             LearnedRuleModel(
+                id=r.id,
                 rule_text=r.rule_text,
                 source_signal=r.source_signal,
                 category=r.category,
                 path_pattern=r.path_pattern,
                 sample_count=r.sample_count,
+                active=r.active,
+                status=r.status,
+                created_by=r.created_by,
                 updated_at=r.updated_at,
             )
             for r in rules
@@ -1624,20 +1657,26 @@ def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
 
 
 @router.get("/api/learned-rules", response_model=list[OrgLearnedRuleModel])
-def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
-    """Active learned rules across every repo in the org."""
+def list_org_learned_rules(limit: int = 500, status: str = "") -> list[OrgLearnedRuleModel]:
+    """Learned rules across every repo in the org.
+
+    `status` filters by approval state ('pending'|'approved'|'rejected');
+    empty returns all so admins can manage the full set.
+    """
     db_url = os.environ.get("DATABASE_URL", "")
     capped = max(1, min(limit, 2000))
+    status_filter = status or None
     if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
         from mira.index.pg_store import list_learned_rules_org_wide
 
-        rows = list_learned_rules_org_wide(db_url, limit=capped)
+        rows = list_learned_rules_org_wide(db_url, limit=capped, status=status_filter)
     else:
         from mira.index.store import list_learned_rules_org_wide_sqlite
 
-        rows = list_learned_rules_org_wide_sqlite(limit=capped)
+        rows = list_learned_rules_org_wide_sqlite(limit=capped, status=status_filter)
     return [
         OrgLearnedRuleModel(
+            id=r.get("id", 0),
             owner=r["owner"],
             repo=r["repo"],
             rule_text=r["rule_text"],
@@ -1645,10 +1684,137 @@ def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
             category=r["category"],
             path_pattern=r["path_pattern"],
             sample_count=r["sample_count"],
+            active=r.get("active", True),
+            status=r.get("status", "approved"),
+            created_by=r.get("created_by", ""),
             updated_at=r["updated_at"] or 0.0,
         )
         for r in rows
     ]
+
+
+# ── Learnings approval queue + CRUD (admin only) ───────────────────────────
+# Auto-synthesized learnings land 'pending' and must be approved by an admin
+# before they influence reviews. Admins can also author/edit/delete rules.
+
+
+@router.get(
+    "/api/learned-rules/{owner}/{repo}/{rule_id}",
+    response_model=OrgLearnedRuleModel,
+)
+def get_learned_rule_detail(
+    owner: str, repo: str, rule_id: int, request: Request
+) -> OrgLearnedRuleModel:
+    """Single learned rule — backs the edit page. Readable by any authenticated
+    user (so a creator can load their own pending rule to edit)."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    is_admin = bool(getattr(user, "is_admin", False))
+    username = getattr(user, "username", "") if user else ""
+    with _open_store(owner, repo) as store:
+        r = store.get_learned_rule(rule_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Learning not found")
+    if r.status != "approved" and not is_admin and r.created_by != username:
+        raise HTTPException(status_code=403, detail="Not allowed to view this learning")
+    return OrgLearnedRuleModel(
+        id=r.id,
+        owner=owner,
+        repo=repo,
+        rule_text=r.rule_text,
+        source_signal=r.source_signal,
+        category=r.category,
+        path_pattern=r.path_pattern,
+        sample_count=r.sample_count,
+        active=r.active,
+        status=r.status,
+        created_by=r.created_by,
+        updated_at=r.updated_at,
+    )
+
+
+@router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/approve")
+def approve_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.set_learned_rule_status(rule_id, "approved")
+    return {"ok": True}
+
+
+@router.post("/api/learned-rules/{owner}/{repo}/{rule_id}/reject")
+def reject_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.set_learned_rule_status(rule_id, "rejected")
+    return {"ok": True}
+
+
+@router.patch("/api/learned-rules/{owner}/{repo}/{rule_id}/active")
+def set_learned_rule_active(
+    owner: str, repo: str, rule_id: int, body: LearnedRuleActiveInput, request: Request
+) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.set_learned_rule_active(rule_id, body.active)
+    return {"ok": True}
+
+
+@router.post("/api/learned-rules/{owner}/{repo}", response_model=LearnedRuleModel)
+def create_learned_rule(
+    owner: str, repo: str, body: LearnedRuleInput, request: Request
+) -> LearnedRuleModel:
+    # Anyone authenticated may author a learning; admins' land approved, while
+    # everyone else's go to the pending queue for an admin to approve.
+    user = getattr(request.state, "user", None)
+    is_admin = bool(getattr(user, "is_admin", False))
+    with _open_store(owner, repo) as store:
+        r = store.create_learned_rule(
+            rule_text=body.rule_text,
+            category=body.category,
+            path_pattern=body.path_pattern,
+            status="approved" if is_admin else "pending",
+            created_by=getattr(user, "username", "") if user else "",
+        )
+    return LearnedRuleModel(
+        id=r.id,
+        rule_text=r.rule_text,
+        source_signal=r.source_signal,
+        category=r.category,
+        path_pattern=r.path_pattern,
+        sample_count=r.sample_count,
+        active=r.active,
+        status=r.status,
+        created_by=r.created_by,
+        updated_at=r.updated_at,
+    )
+
+
+@router.put("/api/learned-rules/{owner}/{repo}/{rule_id}")
+def update_learned_rule(
+    owner: str, repo: str, rule_id: int, body: LearnedRuleInput, request: Request
+) -> dict:
+    # Admins may edit any rule; a non-admin may edit only their own rule while
+    # it's still pending approval.
+    user = getattr(request.state, "user", None)
+    is_admin = bool(getattr(user, "is_admin", False))
+    username = getattr(user, "username", "") if user else ""
+    with _open_store(owner, repo) as store:
+        existing = store.get_learned_rule(rule_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Learning not found")
+        if not (is_admin or (existing.created_by == username and existing.status == "pending")):
+            raise HTTPException(status_code=403, detail="Not allowed to edit this learning")
+        store.update_learned_rule(rule_id, body.rule_text, body.category, body.path_pattern)
+    return {"ok": True}
+
+
+@router.delete("/api/learned-rules/{owner}/{repo}/{rule_id}")
+def delete_learned_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
+    _require_admin(request)
+    with _open_store(owner, repo) as store:
+        store.delete_learned_rule(rule_id)
+    return {"ok": True}
 
 
 @router.get("/api/repos/{owner}/{repo}/rules", response_model=list[RuleModel])
@@ -2736,6 +2902,62 @@ def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventMode
             )
             for e in events
         ]
+
+
+@router.get("/api/activity", response_model=ActivityResponse)
+def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResponse:
+    """Org-wide feed of review events across all repos.
+
+    Flattens per-repo review_events into a single list sorted by created_at
+    (newest first), attaching owner/repo to each. Supports an optional repo
+    filter ("owner/repo") and a case-insensitive search `q` matched across the
+    PR title, PR number, repo slug, and categories (multi-word queries AND).
+    """
+    terms = [t for t in q.lower().split() if t]
+
+    repos = _app_db.list_repos()
+    repo_slugs = sorted(f"{r.owner}/{r.repo}" for r in repos)
+
+    events: list[ActivityEventModel] = []
+    for repo_record in repos:
+        slug = f"{repo_record.owner}/{repo_record.repo}"
+        if repo and slug != repo:
+            continue
+        try:
+            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            try:
+                for e in store.list_review_events(limit=500):
+                    if terms:
+                        haystack = f"{e.pr_title} #{e.pr_number} {slug} {e.categories}".lower()
+                        if not all(t in haystack for t in terms):
+                            continue
+                    events.append(
+                        ActivityEventModel(
+                            id=e.id,
+                            pr_number=e.pr_number,
+                            pr_title=e.pr_title,
+                            pr_url=e.pr_url,
+                            comments_posted=e.comments_posted,
+                            blockers=e.blockers,
+                            warnings=e.warnings,
+                            suggestions=e.suggestions,
+                            files_reviewed=e.files_reviewed,
+                            lines_changed=e.lines_changed,
+                            tokens_used=e.tokens_used,
+                            duration_ms=e.duration_ms,
+                            categories=e.categories,
+                            created_at=e.created_at,
+                            owner=repo_record.owner,
+                            repo=repo_record.repo,
+                        )
+                    )
+            finally:
+                store.close()
+        except Exception:
+            logger.warning("Failed to read activity for %s", slug, exc_info=True)
+
+    events.sort(key=lambda ev: ev.created_at, reverse=True)
+    return ActivityResponse(events=events[:limit], repos=repo_slugs)
 
 
 # Wire dashboard routes + middleware onto the standalone app, after all

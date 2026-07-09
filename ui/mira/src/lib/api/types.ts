@@ -107,11 +107,15 @@ export interface VulnerabilitySummary {
 }
 
 export interface LearnedRuleModel {
+  id: number
   rule_text: string
   source_signal: string
   category: string
   path_pattern: string
   sample_count: number
+  active: boolean
+  status: "pending" | "approved" | "rejected"
+  created_by: string
   updated_at: number
 }
 
@@ -160,6 +164,16 @@ export interface ReviewEventModel {
   duration_ms: number
   categories: string
   created_at: number
+}
+
+export interface ActivityEventModel extends ReviewEventModel {
+  owner: string
+  repo: string
+}
+
+export interface ActivityResponse {
+  events: ActivityEventModel[]
+  repos: string[]
 }
 
 export interface ReviewStatsModel {

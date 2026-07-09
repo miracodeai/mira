@@ -134,9 +134,9 @@ Mira talks to OpenRouter under the hood, so any model OpenRouter supports works.
 | OpenAI (cheap) | `openai/gpt-4o-mini` |
 | Google | `google/gemini-2.5-pro` |
 
-Set `OPENROUTER_API_KEY` once; one key works across every provider. See [`src/mira/llm/models.json`](src/mira/llm/models.json) for the full registry of models Mira recognises (with pricing and per-purpose recommendations).
+Set `OPENROUTER_API_KEY` once; one key works across every provider. The dashboard's model pickers list your backend's live catalog (OpenRouter, Bedrock, or any OpenAI-compatible endpoint's `/models`), are searchable, and accept any free-form model id — the same flexibility as `mira.yaml`. See [`src/mira/llm/models.json`](src/mira/llm/models.json) for the bundled registry that supplies pricing and per-purpose recommendations.
 
-**Adding your own models.** The dashboard's model dropdowns (and the validation behind them) come from that registry. To make a custom model selectable — e.g. DeepSeek or a local endpoint — point `MIRA_MODELS_JSON_PATH` at your own `models.json` (a volume mount works well). Its entries are **merged over** the bundled ones by model id, so you only list what you want to add or override:
+**Custom pricing and recommendations.** To give a custom model accurate cost estimates, a label, or a Recommended badge — e.g. DeepSeek or a local endpoint — point `MIRA_MODELS_JSON_PATH` at your own `models.json` (a volume mount works well). Its entries are **merged over** the bundled ones by model id, so you only list what you want to add or override:
 
 ```bash
 MIRA_MODELS_JSON_PATH=/config/models.json

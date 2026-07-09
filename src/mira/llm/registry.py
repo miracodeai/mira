@@ -1,8 +1,11 @@
-"""Supported-model registry — single source of truth for capabilities and pricing.
+"""Model registry — labels, capabilities, and pricing for known models.
 
 Backed by ``models.json``. Adding a new model is a one-line registry entry
-plus a release note; no other code needs to change. To deny a model entirely,
-remove its entry — the dashboard validation and dropdown derive from this file.
+plus a release note; no other code needs to change. Entries supply the
+dashboard's labels, per-purpose lists, Recommended badges, and cost-estimate
+pricing, and serve as the dropdown fallback when the backend's live catalog
+can't be fetched (see ``dashboard/model_catalog.py``). The registry does not
+restrict selection — the dashboard accepts free-form ids, like ``mira.yaml``.
 
 Operators can extend or override the bundled list at runtime by pointing
 ``MIRA_MODELS_JSON_PATH`` at their own ``models.json`` (e.g. a volume mount):

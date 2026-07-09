@@ -812,6 +812,26 @@ async def _index_conventions(
         logger.warning("Failed to persist conventions for %s/%s: %s", owner, repo, exc)
 
 
+def _store_manifest_file(store: IndexStore, path: str, content: str) -> int:
+    """Parse one manifest and replace its package rows. An empty parse still
+    replaces, so stale entries for the path are dropped. Returns package count."""
+    packages = parse_manifest(path, content)
+    store.replace_manifest_packages(
+        path,
+        [
+            {
+                "name": pkg.name,
+                "kind": pkg.kind,
+                "version": pkg.version,
+                "file_path": pkg.file_path,
+                "is_dev": pkg.is_dev,
+            }
+            for pkg in packages
+        ],
+    )
+    return len(packages)
+
+
 async def _index_manifests(
     owner: str,
     repo: str,
@@ -848,25 +868,7 @@ async def _index_manifests(
         if content is None:
             continue
         live.add(path)
-        packages = parse_manifest(path, content)
-        if not packages:
-            # Still replace with empty so stale entries for this path are dropped.
-            store.replace_manifest_packages(path, [])
-            continue
-        store.replace_manifest_packages(
-            path,
-            [
-                {
-                    "name": pkg.name,
-                    "kind": pkg.kind,
-                    "version": pkg.version,
-                    "file_path": pkg.file_path,
-                    "is_dev": pkg.is_dev,
-                }
-                for pkg in packages
-            ],
-        )
-        total_packages += len(packages)
+        total_packages += _store_manifest_file(store, path, content)
 
     # Drop manifest entries whose source file disappeared from the repo.
     store.clear_manifest_packages_for_missing_files(live)
@@ -978,6 +980,41 @@ async def _summarize_directories(store: IndexStore, llm: Any, semaphore: asyncio
     await asyncio.gather(*(_process_chunk(c) for c in chunks))
 
 
+async def _refresh_manifests_incremental(
+    owner: str,
+    repo: str,
+    token: str,
+    branch: str,
+    store: IndexStore,
+    changed_paths: list[str] | None,
+    removed_paths: list[str] | None,
+) -> int:
+    """Refresh package rows for manifests touched by a push. Returns the
+    number of manifest files updated or cleared."""
+    changed = [p for p in changed_paths or [] if is_manifest(p)]
+    removed = [p for p in removed_paths or [] if is_manifest(p)]
+    for path in removed:
+        store.replace_manifest_packages(path, [])
+
+    touched = len(removed)
+    if changed:
+        fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
+        contents = await asyncio.gather(
+            *(
+                _fetch_file_content(owner, repo, p, token, ref=branch, semaphore=fetch_sem)
+                for p in changed
+            )
+        )
+        for path, content in zip(changed, contents, strict=False):
+            if content is None:
+                continue
+            _store_manifest_file(store, path, content)
+            touched += 1
+    if touched:
+        logger.info("Refreshed %d manifest file(s) for %s/%s", touched, owner, repo)
+    return touched
+
+
 async def index_diff(
     owner: str,
     repo: str,
@@ -1003,6 +1040,19 @@ async def index_diff(
     if removed_paths:
         store.remove_paths(removed_paths)
         logger.info("Removed %d deleted files from index", len(removed_paths))
+
+    # Manifests/lockfiles are excluded from code indexing but feed the package
+    # inventory — a dependency-bump push usually touches nothing else (#157).
+    try:
+        touched = await _refresh_manifests_incremental(
+            owner, repo, token, branch, store, changed_paths, removed_paths
+        )
+        if touched:
+            from mira.security.poller import poll_repo as _vuln_poll_repo
+
+            asyncio.create_task(_vuln_poll_repo(owner, repo))
+    except Exception as exc:
+        logger.warning("Manifest refresh failed for %s/%s: %s", owner, repo, exc)
 
     if not changed_paths:
         return 0

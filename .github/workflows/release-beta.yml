@@ -1,18 +1,17 @@
-name: Release
+name: Release (beta)
 
-# Gated release: pushing a v* tag runs the eval gate first; the container is
-# built and pushed ONLY if the evals pass. This is the ordering that matters —
-# evals run *before* the artifact ships, never alongside it.
+# Same gated flow as Release, but for prerelease tags (v1.2.3-beta1, -beta2, …).
+# Evals run first; the beta container ships only if they pass. Beta images are
+# tagged with the full prerelease version and never get the `latest` tag.
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    tags: ["v*-beta*"]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Gate: the stable eval suite (excludes the noisy benchmark scorecard).
   evals:
     uses: ./.github/workflows/evals.yml
     secrets: inherit
@@ -38,9 +37,9 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push
         uses: docker/build-push-action@v7

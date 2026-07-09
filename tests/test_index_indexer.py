@@ -313,6 +313,92 @@ class TestIndexDiff:
         assert store.get_summary("src/utils.py") is not None
         store.close()
 
+    async def test_index_diff_refreshes_changed_lockfile(self, tmp_path):
+        """A lockfile-only push must refresh the package inventory even though
+        lockfiles are excluded from code indexing (#157)."""
+        import asyncio
+
+        store = IndexStore(str(tmp_path / "test.db"))
+        store.replace_manifest_packages(
+            "package-lock.json",
+            [
+                {
+                    "name": "lodash",
+                    "kind": "npm",
+                    "version": "4.17.20",
+                    "file_path": "package-lock.json",
+                    "is_dev": False,
+                }
+            ],
+        )
+
+        lock = json.dumps(
+            {
+                "name": "app",
+                "lockfileVersion": 3,
+                "packages": {"node_modules/lodash": {"version": "4.17.21"}},
+            }
+        )
+        mock_llm = AsyncMock()
+        mock_llm.complete = AsyncMock(return_value='{"files": []}')
+
+        with (
+            patch("mira.index.indexer._fetch_file_content", return_value=lock),
+            patch("mira.security.poller.poll_repo", new=AsyncMock()) as poll,
+        ):
+            count = await index_diff(
+                owner="test",
+                repo="repo",
+                token="fake-token",
+                config=MiraConfig(),
+                store=store,
+                llm=mock_llm,
+                changed_paths=["package-lock.json"],
+            )
+            await asyncio.sleep(0)  # let the fire-and-forget vuln poll run
+
+        # Not code-indexed (excluded), but the inventory picked up the bump.
+        assert count == 0
+        versions = {(p.name, p.version) for p in store.list_manifest_packages()}
+        assert ("lodash", "4.17.21") in versions
+        assert ("lodash", "4.17.20") not in versions
+        mock_llm.complete.assert_not_called()
+        poll.assert_called_once_with("test", "repo")
+        store.close()
+
+    async def test_index_diff_clears_removed_manifest(self, tmp_path):
+        """Deleting a manifest in a push drops its package rows."""
+        store = IndexStore(str(tmp_path / "test.db"))
+        store.replace_manifest_packages(
+            "poetry.lock",
+            [
+                {
+                    "name": "requests",
+                    "kind": "pypi",
+                    "version": "2.31.0",
+                    "file_path": "poetry.lock",
+                    "is_dev": False,
+                }
+            ],
+        )
+
+        mock_llm = AsyncMock()
+        mock_llm.complete = AsyncMock(return_value='{"files": []}')
+
+        with patch("mira.security.poller.poll_repo", new=AsyncMock()):
+            await index_diff(
+                owner="test",
+                repo="repo",
+                token="fake-token",
+                config=MiraConfig(),
+                store=store,
+                llm=mock_llm,
+                removed_paths=["poetry.lock"],
+            )
+
+        assert store.list_manifest_packages() == []
+        store.close()
+
     async def test_index_diff_removes_deleted(self, tmp_path):
         store = IndexStore(str(tmp_path / "test.db"))
         from mira.index.store import FileSummary

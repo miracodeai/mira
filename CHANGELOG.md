@@ -12,6 +12,53 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Contribution analytics (secondary)** — each contributor's detail page also shows authoring stats (commits, PRs opened/merged, lines), a GitHub-style year-long contribution heatmap, and Mira's differentiated **review-quality** signal (blockers/warnings their PRs triggered + the accept rate of Mira's feedback). Contributors are keyed provider-agnostically `(provider, login)` so non-GitHub providers can be added later.
 - A reusable **DataTable** component (column defs, header sorting, standalone pagination, loading/empty states) plus an inline 5-bar **gauge**, both used across the review pages.
 
+## [0.5.1] — 2026-07-09
+
+### Fixed
+
+- **One malformed walkthrough entry no longer drops the whole walkthrough** — when the LLM omits a required `path` or `label` on a single `change_groups` entry (plausible on large diffs), that entry is now skipped with a warning instead of failing the entire response, so the walkthrough comment still posts. Closes #162.
+- **The walkthrough placeholder is always finalized** — when a review produces no walkthrough (all files matched exclusion rules, empty diff, size limits, or walkthrough generation failed), the "Reviewing this PR…" placeholder comment is now updated with the reason instead of staying stuck forever. Part of #162.
+
+## [0.5.0] — 2026-07-07
+
+### Added
+
+- **Learnings approval queue** — auto-synthesized learnings now land as *pending* and must be approved by an admin before they influence reviews. Approve or reject from a queue-clearing side panel or straight from the dashboard's pending-learnings widget.
+- **Anyone can propose a learning** — non-admin submissions are created as pending; creators can edit or delete their own pending learnings while admins manage everything. Learnings track their author and show an avatar + username.
+- **Learnings page overhaul** — dedicated add/edit page (replacing the modal), sortable and paginated table (recently-updated first), repo/status/enabled filters with search, URL-driven tabs so browser Back works, and GitHub links per repo.
+- **Newest frontier models in the registry** — Claude Sonnet 5, Claude Opus 4.8, Claude Fable 5, GPT-5.2, Gemini 3.1 Pro Preview, DeepSeek V4 Flash/Pro, and MiniMax M3, with pricing and ids verified against the live OpenRouter catalog.
+
+### Changed
+
+- **Superseded registry entries removed** — GPT-4o and GPT-4o mini, GPT-4.1 Mini, Gemini 2.5 Flash/Pro, MiniMax M2.7, and the OpenRouter Claude Opus 4.6 id (the Bedrock profile remains). Deployments still configured with these keep working — the dashboard accepts any id the configured backend serves; they just lose curated pricing metadata.
+- **Recommended defaults unchanged** — Claude Sonnet 4.6 for reviews and Claude Haiku 4.5 for indexing were benchmarked on the review-quality baseline and keep the badge until a newer model measurably beats them.
+
+### Fixed
+
+- **Dark mode dropdown contrast** — popovers and select menus use an elevated surface color instead of blending invisibly into the card behind them.
+- **Pending learnings are private** — the learned-rule detail endpoint requires authentication and returns 403 when a non-admin reads someone else's pending/rejected learning.
+- The learnings panel advances to the next pending item only after the approve/reject call resolves.
+- Database inserts that fail to produce a row id now raise instead of silently returning id 0 (learned rules, feedback events).
+- The learned-rules API client URL-encodes the status query parameter.
+
+## [0.4.1] — 2026-07-06
+
+### Added
+
+- **Activity page** — an org-wide feed of PR reviews with a filterable table and a per-PR detail timeline. (#145, #146, #147 — already in the 0.4.1 betas.)
+- **Backend-aware, searchable model pickers** — the dashboard's model dropdowns are now search bars that list the configured backend's live catalog (OpenRouter's tool-capable models, your Bedrock account's inference profiles, or a generic endpoint's `/models`), cached for an hour with the bundled registry as fallback. Any free-form model id can be typed directly, matching `mira.yaml`'s flexibility, and an **Inherit from deployment config** choice clears the dashboard override so `mira.yaml` is authoritative again. The effective model and its source (`dashboard setting` vs `mira.yaml`) are logged on every review, so an override is never silent. Closes #124.
+- **Current-generation models in the registry** — GPT-5 Nano/Mini, GPT-5.1 Codex/Codex Mini, GPT-4.1 Mini, Gemini 3 Flash (Preview), and Gemini 3.1 Flash Lite, with pricing verified against the live OpenRouter catalog. Closes #125.
+
+### Changed
+
+- **`llm.base_url` is validated at config load** — non-http(s) schemes are rejected, and plain `http://` is allowed only for local endpoints (localhost, private IPs, dotless hostnames like docker-compose services); public hosts must use `https://`. A failed API-key lookup during a model-catalog fetch is now logged instead of silently sending an unauthenticated request.
+
+### Fixed
+
+- **Discord webhooks work via the Slack-compatible endpoint** — a `discord.com/api/webhooks/{id}/{token}/slack` URL is now detected as Slack format instead of falling through to generic JSON (which Discord rejects). Bare Discord URLs stay generic on purpose, so the test button surfaces the mismatch instead of silently guessing. Closes #158.
+- **Dependency-bump pushes refresh the vulnerability inventory** — push-triggered incremental indexing skipped manifests/lockfiles entirely (they're excluded from code indexing), so merging a lockfile-only PR left `package_manifests` stale and the Vulnerabilities page kept flagging already-fixed advisories until a full re-index. `index_diff` now routes changed/removed manifests through the same parse-and-store pass the full indexer uses and fires an immediate OSV poll. Closes #157.
+- **Global rules now reach reviews on Postgres deployments** — the review engine read global rules from a throwaway SQLite `AppDatabase()` instead of the configured `DATABASE_URL` backend, so dashboard-stored rules were silently ignored, a stray `_app.db` (with a default-password admin) was created in the index dir, and a DB connection leaked on every review. It now reuses the server's configured instance. Closes #123.
+
 ## [0.4.0] — 2026-06-14
 
 ### Added
@@ -187,6 +234,9 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.5.1]: https://github.com/miracodeai/mira/releases/tag/v0.5.1
+[0.5.0]: https://github.com/miracodeai/mira/releases/tag/v0.5.0
+[0.4.1]: https://github.com/miracodeai/mira/releases/tag/v0.4.1
 [0.4.0]: https://github.com/miracodeai/mira/releases/tag/v0.4.0
 [0.3.1]: https://github.com/miracodeai/mira/releases/tag/v0.3.1
 [0.3.0]: https://github.com/miracodeai/mira/releases/tag/v0.3.0

@@ -7,19 +7,16 @@ model there; this file picks it up automatically.
 
 from __future__ import annotations
 
+import logging
+
 from mira.config import LLMConfig
 from mira.llm import registry
 
-# ── Backwards-compatible accessors ──
-# Older imports of MODEL_PRICING / INDEXING_MODELS / REVIEW_MODELS still
-# work; they now derive from the registry.
+logger = logging.getLogger(__name__)
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     model_id: registry.pricing(model_id) for model_id in registry.all_models()
 }
-
-INDEXING_MODELS = registry.models_for_purpose("indexing")
-REVIEW_MODELS = registry.models_for_purpose("review")
 
 # Thinking-mode options for the review model. "off" disables extended thinking
 # (today's behavior); low/medium/high map to OpenRouter's unified
@@ -106,31 +103,35 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     """Return an LLMConfig with the appropriate model set for the given purpose.
 
     Reads the DB setting first (via _app_db), falls back to config fields.
+    Logs the effective model and where it came from, so a dashboard override
+    shadowing mira.yaml is visible instead of silent (issue #124).
     """
-    # Thinking mode only applies to reviews; other purposes leave it off.
-    thinking_mode: str | None = None
+    db_model: str | None = None
+    db_thinking: str | None = None
     try:
         from mira.dashboard.api import _app_db
 
-        if purpose == "indexing":
-            db_val = _app_db.get_setting("indexing_model")
-            resolved = get_indexing_model(base, db_val)
-        elif purpose == "review":
-            db_val = _app_db.get_setting("review_model")
-            resolved = get_review_model(base, db_val)
-            thinking_mode = get_review_thinking_mode(
-                base, _app_db.get_setting("review_thinking_mode")
-            )
-        else:
-            resolved = base.model
+        if _app_db is not None:
+            if purpose == "indexing":
+                db_model = _app_db.get_setting("indexing_model")
+            elif purpose == "review":
+                db_model = _app_db.get_setting("review_model")
+                db_thinking = _app_db.get_setting("review_thinking_mode")
     except Exception:
-        # DB not available — fall back to config fields
-        if purpose == "indexing":
-            resolved = base.indexing_model or base.model
-        elif purpose == "review":
-            resolved = base.review_model or base.model
-            thinking_mode = get_review_thinking_mode(base)
-        else:
-            resolved = base.model
+        pass  # DB not available — resolve from config fields alone
 
+    # Thinking mode only applies to reviews; other purposes leave it off.
+    thinking_mode: str | None = None
+    if purpose == "indexing":
+        resolved = get_indexing_model(base, db_model)
+        config_model = base.indexing_model
+    elif purpose == "review":
+        resolved = get_review_model(base, db_model)
+        config_model = base.review_model
+        thinking_mode = get_review_thinking_mode(base, db_thinking)
+    else:
+        return base.model_copy(update={"reasoning_effort": None})
+
+    source = "dashboard setting" if db_model else ("mira.yaml" if config_model else "default")
+    logger.info("%s model: %s (source: %s)", purpose.capitalize(), resolved, source)
     return base.model_copy(update={"model": resolved, "reasoning_effort": thinking_mode})

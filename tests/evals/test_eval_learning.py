@@ -66,6 +66,14 @@ def _engine() -> tuple[ReviewEngine, LLMProvider]:
     return engine, llm
 
 
+def _approve_all(store: IndexStore) -> None:
+    """Synthesized rules land 'pending' and must not influence reviews until
+    an admin approves them — these evals test synthesis quality and review
+    influence, so simulate the approval step."""
+    for rule in store.list_learned_rules(status="pending"):
+        store.set_learned_rule_status(rule.id, "approved")
+
+
 def _fake_pr_info(owner: str, repo: str) -> PRInfo:
     return PRInfo(
         title="Eval PR",
@@ -99,6 +107,7 @@ class TestSynthesis:
         assert n_pat + n_llm >= 1, "no rules emerged from null-check feedback"
 
         store = IndexStore.open(owner, repo)
+        _approve_all(store)
         rule_texts = " ".join(r.rule_text.lower() for r in store.list_active_learned_rules())
         store.close()
 
@@ -122,6 +131,7 @@ class TestSynthesis:
         assert n_llm >= 1, "LLM did not produce a rule from 8 'where are the tests' comments"
 
         store = IndexStore.open(owner, repo)
+        _approve_all(store)
         rule_texts = " ".join(r.rule_text.lower() for r in store.list_active_learned_rules())
         store.close()
 
@@ -145,6 +155,7 @@ class TestRulesInfluenceReview:
         synthesize_rules(store)
         engine, llm = _engine()
         await synthesize_from_human_reviews(store, llm)
+        _approve_all(store)
         store.close()
 
         engine._pr_info = _fake_pr_info(owner, repo)
@@ -177,9 +188,10 @@ class TestRulesInfluenceReview:
         synthesize_rules(store)
         engine, llm = _engine()
         await synthesize_from_human_reviews(store, llm)
+        _approve_all(store)
 
-        # Part A — deterministic: at least one learned rule must be persisted
-        # and retrievable via the same code path the engine uses at review time.
+        # Part A — deterministic: at least one approved rule must be
+        # retrievable via the same code path the engine uses at review time.
         rules = store.get_learned_rules_text()
         store.close()
         assert rules, "no learned rules were persisted after synthesis"
