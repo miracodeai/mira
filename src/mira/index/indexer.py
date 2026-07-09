@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
 import logging
 import os
-import tarfile
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-import httpx
 from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig, load_config
@@ -22,6 +19,7 @@ from mira.index.manifests import is_manifest, parse_manifest
 from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
 from mira.llm import create_llm
 from mira.llm.utils import strip_think_blocks
+from mira.platforms.fetch import RepoFetcher, make_fetcher
 
 logger = logging.getLogger(__name__)
 
@@ -212,146 +210,6 @@ def _language_from_path(path: str) -> str:
     entries that skip the LLM."""
     _, ext = os.path.splitext(path)
     return _EXT_LANG.get(ext.lower(), "")
-
-
-async def _fetch_default_branch(owner: str, repo: str, token: str) -> str:
-    """Fetch the default branch name for a repo."""
-    url = f"https://api.github.com/repos/{owner}/{repo}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-    }
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers, timeout=15)
-            resp.raise_for_status()
-            return str(resp.json().get("default_branch", "main"))
-    except Exception as exc:
-        logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
-        return "main"
-
-
-async def _fetch_repo_tree(owner: str, repo: str, token: str, branch: str = "main") -> list[str]:
-    """Fetch the file tree for a repo via GitHub API."""
-    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-    }
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-    paths = []
-    for item in data.get("tree", []):
-        if item.get("type") == "blob":
-            paths.append(item["path"])
-    return paths
-
-
-async def _fetch_file_content(
-    owner: str,
-    repo: str,
-    path: str,
-    token: str,
-    ref: str = "main",
-    semaphore: asyncio.Semaphore | None = None,
-) -> str | None:
-    """Fetch a single file's content from GitHub."""
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.raw+json",
-    }
-
-    async def _fetch() -> str | None:
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, headers=headers, timeout=30)
-                if resp.status_code == 404:
-                    return None
-                resp.raise_for_status()
-                return resp.text
-        except Exception as exc:
-            logger.warning("Failed to fetch %s: %s", path, exc)
-            return None
-
-    if semaphore:
-        async with semaphore:
-            return await _fetch()
-    return await _fetch()
-
-
-async def _fetch_repo_tarball(
-    owner: str,
-    repo: str,
-    token: str,
-    ref: str = "main",
-    max_file_size: int = 1_048_576,
-) -> dict[str, str] | None:
-    """Download the entire repo as a tarball and return ``{path: content}``.
-
-    GitHub's ``/repos/{owner}/{repo}/tarball/{ref}`` returns one redirected
-    download containing every file. For a 50-file repo, this is ~5-10 s
-    *total* — vs. ~5+ minutes worth of per-file Contents-API roundtrips at
-    our previous concurrency cap.
-
-    Returns ``None`` on failure (caller should fall back to per-file fetch).
-    Files larger than ``max_file_size`` bytes or undecodable as UTF-8 are
-    skipped silently.
-    """
-    url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{ref}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "mira-indexer",
-    }
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                logger.warning(
-                    "Tarball fetch failed for %s/%s: %d",
-                    owner,
-                    repo,
-                    resp.status_code,
-                )
-                return None
-            blob = resp.content
-    except Exception as exc:
-        logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
-        return None
-
-    out: dict[str, str] = {}
-    try:
-        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
-            for member in tf:
-                if not member.isfile():
-                    continue
-                if max_file_size and member.size > max_file_size:
-                    continue
-                # Tarballs are wrapped in a top-level dir like "owner-repo-{sha}/".
-                # Strip that prefix so paths match the GitHub tree paths.
-                parts = member.name.split("/", 1)
-                if len(parts) != 2:
-                    continue
-                rel_path = parts[1]
-                if not rel_path:
-                    continue
-                f = tf.extractfile(member)
-                if f is None:
-                    continue
-                try:
-                    out[rel_path] = f.read().decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
-    except (tarfile.TarError, OSError) as exc:
-        logger.warning("Tarball extract failed for %s/%s: %s", owner, repo, exc)
-        return None
-
-    logger.info("Tarball: fetched %d files for %s/%s in one request", len(out), owner, repo)
-    return out
 
 
 def _safe_call(call: Any) -> tuple[str, str]:
@@ -550,13 +408,14 @@ async def _summarize_batch(
 async def index_repo(
     owner: str,
     repo: str,
-    token: str,
+    token: str | None = None,
     config: MiraConfig | None = None,
     store: IndexStore | None = None,
     llm: Any = None,
     full: bool = False,
     branch: str | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    fetcher: RepoFetcher | None = None,
 ) -> int:
     """Index a full repository. Returns number of files indexed.
 
@@ -576,13 +435,16 @@ async def index_repo(
         llm = create_llm(llm_config_for("indexing", config.llm))
     if store is None:
         store = IndexStore.open(owner, repo)
+    # Back-compat: callers that pass a raw GitHub token get a GitHub fetcher.
+    if fetcher is None:
+        fetcher = make_fetcher("github", token or "")
 
     # Auto-detect default branch if not specified
     if branch is None:
-        branch = await _fetch_default_branch(owner, repo, token)
+        branch = await fetcher.default_branch(owner, repo)
 
     # Fetch repo tree
-    tree_paths = await _fetch_repo_tree(owner, repo, token, branch)
+    tree_paths = await fetcher.repo_tree(owner, repo, branch)
     indexable = [p for p in tree_paths if _should_index(p, config.filter.exclude_patterns)]
     logger.info(
         "Found %d indexable files in %s/%s (out of %d total)",
@@ -598,8 +460,8 @@ async def index_repo(
     # (e.g. for a >100 MB repo where GitHub may reject the request).
     max_file_size = config.index.max_file_size
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
-    tarball: dict[str, str] | None = await _fetch_repo_tarball(
-        owner, repo, token, ref=branch, max_file_size=max_file_size
+    tarball: dict[str, str] | None = await fetcher.repo_tarball(
+        owner, repo, branch, max_file_size=max_file_size
     )
 
     if tarball is not None:
@@ -607,7 +469,7 @@ async def index_repo(
     else:
         logger.info("Tarball unavailable, falling back to per-file fetch")
         tasks = [
-            _fetch_file_content(owner, repo, path, token, ref=branch, semaphore=fetch_sem)
+            fetcher.file_content(owner, repo, path, branch, semaphore=fetch_sem)
             for path in indexable
         ]
         contents = await asyncio.gather(*tasks)
@@ -724,7 +586,7 @@ async def index_repo(
         await _index_manifests(
             owner,
             repo,
-            token,
+            fetcher,
             branch,
             store,
             tree_paths,
@@ -739,7 +601,7 @@ async def index_repo(
     # extract team-specific coding rules. Stored on the repos row so the
     # review prompt can inject them.
     try:
-        await _index_conventions(owner, repo, token, branch, tree_paths, fetch_sem, tarball)
+        await _index_conventions(owner, repo, fetcher, branch, tree_paths, fetch_sem, tarball)
     except Exception as exc:
         logger.warning("Conventions indexing failed for %s/%s: %s", owner, repo, exc)
 
@@ -764,7 +626,7 @@ async def index_repo(
 async def _index_conventions(
     owner: str,
     repo: str,
-    token: str,
+    fetcher: RepoFetcher,
     branch: str,
     tree_paths: list[str],
     fetch_sem: asyncio.Semaphore,
@@ -786,10 +648,7 @@ async def _index_conventions(
         file_contents = {p: cached_contents.get(p) or "" for p in candidates}
     else:
         results = await asyncio.gather(
-            *(
-                _fetch_file_content(owner, repo, p, token, ref=branch, semaphore=fetch_sem)
-                for p in candidates
-            )
+            *(fetcher.file_content(owner, repo, p, branch, semaphore=fetch_sem) for p in candidates)
         )
         file_contents = {p: (c or "") for p, c in zip(candidates, results, strict=False)}
 
@@ -835,7 +694,7 @@ def _store_manifest_file(store: IndexStore, path: str, content: str) -> int:
 async def _index_manifests(
     owner: str,
     repo: str,
-    token: str,
+    fetcher: RepoFetcher,
     branch: str,
     store: IndexStore,
     tree_paths: list[str],
@@ -857,7 +716,7 @@ async def _index_manifests(
         contents: list[str | None] = [cached_contents.get(p) for p in manifest_paths]
     else:
         tasks = [
-            _fetch_file_content(owner, repo, p, token, ref=branch, semaphore=fetch_sem)
+            fetcher.file_content(owner, repo, p, branch, semaphore=fetch_sem)
             for p in manifest_paths
         ]
         contents = await asyncio.gather(*tasks)
@@ -983,7 +842,7 @@ async def _summarize_directories(store: IndexStore, llm: Any, semaphore: asyncio
 async def _refresh_manifests_incremental(
     owner: str,
     repo: str,
-    token: str,
+    fetcher: RepoFetcher,
     branch: str,
     store: IndexStore,
     changed_paths: list[str] | None,
@@ -1000,10 +859,7 @@ async def _refresh_manifests_incremental(
     if changed:
         fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
         contents = await asyncio.gather(
-            *(
-                _fetch_file_content(owner, repo, p, token, ref=branch, semaphore=fetch_sem)
-                for p in changed
-            )
+            *(fetcher.file_content(owner, repo, p, branch, semaphore=fetch_sem) for p in changed)
         )
         for path, content in zip(changed, contents, strict=False):
             if content is None:
@@ -1018,13 +874,14 @@ async def _refresh_manifests_incremental(
 async def index_diff(
     owner: str,
     repo: str,
-    token: str,
+    token: str | None = None,
     config: MiraConfig | None = None,
     store: IndexStore | None = None,
     llm: Any = None,
     changed_paths: list[str] | None = None,
     removed_paths: list[str] | None = None,
     branch: str = "main",
+    fetcher: RepoFetcher | None = None,
 ) -> int:
     """Incremental index for changed files. Returns number of files re-indexed."""
     if config is None:
@@ -1035,6 +892,8 @@ async def index_diff(
         llm = create_llm(llm_config_for("indexing", config.llm))
     if store is None:
         store = IndexStore.open(owner, repo)
+    if fetcher is None:
+        fetcher = make_fetcher("github", token or "")
 
     # Remove deleted files
     if removed_paths:
@@ -1045,7 +904,7 @@ async def index_diff(
     # inventory — a dependency-bump push usually touches nothing else (#157).
     try:
         touched = await _refresh_manifests_incremental(
-            owner, repo, token, branch, store, changed_paths, removed_paths
+            owner, repo, fetcher, branch, store, changed_paths, removed_paths
         )
         if touched:
             from mira.security.poller import poll_repo as _vuln_poll_repo
@@ -1065,8 +924,7 @@ async def index_diff(
     # Fetch content
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
     tasks = [
-        _fetch_file_content(owner, repo, path, token, ref=branch, semaphore=fetch_sem)
-        for path in to_index
+        fetcher.file_content(owner, repo, path, branch, semaphore=fetch_sem) for path in to_index
     ]
     contents = await asyncio.gather(*tasks)
 

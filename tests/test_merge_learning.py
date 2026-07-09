@@ -46,6 +46,16 @@ class TestParseBotCommentMetadata:
         assert meta["severity"] == "warning"
         assert meta["title"] == "Raw SQL query"
 
+    def test_no_category_emoji(self):
+        # Current format drops the leading category emoji.
+        body = (
+            "**Security issue**  \n🛑 Blocker — must fix before merge\n\n**Raw SQL query**\n\nbody"
+        )
+        meta = parse_bot_comment_metadata(body)
+        assert meta["category"] == "security"
+        assert meta["severity"] == "blocker"
+        assert meta["title"] == "Raw SQL query"
+
     def test_missing_severity_still_extracts_category_and_title(self):
         body = "⚡ **Performance**\n\n**Slow loop**\n\nbody"
         meta = parse_bot_comment_metadata(body)
@@ -274,7 +284,7 @@ class TestSynthesizeFromHumanReviews:
 def test_webhook_routes_merged_pr(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from mira.github_app import webhooks as wh
+    from mira.platforms import server as wh
 
     called_with: dict = {}
 
@@ -282,7 +292,7 @@ def test_webhook_routes_merged_pr(monkeypatch):
         called_with["payload"] = payload
         called_with["bot_name"] = bot_name
 
-    monkeypatch.setattr(wh, "handle_pr_merged", fake_handler)
+    monkeypatch.setattr("mira.platforms.github.webhook.handle_pr_merged", fake_handler)
 
     app_auth = object()
     app = wh.create_app(app_auth, webhook_secret="secret", bot_name="mira")
@@ -327,14 +337,14 @@ def test_webhook_routes_merged_pr(monkeypatch):
 def test_webhook_ignores_closed_but_not_merged(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from mira.github_app import webhooks as wh
+    from mira.platforms import server as wh
 
     called = []
 
     async def fake_handler(*args, **kwargs):
         called.append(True)
 
-    monkeypatch.setattr(wh, "handle_pr_merged", fake_handler)
+    monkeypatch.setattr("mira.platforms.github.webhook.handle_pr_merged", fake_handler)
 
     app_auth = object()
     app = wh.create_app(app_auth, webhook_secret="secret", bot_name="mira")
@@ -396,7 +406,7 @@ class _StoreProxy:
 @pytest.mark.asyncio
 async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
     """Exercise the whole handler: provider → parser → store → synthesis chain."""
-    from mira.github_app import handlers
+    from mira.platforms.github import webhook as handlers
 
     store = IndexStore(str(tmp_path / "test.db"))
 
@@ -414,7 +424,10 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
         actor="alice",
     )
 
-    monkeypatch.setattr(handlers, "_open_store", lambda owner, repo: _StoreProxy(store))
+    monkeypatch.setattr(
+        "mira.platforms.handlers._open_store",
+        lambda owner, repo, platform="github": _StoreProxy(store),
+    )
 
     mock_provider = MagicMock()
     mock_provider.get_all_bot_threads = AsyncMock(
@@ -484,7 +497,7 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
 
     fake_config = MagicMock()
     fake_config.llm = MagicMock()
-    monkeypatch.setattr(handlers, "load_config", lambda: fake_config)
+    monkeypatch.setattr("mira.platforms.handlers.load_config", lambda: fake_config)
 
     # Bypass the dashboard DB lookup in llm_config_for.
     import mira.dashboard.models_config as mc
@@ -505,7 +518,7 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
             }
         )
     )
-    monkeypatch.setattr(handlers, "create_llm", lambda *a, **kw: fake_llm)
+    monkeypatch.setattr("mira.platforms.handlers.create_llm", lambda *a, **kw: fake_llm)
 
     payload = {
         "action": "closed",

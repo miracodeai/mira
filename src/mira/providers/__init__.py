@@ -32,5 +32,7 @@ def create_provider(name: str, token: str) -> BaseProvider:
 
 # Register built-in providers
 from mira.providers.github import GitHubProvider  # noqa: E402
+from mira.providers.gitlab import GitLabProvider  # noqa: E402
 
 register_provider("github", GitHubProvider)
+register_provider("gitlab", GitLabProvider)

@@ -57,17 +57,71 @@ class LLMReviewResponse(BaseModel):
     metadata: LLMMetadata = Field(default_factory=LLMMetadata)
 
 
+# Anthropic-style tool-call XML delimiters some models leak into the JSON
+# arguments string (seen on Haiku via OpenRouter), e.g. a valid object
+# followed by ``</parameter></invoke>``. We cut the response at the first such
+# tag, then re-balance braces.
+_TOOL_XML_TAGS = ("</parameter>", "</invoke>", "</function_calls>", "<parameter", "<invoke")
+
+
+def _balance_json(text: str) -> str:
+    """Close any unclosed strings/brackets so a truncated object parses."""
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif (ch == "}" and stack and stack[-1] == "{") or (
+            ch == "]" and stack and stack[-1] == "["
+        ):
+            stack.pop()
+    out = text.rstrip().rstrip(",").rstrip()
+    if in_string:
+        out += '"'
+    closers = {"{": "}", "[": "]"}
+    return out + "".join(closers[c] for c in reversed(stack))
+
+
+def _repair_json(text: str) -> str:
+    """Best-effort repair: drop leaked tool-call XML, then re-balance brackets."""
+    cut = min((i for i in (text.find(t) for t in _TOOL_XML_TAGS) if i != -1), default=-1)
+    if cut != -1:
+        text = text[:cut]
+    return _balance_json(text)
+
+
+def loads_lenient(text: str) -> object | None:
+    """Parse JSON, repairing leaked tool-call XML / missing braces. None on failure."""
+    for candidate in (text, _repair_json(text)):
+        try:
+            return json.loads(candidate, strict=False)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return None
+
+
 def parse_llm_response(raw_text: str) -> LLMReviewResponse:
     """Parse raw LLM text output into a validated LLMReviewResponse."""
     cleaned = strip_think_blocks(raw_text)
     cleaned = strip_code_fences(cleaned)
 
     # strict=False tolerates raw newlines from models that double-encode the
-    # comments array as a pretty-printed JSON string.
-    try:
-        data = json.loads(cleaned, strict=False)
-    except json.JSONDecodeError as e:
-        raise ResponseParseError(f"LLM response is not valid JSON: {e}") from e
+    # comments array as a pretty-printed JSON string; the repair pass salvages
+    # responses with leaked tool-call XML or a missing closing brace.
+    data = loads_lenient(cleaned)
+    if data is None:
+        raise ResponseParseError("LLM response is not valid JSON (even after repair)")
 
     if not isinstance(data, dict):
         raise ResponseParseError(f"Expected JSON object, got {type(data).__name__}")

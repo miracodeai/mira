@@ -16,17 +16,16 @@ import pytest
 from fastapi import HTTPException
 
 from mira import outbound_webhooks as nf
-from mira.dashboard.api import (
-    WebhookCreate,
-    WebhookUpdate,
+from mira.dashboard.api import WebhookCreate, WebhookUpdate
+from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers.admin import (
     create_webhook,
     delete_webhook,
     get_webhook,
     list_webhooks,
     update_webhook,
 )
-from mira.dashboard.api import test_webhook as run_webhook_test
-from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers.admin import test_webhook as run_webhook_test
 
 
 @pytest.fixture

@@ -13,9 +13,28 @@
   <a href="https://discord.gg/uEU6qvYhgm"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat&logo=discord&logoColor=white" alt="Join our Discord" /></a>
 </p>
 
+<p align="center">
+  <a href="https://docs.miracode.ai">Docs</a> ·
+  <a href="https://discord.gg/uEU6qvYhgm">Community</a> ·
+  <a href="https://docs.miracode.ai/deployment"><strong>Self-Host Guide »</strong></a> ·
+  <a href="#benchmark">Benchmark</a>
+</p>
+
 Self-host every feature: full review engine, codebase indexing, vulnerability scanning, custom rules, org-wide package search, dashboard, learning loop. No paid tier, no license key, no SaaS upsell.
 
 Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https://openrouter.ai), which fronts Anthropic, OpenAI, Google, DeepSeek, and more) and posts concise, actionable feedback. The noise filter, confidence clamping, and learning loop ensure you only see comments that matter. See [`FEATURES.md`](FEATURES.md) for the full surface.
+
+## Why Teams Choose Mira
+
+- **Model agnostic** — Run Claude, GPT, Gemini, DeepSeek, Llama, or any OpenAI-compatible endpoint: OpenRouter, vLLM, Ollama, Together, Groq, Fireworks, or AWS Bedrock direct. Per-provider quirks are config, not code, so adding a provider is a one-line entry.
+- **Zero markup on LLM costs** — Bring your own key. You pay the model provider directly; Mira never proxies your spend or adds a multiplier. The dashboard shows real per-repo, per-model cost — not estimates.
+- **Learns from your context** — Mira synthesizes rules from your merged PRs: rejected comments and human review patterns become team rules that shape future reviews.
+- **You set the rules** — Define custom and org-wide review rules in plain language, per-repo via `.mira.yaml` or from the dashboard.
+- **Privacy first** — Self-hosted by default. Diffs, indexes, review history, and CVE data live in your SQLite or Postgres, on infra you own. No phone-home, no required telemetry, no "is this used for training?"
+- **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — and Mira is the fastest tool on the public [Code Review Bench](#benchmark).
+- **Indexed, cross-file context** — A full-repo code index gives the model real project context, not just the diff — plus org-wide package search and hourly OSV.dev CVE scanning across every repo.
+- **GitHub and GitLab** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline, with full feature parity across both. Bitbucket and Gitea adapters are next; the engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
+- **Self-host on day one** — Docker image with Railway / Fly.io / Render configs, SQLite or Postgres. Every feature included.
 
 ## Dashboard
 
@@ -36,18 +55,6 @@ Most AI reviewers are SaaS: your diffs (and often the full surrounding code) lea
 
 If your engineering team needs answers like *"which of our repos are exposed to this CVE?"* or *"what's the blast radius of changing this function?"*, those questions stop being multi-day investigations and start being one-click dashboard pages.
 
-## Highlights
-
-- **Any OpenAI-compatible endpoint**: OpenRouter by default (Anthropic, OpenAI, Google Gemini, DeepSeek, …), or point `llm.base_url` at vLLM, Ollama, LiteLLM proxy, LocalAI, llama.cpp, Together, Fireworks, Groq, or Cerebras for self-hosted / data-resident reviews. See [Custom endpoints](https://docs.miracode.ai/configuration/mira-yml#custom-endpoints).
-- **Low noise**: Confidence thresholds, dedupe, severity sorting, per-PR comment caps
-- **Indexed reviews**: full-repo code index gives the LLM real context, not just the diff
-- **Learns your team**: synthesizes rules from rejected comments and human review patterns on merged PRs
-- **Vulnerability scanning**: hourly OSV.dev poll surfaces CVEs across every package in every repo
-- **Org-wide package search**: answer "which repos use `lodash@4.17.20`?" in seconds
-- **Configurable**: `.mira.yaml` for per-repo settings, custom + global rules in the dashboard
-- **Self-host on day one**: Docker image, Railway / Fly.io / Render configs, SQLite or Postgres
-- **GitHub today, more platforms coming**: GitLab, Bitbucket, and Gitea support are on the roadmap. Same review engine, same dashboard, just a different provider adapter
-
 ## Benchmark
 
 Mira is **the fastest tool measured** on the public [Code Review Bench](https://codereview.withmartian.com/?mode=offline), and the only one on the speed/quality Pareto frontier: every tool that scores higher on F1 takes **5–14× longer per PR**.
@@ -58,7 +65,7 @@ Plotted against every published competitor on the same subset, Mira sits in the 
 
 ![Speed vs quality: Mira on the Pareto frontier](.github/assets/benchmark-by-language.svg)
 
-Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.5.
+Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.6.
 
 | | **Mira** | Cubic-v2 | Greptile | CodeRabbit | GitHub Copilot |
 |---|---:|---:|---:|---:|---:|
@@ -67,49 +74,25 @@ Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.5.
 | Recall | **46%** | 65% | 40% | 50% | 43% |
 | Median time / PR | **~77s** | ~9m | ~5m | ~5m | ~10m |
 
-> Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.5 as the judge.
+> Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.6 as the judge.
 
 ## Quick Start
 
-### GitHub App (self-hosted)
+Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App) and GitLab (via a group/project access token) are both fully supported; Bitbucket and Gitea are next.
 
-Run Mira as a GitHub App that auto-reviews every PR and responds to comments.
-
-> **Note:** GitHub is the only supported provider today. **GitLab, Bitbucket, and Gitea adapters are on the roadmap.** The review engine, indexer, and dashboard are provider-agnostic; only the webhook + comment-posting layer is GitHub-specific. Star the repo to follow along.
-
-**1. Create a GitHub App** at [github.com/settings/apps/new](https://github.com/settings/apps/new):
-- Webhook URL: `https://your-server.com/github/webhook`
-- Permissions: Pull Requests (read+write), Contents (read+write), Issues (read+write)
-- Events: Pull requests, Issue comments
-- Generate a private key (.pem)
-
-**2. Deploy:**
+**1. Deploy** — one-click on Railway, or with Docker:
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/workspace/templates/05874bad-2d98-43f4-aa93-332f394e9ebd)
 
-Or with Docker:
-
-Two files: `mira.yaml` for non-secret defaults, `.env` for secrets. Pass both into the container.
-
 ```yaml
-# mira.yaml: deployment-wide defaults. Every key is optional.
+# mira.yaml — deployment-wide defaults. Every key is optional.
 llm:
   model: "anthropic/claude-sonnet-4-6"
-  fallback_model: "anthropic/claude-haiku-4-5"
   indexing_model: "anthropic/claude-haiku-4-5"
-
-filter:
-  confidence_threshold: 0.7
-  max_comments: 5
-
-review:
-  walkthrough: true
-  self_critique: true
-  security_pass: true
 ```
 
 ```bash
-# .env: secrets only. Don't commit this.
+# .env — secrets only.
 MIRA_GITHUB_APP_ID=123456
 MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)"
 MIRA_WEBHOOK_SECRET=your-secret
@@ -117,99 +100,27 @@ OPENROUTER_API_KEY=sk-or-...
 ```
 
 ```bash
-docker run -p 8000:8000 \
-  --env-file .env \
+docker run -p 8000:8000 --env-file .env \
   -v "$(pwd)/mira.yaml:/app/mira.yaml" \
-  ghcr.io/miracodeai/mira:latest \
-  --config /app/mira.yaml
+  ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
 ```
 
-Mira talks to OpenRouter under the hood, so any model OpenRouter supports works. `llm.model` in `mira.yaml` is whatever the [OpenRouter Models page](https://openrouter.ai/models) lists. Examples:
+**2. Install the app** on your repos — every PR gets reviewed.
 
-| Provider | `llm.model` |
-|----------|--------------|
-| Anthropic | `anthropic/claude-sonnet-4-6` |
-| Anthropic (cheap, indexing) | `anthropic/claude-haiku-4-5` |
-| OpenAI | `openai/gpt-4o` |
-| OpenAI (cheap) | `openai/gpt-4o-mini` |
-| Google | `google/gemini-2.5-pro` |
-
-Set `OPENROUTER_API_KEY` once; one key works across every provider. The dashboard's model pickers list your backend's live catalog (OpenRouter, Bedrock, or any OpenAI-compatible endpoint's `/models`), are searchable, and accept any free-form model id — the same flexibility as `mira.yaml`. See [`src/mira/llm/models.json`](src/mira/llm/models.json) for the bundled registry that supplies pricing and per-purpose recommendations.
-
-**Custom pricing and recommendations.** To give a custom model accurate cost estimates, a label, or a Recommended badge — e.g. DeepSeek or a local endpoint — point `MIRA_MODELS_JSON_PATH` at your own `models.json` (a volume mount works well). Its entries are **merged over** the bundled ones by model id, so you only list what you want to add or override:
-
-```bash
-MIRA_MODELS_JSON_PATH=/config/models.json
-```
-
-```jsonc
-// /config/models.json — copy an entry from the bundled file as a template
-{
-  "deepseek/deepseek-chat": {
-    "label": "DeepSeek Chat",
-    "provider": "openai",
-    "max_input_tokens": 64000,
-    "max_output_tokens": 8000,
-    "input_cost_per_1m": 0.27,
-    "output_cost_per_1m": 1.10,
-    "supports_json_mode": true,
-    "purposes": ["indexing", "review"]
-  }
-}
-```
-
-The file is read at startup; a missing or invalid file falls back to the bundled registry with a warning.
-
-> **Coming soon:** direct adapters for **Anthropic**, **OpenAI**, **Google Vertex**, **Ollama**, and **vLLM**, for teams that already hold provider keys, run open-weights models in-house, or have data-residency rules that prevent traffic from flowing through OpenRouter.
-
-### AWS Bedrock
-
-For teams with data-residency requirements or existing AWS Bedrock access, Mira can call Bedrock's Converse API directly — no OpenRouter, no intermediary:
-
-```yaml
-# mira.yaml
-llm:
-  provider: "bedrock"
-  model: "us.anthropic.claude-sonnet-4-6-v1:0"
-  fallback_model: "us.anthropic.claude-haiku-4-5-v1:0"
-  region: "us-east-1"
-  # aws_profile: "my-profile"  # optional
-```
-
-Auth uses the standard AWS credential chain (env vars, instance profile, ECS task role, SSO). No API keys to manage.
-
-Available Bedrock models:
-
-| Model | `llm.model` | Use case |
-|-------|-------------|----------|
-| Claude Sonnet 4.6 | `us.anthropic.claude-sonnet-4-6-v1:0` | Review |
-| Claude Haiku 4.5 | `us.anthropic.claude-haiku-4-5-v1:0` | Indexing |
-| Claude Opus 4.6 | `us.anthropic.claude-opus-4-6-v1:0` | Review (premium) |
-
-Test locally without GitHub:
-
-```bash
-git diff HEAD~1 | mira review --stdin --dry-run --config mira.yaml
-```
-
-**3. Install the app** on your repos. Every PR gets auto-reviewed.
-
-**Chat with Mira:** Comment `@miracodeai <question>` on any PR to ask about the code.
+→ Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 
 ## Configuration
 
-`mira.yaml` (loaded via `--config`) holds deployment-wide defaults: model choices, filter thresholds, review behaviour. Most teams stop here.
-
-If a single repo needs different review behaviour, drop a `.mira.yaml` at its root **or** edit that repo's settings from the dashboard. Both deep-merge over `mira.yaml` for that one repo only:
+`mira.yaml` (loaded via `--config`) holds deployment-wide defaults. Drop a `.mira.yaml` in any repo — or use the dashboard — to override per-repo; both deep-merge over `mira.yaml` for that repo only:
 
 ```yaml
-# .mira.yaml: optional per-repo override
+# .mira.yaml — optional per-repo override
 filter:
   confidence_threshold: 0.5  # noisier repo → lower bar
   max_comments: 10
 ```
 
-See the [docs](https://docs.miracode.ai/configuration) for the full schema.
+→ Full schema and every key: [Configuration docs](https://docs.miracode.ai/configuration).
 
 ## Development
 

@@ -14,9 +14,10 @@ from pathlib import Path
 import pytest
 
 from mira.config import LLMConfig
-from mira.dashboard.api import ModelsUpdate, get_models, set_models
+from mira.dashboard.api import ModelsUpdate
 from mira.dashboard.db import AppDatabase
 from mira.dashboard.models_config import llm_config_for
+from mira.dashboard.routers.admin import get_models, set_models
 
 
 @pytest.fixture

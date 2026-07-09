@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from mira.dashboard import api
 from mira.dashboard.db import AppDatabase, User
+from mira.dashboard.routers import rules
 from mira.index.store import IndexStore
 
 
@@ -51,7 +52,7 @@ def test_approve_makes_rule_active(patched_db: AppDatabase):
     rule = store.upsert_learned_rule("r", "reject_pattern", "style", "", 3)
     store.close()
 
-    api.approve_learned_rule("acme", "web", rule.id, _Req(is_admin=True))
+    rules.approve_learned_rule("acme", "web", rule.id, _Req(is_admin=True))
 
     store = IndexStore.open("acme", "web")
     active = store.list_active_learned_rules()
@@ -65,7 +66,7 @@ def test_reject_keeps_rule_out(patched_db: AppDatabase):
     rule = store.upsert_learned_rule("r", "reject_pattern", "style", "", 3)
     store.close()
 
-    api.reject_learned_rule("acme", "web", rule.id, _Req(is_admin=True))
+    rules.reject_learned_rule("acme", "web", rule.id, _Req(is_admin=True))
 
     store = IndexStore.open("acme", "web")
     assert store.list_active_learned_rules() == []
@@ -79,14 +80,14 @@ def test_non_admin_cannot_approve(patched_db: AppDatabase):
     rule = store.upsert_learned_rule("r", "reject_pattern", "style", "", 3)
     store.close()
     with pytest.raises(HTTPException) as exc:
-        api.approve_learned_rule("acme", "web", rule.id, _Req(is_admin=False))
+        rules.approve_learned_rule("acme", "web", rule.id, _Req(is_admin=False))
     assert exc.value.status_code == 403
 
 
 def test_admin_crud(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     # Create → approved + active immediately.
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="No nits in tests", category="style", path_pattern="tests/"),
@@ -99,7 +100,7 @@ def test_admin_crud(patched_db: AppDatabase):
     store.close()
 
     # Update.
-    api.update_learned_rule(
+    rules.update_learned_rule(
         "acme",
         "web",
         created.id,
@@ -107,7 +108,7 @@ def test_admin_crud(patched_db: AppDatabase):
         _Req(is_admin=True),
     )
     # Disable → drops out of active set.
-    api.set_learned_rule_active(
+    rules.set_learned_rule_active(
         "acme", "web", created.id, api.LearnedRuleActiveInput(active=False), _Req(is_admin=True)
     )
     store = IndexStore.open("acme", "web")
@@ -117,7 +118,7 @@ def test_admin_crud(patched_db: AppDatabase):
     store.close()
 
     # Delete.
-    api.delete_learned_rule("acme", "web", created.id, _Req(is_admin=True))
+    rules.delete_learned_rule("acme", "web", created.id, _Req(is_admin=True))
     store = IndexStore.open("acme", "web")
     assert store.get_learned_rule(created.id) is None
     store.close()
@@ -125,7 +126,7 @@ def test_admin_crud(patched_db: AppDatabase):
 
 def test_non_admin_create_is_pending(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="Be nice", category="style"),
@@ -137,7 +138,7 @@ def test_non_admin_create_is_pending(patched_db: AppDatabase):
 
 def test_admin_create_is_approved(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="Be safe", category="security"),
@@ -148,13 +149,13 @@ def test_admin_create_is_approved(patched_db: AppDatabase):
 
 def test_creator_can_edit_own_pending(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="original", category="style"),
         _Req(is_admin=False, username="junior"),
     )
-    api.update_learned_rule(
+    rules.update_learned_rule(
         "acme",
         "web",
         created.id,
@@ -168,14 +169,14 @@ def test_creator_can_edit_own_pending(patched_db: AppDatabase):
 
 def test_other_non_admin_cannot_edit(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="original", category="style"),
         _Req(is_admin=False, username="junior"),
     )
     with pytest.raises(HTTPException) as exc:
-        api.update_learned_rule(
+        rules.update_learned_rule(
             "acme",
             "web",
             created.id,
@@ -187,15 +188,15 @@ def test_other_non_admin_cannot_edit(patched_db: AppDatabase):
 
 def test_creator_cannot_edit_once_approved(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="original", category="style"),
         _Req(is_admin=False, username="junior"),
     )
-    api.approve_learned_rule("acme", "web", created.id, _Req(is_admin=True))
+    rules.approve_learned_rule("acme", "web", created.id, _Req(is_admin=True))
     with pytest.raises(HTTPException) as exc:
-        api.update_learned_rule(
+        rules.update_learned_rule(
             "acme",
             "web",
             created.id,
@@ -207,34 +208,34 @@ def test_creator_cannot_edit_once_approved(patched_db: AppDatabase):
 
 def test_other_non_admin_cannot_read_pending(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="original", category="style"),
         _Req(is_admin=False, username="junior"),
     )
     with pytest.raises(HTTPException) as exc:
-        api.get_learned_rule_detail(
+        rules.get_learned_rule_detail(
             "acme", "web", created.id, _Req(is_admin=False, username="someone-else")
         )
     assert exc.value.status_code == 403
     # Creator and admin can still read it.
     assert (
-        api.get_learned_rule_detail(
+        rules.get_learned_rule_detail(
             "acme", "web", created.id, _Req(is_admin=False, username="junior")
         ).id
         == created.id
     )
     assert (
-        api.get_learned_rule_detail(
+        rules.get_learned_rule_detail(
             "acme", "web", created.id, _Req(is_admin=True, username="boss")
         ).id
         == created.id
     )
     # Once approved, anyone authenticated can read it.
-    api.approve_learned_rule("acme", "web", created.id, _Req(is_admin=True))
+    rules.approve_learned_rule("acme", "web", created.id, _Req(is_admin=True))
     assert (
-        api.get_learned_rule_detail(
+        rules.get_learned_rule_detail(
             "acme", "web", created.id, _Req(is_admin=False, username="someone-else")
         ).status
         == "approved"
@@ -243,13 +244,13 @@ def test_other_non_admin_cannot_read_pending(patched_db: AppDatabase):
 
 def test_admin_can_edit_anyones_rule(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
-    created = api.create_learned_rule(
+    created = rules.create_learned_rule(
         "acme",
         "web",
         api.LearnedRuleInput(rule_text="original", category="style"),
         _Req(is_admin=False, username="junior"),
     )
-    api.update_learned_rule(
+    rules.update_learned_rule(
         "acme",
         "web",
         created.id,

@@ -40,6 +40,30 @@ class GitHubAppAuth:
         self._app_id = app_id
         self._private_key = _resolve_private_key(private_key)
         self._token_cache: dict[int, tuple[str, float]] = {}
+        self._slug_fetched = False
+        self._slug: str | None = None
+
+    async def get_token(self, scope: str | int | None = None) -> str:
+        """PlatformAuth interface — GitHub mints a per-installation token."""
+        if scope is None:
+            raise WebhookError("GitHub requires an installation id to mint a token")
+        return await self.get_installation_token(int(scope))
+
+    async def get_bot_identity(self) -> str | None:
+        """PlatformAuth interface — the App's `@mention` slug (cached).
+
+        Resilient: any failure (bad key, network) caches ``None`` so callers
+        that use it inline (e.g. mention matching) degrade to the configured
+        bot name rather than erroring.
+        """
+        if not self._slug_fetched:
+            try:
+                self._slug = await self.get_app_slug()
+            except Exception as exc:
+                logger.warning("Failed to resolve bot identity: %s", exc)
+                self._slug = None
+            self._slug_fetched = True
+        return self._slug
 
     def _generate_jwt(self) -> str:
         """Generate an RS256-signed JWT for GitHub App authentication."""

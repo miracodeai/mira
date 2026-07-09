@@ -4,6 +4,22 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-09
+
+### Added
+
+- **GitLab support — full parity with GitHub.** Mira now auto-reviews merge requests via webhooks, posts inline review comments anchored to diff positions (with a plain-note fallback when GitLab rejects a position), and answers `@mention` commands on MRs: `review`, `review-rest`, `pause`/`resume`, inline `reject`, free-form questions, and merge-time learning. Round 2+ incremental re-review, thread auto-resolution once a finding is fixed, JIT cross-file context, file-history context, codebase indexing, incremental push indexing, and vulnerability/package search all work the same as on GitHub. Authentication is a group or project access token — set `MIRA_GITLAB_TOKEN` + `MIRA_GITLAB_WEBHOOK_SECRET` and point a project webhook at `/gitlab/webhook`; self-managed instances set `MIRA_GITLAB_API_URL`. GitHub App credentials are now optional when GitLab is configured (set either, or both). See the [GitLab setup guide](https://docs.miracode.ai/gitlab).
+- **Dynamic platform layer.** Adding a git host is now data, not code: a `platforms.json` registry (mirroring `providers.json` for LLMs) carries each platform's API URL, webhook route, signature scheme, and terminology, overridable at runtime via `MIRA_PLATFORMS_JSON_PATH`. The repo data model extends to `(platform, owner, repo)`, so same-named repos coexist across hosts; existing GitHub rows migrate automatically with `platform = github`.
+- **Mira answers to both its handles.** On either platform, a mention of the configured `MIRA_BOT_NAME` *or* the bot's real account username (GitHub App slug / GitLab token user) triggers a command — whichever a teammate types.
+
+### Changed
+
+- **Review comment headers use one severity marker instead of two emojis.** The category line is now plain bold text (`**Security issue**`) above the severity badge, rather than a second leading emoji. Cleaner, still scannable, and it renders correctly on both GitHub and GitLab (GitLab needed a Markdown hard break where GitHub tolerated a bare newline).
+
+### Fixed
+
+- **Malformed LLM JSON is recovered instead of dropped.** Responses that leak Anthropic tool-call XML (`</parameter></invoke>`) or arrive with an unbalanced brace are now repaired before parsing, so a chunk's comments are no longer lost when a model's output strays from clean JSON. Affects both the main and security passes.
+
 ## [0.5.1] — 2026-07-09
 
 ### Fixed
@@ -55,6 +71,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Provider profiles — adding an LLM provider is now data, not code.** The OpenAI-compatible client's per-provider quirks (attribution headers, whether the model id keeps its `vendor/` prefix, reasoning-effort remapping, default key env var) moved out of hardcoded `if openrouter` branches into a declarative `providers.json`, matched to the configured `base_url`. OpenRouter's quirks are now a single profile entry rather than code branches; any endpoint with no matching profile gets the portable default (bare model name, no extra headers), so most OpenAI-compatible providers work with nothing but `base_url` + `api_key_env`. Extend or override the bundled list at runtime by pointing `MIRA_PROVIDERS_JSON_PATH` at your own file — same idiom as `MIRA_MODELS_JSON_PATH` for models. No behaviour change for existing configs.
 - **`exclude_files` apply to indexing** — `filter.exclude_patterns` now governs the index as well as review, so committed vendor dirs, generated SDKs, and test data can be kept out of indexing without burning tokens on them. The same globs that exclude a file from review exclude it from indexing; the dashboard's per-repo file count reflects the exclusions too. Closes #97.
 - **Indexing file-size limit** — new `index.max_file_size` (bytes, default 1 MB) skips any file above the limit before it reaches the summarizer. Lower it to keep indexing cheap on large codebases with big fixtures or generated files; `0` disables the limit. Replaces the previous hard-coded 1 MB tarball cap and now also covers the per-file fetch path. Closes #98.
 

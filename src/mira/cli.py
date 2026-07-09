@@ -122,12 +122,18 @@ def main() -> None:
 
 
 @main.command()
-@click.option("--pr", "pr_url", default=None, help="PR URL (github.com/o/r/pull/N or o/r#N)")
+@click.option("--pr", "pr_url", default=None, help="PR/MR URL (GitHub PR or GitLab MR)")
 @click.option("--stdin", "use_stdin", is_flag=True, help="Read diff from stdin")
 @click.option("--model", envvar="MIRA_MODEL", default=None, help="LLM model to use")
 @click.option("--max-comments", envvar="MIRA_MAX_COMMENTS", type=int, default=None)
 @click.option("--confidence", envvar="MIRA_CONFIDENCE_THRESHOLD", type=float, default=None)
-@click.option("--github-token", envvar="GITHUB_TOKEN", default=None, help="GitHub API token")
+@click.option("--token", envvar="MIRA_GIT_TOKEN", default=None, help="Git platform API token")
+@click.option(
+    "--github-token",
+    envvar="GITHUB_TOKEN",
+    default=None,
+    help="GitHub API token (alias for --token)",
+)
 @click.option("--dry-run", is_flag=True, help="Don't post review, just print results")
 @click.option("--output", "output_format", type=click.Choice(["text", "json"]), default="text")
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
@@ -144,6 +150,7 @@ def review(
     model: str | None,
     max_comments: int | None,
     confidence: float | None,
+    token: str | None,
     github_token: str | None,
     dry_run: bool,
     output_format: str,
@@ -181,20 +188,28 @@ def review(
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
 
+    git_token = token or github_token
     github_provider = None
     if pr_url:
-        if not github_token:
+        if not git_token:
             raise click.UsageError(
-                "--github-token or GITHUB_TOKEN env var is required for PR review"
+                "--token (or --github-token / GITHUB_TOKEN / MIRA_GIT_TOKEN) is required for PR review"
             )
+        # Infer the platform from the URL shape; fall back to the configured default.
+        if "/-/merge_requests/" in pr_url or "gitlab" in pr_url:
+            provider_type = "gitlab"
+        elif "/pull/" in pr_url or "github" in pr_url:
+            provider_type = "github"
+        else:
+            provider_type = config.provider.type
         from mira.providers import create_provider, get_available_providers
 
         try:
-            github_provider = create_provider(config.provider.type, github_token)
+            github_provider = create_provider(provider_type, git_token)
         except ValueError as err:
             available = ", ".join(get_available_providers()) or "(none)"
             raise click.UsageError(
-                f"Unknown provider type {config.provider.type!r}. Available providers: {available}"
+                f"Unknown provider type {provider_type!r}. Available providers: {available}"
             ) from err
 
     engine = ReviewEngine(
@@ -226,26 +241,44 @@ def review(
 @click.option(
     "--app-id",
     envvar="MIRA_GITHUB_APP_ID",
-    required=True,
-    help="GitHub App ID",
+    default=None,
+    help="GitHub App ID (enables the GitHub webhook route)",
 )
 @click.option(
     "--private-key",
     envvar="MIRA_GITHUB_PRIVATE_KEY",
-    required=True,
+    default=None,
     help="PEM contents or @path/to/key.pem",
 )
 @click.option(
     "--webhook-secret",
     envvar="MIRA_WEBHOOK_SECRET",
-    required=True,
+    default=None,
     help="Webhook secret from GitHub App settings",
+)
+@click.option(
+    "--gitlab-token",
+    envvar="MIRA_GITLAB_TOKEN",
+    default=None,
+    help="GitLab group/project access token (enables the GitLab webhook route)",
+)
+@click.option(
+    "--gitlab-webhook-secret",
+    envvar="MIRA_GITLAB_WEBHOOK_SECRET",
+    default=None,
+    help="Secret string configured on the GitLab project webhook (X-Gitlab-Token)",
+)
+@click.option(
+    "--gitlab-base-url",
+    envvar="MIRA_GITLAB_API_URL",
+    default=None,
+    help="GitLab API base for self-managed instances, e.g. https://gitlab.acme.com/api/v4",
 )
 @click.option(
     "--bot-name",
     envvar="MIRA_BOT_NAME",
     default=None,
-    help="Bot @mention name. If unset, auto-detected from the GitHub App's own slug.",
+    help="Bot @mention name. If unset, auto-detected from the platform's own identity.",
 )
 @click.option(
     "--config",
@@ -262,22 +295,26 @@ def review(
 def serve(
     host: str,
     port: int,
-    app_id: str,
-    private_key: str,
-    webhook_secret: str,
+    app_id: str | None,
+    private_key: str | None,
+    webhook_secret: str | None,
+    gitlab_token: str | None,
+    gitlab_webhook_secret: str | None,
+    gitlab_base_url: str | None,
     bot_name: str | None,
     config_path: str | None,
     verbose: bool,
 ) -> None:
-    """Run the Mira GitHub App webhook server."""
+    """Run the Mira webhook server for GitHub, GitLab, or both."""
     try:
         import asyncio
 
         import uvicorn
 
         from mira.config import set_global_defaults
-        from mira.github_app.auth import GitHubAppAuth
-        from mira.github_app.webhooks import create_app
+        from mira.platforms.github.auth import GitHubAppAuth
+        from mira.platforms.gitlab.auth import GitLabTokenAuth
+        from mira.platforms.server import create_app
     except ImportError as exc:
         raise click.ClickException(
             f"Missing dependency: {exc}. Install with: pip install mira-reviewer[serve]"
@@ -296,27 +333,40 @@ def serve(
         except Exception as exc:
             raise click.ClickException(f"Invalid --config file: {exc}") from exc
 
-    # Support @path/to/key.pem syntax
-    if private_key.startswith("@"):
-        key_path = private_key[1:]
-        try:
-            with open(key_path) as f:
-                private_key = f.read()
-        except FileNotFoundError:
-            raise click.ClickException(f"Private key file not found: {key_path}") from None
+    github_configured = bool(app_id and private_key and webhook_secret)
+    gitlab_configured = bool(gitlab_token and gitlab_webhook_secret)
+    if not github_configured and not gitlab_configured:
+        raise click.ClickException(
+            "No platform configured. Provide GitHub App creds (--app-id, --private-key, "
+            "--webhook-secret) and/or GitLab creds (--gitlab-token, --gitlab-webhook-secret)."
+        )
 
-    app_auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+    app_auth = None
+    gitlab_auth = None
 
-    # Auto-detect the bot @mention from the App's own slug when the user
-    # didn't override it. Fall back to "miracodeai" if the lookup fails so
-    # the server still starts on a transient network blip — users will see
-    # the warning in the log and can set MIRA_BOT_NAME explicitly.
+    if github_configured:
+        assert private_key is not None
+        if private_key.startswith("@"):
+            key_path = private_key[1:]
+            try:
+                with open(key_path) as f:
+                    private_key = f.read()
+            except FileNotFoundError:
+                raise click.ClickException(f"Private key file not found: {key_path}") from None
+        app_auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+
+    if gitlab_configured:
+        assert gitlab_token is not None
+        gitlab_auth = GitLabTokenAuth(gitlab_token, gitlab_base_url or "https://gitlab.com/api/v4")
+
+    # Auto-detect the bot @mention from whichever platform's own identity when
+    # the user didn't override it. Falls back to "miracodeai" on a lookup blip.
     if not bot_name:
-        bot_name = asyncio.run(app_auth.get_app_slug()) or "miracodeai"
+        identity_auth = app_auth or gitlab_auth
+        bot_name = asyncio.run(identity_auth.get_bot_identity()) or "miracodeai"
         click.echo(f"Detected bot @mention: @{bot_name}")
 
-    # Persist the resolved name so the dashboard UI can show the real handle
-    # (it reads this via /api/version) instead of a hardcoded placeholder.
+    # Persist the resolved name so the dashboard UI can show the real handle.
     try:
         from mira.dashboard.api import _app_db
 
@@ -328,7 +378,12 @@ def serve(
         app_auth=app_auth,
         webhook_secret=webhook_secret,
         bot_name=bot_name,
+        gitlab_auth=gitlab_auth,
+        gitlab_webhook_secret=gitlab_webhook_secret,
     )
 
-    click.echo(f"Starting Mira webhook server on {host}:{port}")
+    platforms = ", ".join(
+        p for p, on in [("GitHub", github_configured), ("GitLab", gitlab_configured)] if on
+    )
+    click.echo(f"Starting Mira webhook server ({platforms}) on {host}:{port}")
     uvicorn.run(app, host=host, port=port)

@@ -388,6 +388,23 @@ class TestStripModelPrefix:
         assert result == "llama3.1:latest"
 
 
+class TestProfileHeaders:
+    """Provider-specific headers come from the matched profile, not hardcoding."""
+
+    def test_openrouter_adds_ranking_headers(self):
+        provider = LLMProvider(LLMConfig(model="m"))  # default base_url = openrouter
+        headers = provider._build_headers()
+        assert headers["HTTP-Referer"] == "https://github.com/miracodeai/mira"
+        assert headers["X-Title"] == "Mira Code Reviewer"
+
+    def test_other_endpoint_has_no_ranking_headers(self):
+        provider = LLMProvider(LLMConfig(model="m", base_url="https://api.groq.com/openai/v1"))
+        headers = provider._build_headers()
+        assert "HTTP-Referer" not in headers
+        assert "X-Title" not in headers
+        assert headers["Authorization"].startswith("Bearer ")
+
+
 class TestToolChoiceFallback:
     """#82: thinking models (deepseek) 400 on a forced tool_choice; retry
     with "auto" rather than failing the review."""

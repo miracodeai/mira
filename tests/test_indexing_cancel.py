@@ -65,22 +65,24 @@ async def test_index_repo_raises_on_cancel(tmp_path, monkeypatch):
     from mira.index.store import IndexStore
 
     # Stub out the network-dependent helpers.
-    async def fake_branch(*a, **kw):
-        return "main"
-
-    async def fake_tree(*a, **kw):
-        return ["a.py", "b.py", "c.py", "d.py"]
-
     # Larger than the trivial-file threshold so each file routes through the
     # LLM batch path (where the cancel check fires). A trivial file would
     # bypass the loop and skip the cancellation point.
     _content_pad = "# pad line\n" * 80
+    _files = ["a.py", "b.py", "c.py", "d.py"]
 
-    async def fake_fetch(owner, repo, path, token, ref, semaphore):
-        return f"# contents of {path}\n{_content_pad}"
+    class _FakeFetcher:
+        async def default_branch(self, owner, repo):
+            return "main"
 
-    async def fake_tarball(owner, repo, token, ref="main", max_file_size=1_048_576):
-        return {p: f"# contents of {p}\n{_content_pad}" for p in ["a.py", "b.py", "c.py", "d.py"]}
+        async def repo_tree(self, owner, repo, branch):
+            return list(_files)
+
+        async def file_content(self, owner, repo, path, ref, semaphore=None):
+            return f"# contents of {path}\n{_content_pad}"
+
+        async def repo_tarball(self, owner, repo, ref, max_file_size=1_048_576):
+            return {p: f"# contents of {p}\n{_content_pad}" for p in _files}
 
     async def fake_summarize_batch(batch, llm, sem):
         return [
@@ -91,10 +93,6 @@ async def test_index_repo_raises_on_cancel(tmp_path, monkeypatch):
     async def fake_summarize_dirs(store, llm, sem):
         return None
 
-    monkeypatch.setattr(idx_mod, "_fetch_default_branch", fake_branch)
-    monkeypatch.setattr(idx_mod, "_fetch_repo_tree", fake_tree)
-    monkeypatch.setattr(idx_mod, "_fetch_file_content", fake_fetch)
-    monkeypatch.setattr(idx_mod, "_fetch_repo_tarball", fake_tarball)
     monkeypatch.setattr(idx_mod, "_summarize_batch", fake_summarize_batch)
     monkeypatch.setattr(idx_mod, "_summarize_directories", fake_summarize_dirs)
     # Force batch size of 1 so we can cancel between files deterministically.
@@ -115,13 +113,13 @@ async def test_index_repo_raises_on_cancel(tmp_path, monkeypatch):
         await index_repo(
             owner="a",
             repo="b",
-            token="t",
             config=config,
             store=store,
             llm=llm,
             full=False,
             branch="main",
             cancel_check=cancel_after_first,
+            fetcher=_FakeFetcher(),
         )
 
     # First batch processed (1 file) before cancel kicked in.

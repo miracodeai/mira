@@ -104,6 +104,13 @@ def models_for_purpose(purpose: str) -> list[dict]:
     return out
 
 
+def default_for_purpose(purpose: str) -> str | None:
+    """The recommended model id for a purpose (first recommended, else first
+    allowed). ``models_for_purpose`` is already sorted recommended-first."""
+    opts = models_for_purpose(purpose)
+    return opts[0]["value"] if opts else None
+
+
 def max_output_tokens(model_id: str, default: int = 4096) -> int:
     """Return ``max_output_tokens`` for the model, or ``default`` if unknown."""
     info = get(model_id)

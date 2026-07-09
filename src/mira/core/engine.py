@@ -397,8 +397,11 @@ class ReviewEngine:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
         # Round 2+ raises the comment threshold so we converge instead of
-        # dripping new findings on every push.
+        # dripping new findings on every push. review-rest is a continuation of
+        # round 1 onto never-reviewed files, so it stays round 1 (full
+        # thresholds, full diff) even though the first pass left threads behind.
         review_round = 1
+        is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
         try:
             if self.bot_name and self.provider is not None:
@@ -406,7 +409,7 @@ class ReviewEngine:
                     pr_info,
                     self.bot_name,
                 )
-                if all_bot_threads:
+                if all_bot_threads and not is_review_rest:
                     review_round = 2
                 resolved_thread_dicts = [
                     {
@@ -429,6 +432,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 if last_sha and last_sha != pr_info.head_sha:
                     incremental = await self.provider.get_compare_diff(
@@ -648,6 +652,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 prior_reviewed = set(prior.reviewed_paths) if prior else set()
                 prior_skipped = set(prior.skipped_paths) if prior else set()
@@ -662,7 +667,8 @@ class ReviewEngine:
                         reviewed_paths=sorted(new_reviewed),
                         skipped_paths=sorted(new_skipped),
                         chunk_index=(prior.chunk_index + 1) if prior else 1,
-                    )
+                    ),
+                    platform=pr_info.platform,
                 )
             except Exception as progress_err:
                 logger.debug("Failed to persist review progress: %s", progress_err)
@@ -680,6 +686,7 @@ class ReviewEngine:
                     pr_info.repo,
                     pr_info.number,
                     pr_info.head_sha,
+                    platform=pr_info.platform,
                 )
             except Exception as exc:
                 logger.debug("Failed to record last reviewed SHA: %s", exc)

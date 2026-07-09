@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS repos (
+    -- Code-hosting platform ('github' / 'gitlab'). Part of the key so the same
+    -- owner/repo can exist on more than one platform.
+    platform TEXT NOT NULL DEFAULT 'github',
     owner TEXT NOT NULL,
     repo TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -55,11 +58,11 @@ CREATE TABLE IF NOT EXISTS repos (
     -- etc. at indexing time; injected into review prompts so Mira flags
     -- team-specific violations (not just generic best-practices).
     conventions TEXT NOT NULL DEFAULT '',
-    -- GitHub repo visibility; keeps private repo names out of the blast-radius
+    -- Repo visibility; keeps private repo names out of the blast-radius
     -- section of a public repo's review. NULL = not yet known (treated as
     -- private until a sync/PR/install event records the real value).
     private INTEGER,
-    PRIMARY KEY (owner, repo)
+    PRIMARY KEY (platform, owner, repo)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -83,6 +86,7 @@ CREATE TABLE IF NOT EXISTS global_rules (
 );
 
 CREATE TABLE IF NOT EXISTS pr_review_progress (
+    platform TEXT NOT NULL DEFAULT 'github',
     owner TEXT NOT NULL,
     repo TEXT NOT NULL,
     pr_number INTEGER NOT NULL,
@@ -95,7 +99,7 @@ CREATE TABLE IF NOT EXISTS pr_review_progress (
     -- re-flagged after a new push.
     last_reviewed_sha TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (owner, repo, pr_number)
+    PRIMARY KEY (platform, owner, repo, pr_number)
 );
 """
 
@@ -118,6 +122,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS repos (
+    platform TEXT NOT NULL DEFAULT 'github',
     owner TEXT NOT NULL,
     repo TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -132,10 +137,10 @@ CREATE TABLE IF NOT EXISTS repos (
     last_indexed_at TIMESTAMPTZ,
     -- Team coding conventions extracted at indexing time.
     conventions TEXT NOT NULL DEFAULT '',
-    -- GitHub repo visibility; keeps private repo names out of a public review.
+    -- Repo visibility; keeps private repo names out of a public review.
     -- NULL = not yet known (treated as private until a sync records it).
     private BOOLEAN,
-    PRIMARY KEY (owner, repo)
+    PRIMARY KEY (platform, owner, repo)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -159,6 +164,7 @@ CREATE TABLE IF NOT EXISTS global_rules (
 );
 
 CREATE TABLE IF NOT EXISTS pr_review_progress (
+    platform TEXT NOT NULL DEFAULT 'github',
     owner TEXT NOT NULL,
     repo TEXT NOT NULL,
     pr_number INTEGER NOT NULL,
@@ -168,7 +174,7 @@ CREATE TABLE IF NOT EXISTS pr_review_progress (
     chunk_index INTEGER NOT NULL DEFAULT 0,
     last_reviewed_sha TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (owner, repo, pr_number)
+    PRIMARY KEY (platform, owner, repo, pr_number)
 );
 """
 
@@ -226,6 +232,7 @@ class PRReviewProgress:
 class RepoRecord:
     owner: str
     repo: str
+    platform: str = "github"
     status: str = "pending"  # pending, indexing, ready, failed
     index_mode: str = "full"  # full, light, none
     files_indexed: int = 0
@@ -306,6 +313,37 @@ class AppDatabase:
             self._sqlite_conn.execute(
                 "ALTER TABLE pr_review_progress ADD COLUMN last_reviewed_sha TEXT NOT NULL DEFAULT ''"
             )
+        # Adding `platform` to the primary key requires a table rebuild (SQLite
+        # can't alter a PK in place). Rename the old table, recreate it from the
+        # current schema, and copy rows in as 'github'.
+        repos_needs_platform = "platform" not in cols
+        progress_needs_platform = "platform" not in progress_cols
+        if repos_needs_platform:
+            self._sqlite_conn.execute("ALTER TABLE repos RENAME TO repos_old")
+        if progress_needs_platform:
+            self._sqlite_conn.execute(
+                "ALTER TABLE pr_review_progress RENAME TO pr_review_progress_old"
+            )
+        if repos_needs_platform or progress_needs_platform:
+            self._sqlite_conn.executescript(_SQLITE_SCHEMA)  # recreates the renamed tables
+        if repos_needs_platform:
+            self._sqlite_conn.execute(
+                "INSERT INTO repos (platform, owner, repo, status, index_mode, files_indexed, "
+                "file_count_estimate, error, installation_id, created_at, updated_at, "
+                "last_indexed_at, conventions, private) "
+                "SELECT 'github', owner, repo, status, index_mode, files_indexed, "
+                "file_count_estimate, error, installation_id, created_at, updated_at, "
+                "last_indexed_at, conventions, private FROM repos_old"
+            )
+            self._sqlite_conn.execute("DROP TABLE repos_old")
+        if progress_needs_platform:
+            self._sqlite_conn.execute(
+                "INSERT INTO pr_review_progress (platform, owner, repo, pr_number, total_paths, "
+                "reviewed_paths, skipped_paths, chunk_index, last_reviewed_sha, updated_at) "
+                "SELECT 'github', owner, repo, pr_number, total_paths, reviewed_paths, "
+                "skipped_paths, chunk_index, last_reviewed_sha, updated_at FROM pr_review_progress_old"
+            )
+            self._sqlite_conn.execute("DROP TABLE pr_review_progress_old")
         self._sqlite_conn.commit()
         logger.info("App database: SQLite at %s", db_path)
 
@@ -333,6 +371,34 @@ class AppDatabase:
                 cur.execute(
                     "ALTER TABLE pr_review_progress ADD COLUMN IF NOT EXISTS "
                     "last_reviewed_sha TEXT NOT NULL DEFAULT ''"
+                )
+                # Add `platform` to the key on existing DBs. Postgres can swap
+                # the PK in place; guard so it only rebuilds when needed.
+                cur.execute(
+                    "ALTER TABLE repos ADD COLUMN IF NOT EXISTS "
+                    "platform TEXT NOT NULL DEFAULT 'github'"
+                )
+                cur.execute(
+                    "ALTER TABLE pr_review_progress ADD COLUMN IF NOT EXISTS "
+                    "platform TEXT NOT NULL DEFAULT 'github'"
+                )
+                cur.execute(
+                    "DO $$ BEGIN "
+                    "IF NOT EXISTS (SELECT 1 FROM information_schema.key_column_usage "
+                    "WHERE table_name='repos' AND column_name='platform' "
+                    "AND constraint_name='repos_pkey') THEN "
+                    "ALTER TABLE repos DROP CONSTRAINT IF EXISTS repos_pkey; "
+                    "ALTER TABLE repos ADD CONSTRAINT repos_pkey PRIMARY KEY (platform, owner, repo); "
+                    "END IF; END $$;"
+                )
+                cur.execute(
+                    "DO $$ BEGIN "
+                    "IF NOT EXISTS (SELECT 1 FROM information_schema.key_column_usage "
+                    "WHERE table_name='pr_review_progress' AND column_name='platform' "
+                    "AND constraint_name='pr_review_progress_pkey') THEN "
+                    "ALTER TABLE pr_review_progress DROP CONSTRAINT IF EXISTS pr_review_progress_pkey; "
+                    "ALTER TABLE pr_review_progress ADD CONSTRAINT pr_review_progress_pkey "
+                    "PRIMARY KEY (platform, owner, repo, pr_number); END IF; END $$;"
                 )
             logger.info("App database: PostgreSQL")
         except ImportError:
@@ -552,27 +618,35 @@ class AppDatabase:
 
     # ── Repos ──
 
-    def register_repo(self, owner: str, repo: str, installation_id: int = 0) -> RepoRecord:
+    def register_repo(
+        self, owner: str, repo: str, installation_id: int = 0, platform: str = "github"
+    ) -> RepoRecord:
         now = time.time()
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
-                "INSERT INTO repos (owner, repo, installation_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner, repo) DO UPDATE SET "
+                "INSERT INTO repos (platform, owner, repo, installation_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(platform, owner, repo) DO UPDATE SET "
                 "installation_id=excluded.installation_id, updated_at=excluded.updated_at",
-                (owner, repo, installation_id, now, now),
+                (platform, owner, repo, installation_id, now, now),
             )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO repos (owner, repo, installation_id) VALUES (%s, %s, %s) "
-                    "ON CONFLICT(owner, repo) DO UPDATE SET installation_id=EXCLUDED.installation_id, updated_at=NOW()",
-                    (owner, repo, installation_id),
+                    "INSERT INTO repos (platform, owner, repo, installation_id) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT(platform, owner, repo) DO UPDATE SET "
+                    "installation_id=EXCLUDED.installation_id, updated_at=NOW()",
+                    (platform, owner, repo, installation_id),
                 )
         return RepoRecord(
-            owner=owner, repo=repo, installation_id=installation_id, created_at=now, updated_at=now
+            owner=owner,
+            repo=repo,
+            platform=platform,
+            installation_id=installation_id,
+            created_at=now,
+            updated_at=now,
         )
 
     def set_repo_status(
@@ -583,6 +657,7 @@ class AppDatabase:
         files_indexed: int = 0,
         error: str = "",
         bump_last_indexed: bool = False,
+        platform: str = "github",
     ) -> None:
         """Update a repo's status row.
 
@@ -598,14 +673,14 @@ class AppDatabase:
             if bump_last_indexed:
                 self._sqlite_conn.execute(
                     "UPDATE repos SET status=?, files_indexed=?, error=?, "
-                    "updated_at=?, last_indexed_at=? WHERE owner=? AND repo=?",
-                    (status, files_indexed, error, now, now, owner, repo),
+                    "updated_at=?, last_indexed_at=? WHERE platform=? AND owner=? AND repo=?",
+                    (status, files_indexed, error, now, now, platform, owner, repo),
                 )
             else:
                 self._sqlite_conn.execute(
                     "UPDATE repos SET status=?, files_indexed=?, error=?, "
-                    "updated_at=? WHERE owner=? AND repo=?",
-                    (status, files_indexed, error, now, owner, repo),
+                    "updated_at=? WHERE platform=? AND owner=? AND repo=?",
+                    (status, files_indexed, error, now, platform, owner, repo),
                 )
             self._sqlite_conn.commit()
         else:
@@ -615,14 +690,14 @@ class AppDatabase:
                     cur.execute(
                         "UPDATE repos SET status=%s, files_indexed=%s, error=%s, "
                         "updated_at=NOW(), last_indexed_at=NOW() "
-                        "WHERE owner=%s AND repo=%s",
-                        (status, files_indexed, error, owner, repo),
+                        "WHERE platform=%s AND owner=%s AND repo=%s",
+                        (status, files_indexed, error, platform, owner, repo),
                     )
                 else:
                     cur.execute(
                         "UPDATE repos SET status=%s, files_indexed=%s, error=%s, "
-                        "updated_at=NOW() WHERE owner=%s AND repo=%s",
-                        (status, files_indexed, error, owner, repo),
+                        "updated_at=NOW() WHERE platform=%s AND owner=%s AND repo=%s",
+                        (status, files_indexed, error, platform, owner, repo),
                     )
 
     # ── Pending uninstalls ──
@@ -691,52 +766,56 @@ class AppDatabase:
             )
             return cur.rowcount
 
-    def delete_repo(self, owner: str, repo: str) -> None:
+    def delete_repo(self, owner: str, repo: str, platform: str = "github") -> None:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
-                "DELETE FROM repos WHERE owner=? AND repo=?",
-                (owner, repo),
+                "DELETE FROM repos WHERE platform=? AND owner=? AND repo=?",
+                (platform, owner, repo),
             )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM repos WHERE owner=%s AND repo=%s",
-                    (owner, repo),
+                    "DELETE FROM repos WHERE platform=%s AND owner=%s AND repo=%s",
+                    (platform, owner, repo),
                 )
 
-    def set_repo_file_count(self, owner: str, repo: str, count: int) -> None:
+    def set_repo_file_count(
+        self, owner: str, repo: str, count: int, platform: str = "github"
+    ) -> None:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
-                "UPDATE repos SET file_count_estimate=? WHERE owner=? AND repo=?",
-                (count, owner, repo),
+                "UPDATE repos SET file_count_estimate=? WHERE platform=? AND owner=? AND repo=?",
+                (count, platform, owner, repo),
             )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE repos SET file_count_estimate=%s WHERE owner=%s AND repo=%s",
-                    (count, owner, repo),
+                    "UPDATE repos SET file_count_estimate=%s WHERE platform=%s AND owner=%s AND repo=%s",
+                    (count, platform, owner, repo),
                 )
 
-    def set_repo_index_mode(self, owner: str, repo: str, mode: str) -> None:
+    def set_repo_index_mode(
+        self, owner: str, repo: str, mode: str, platform: str = "github"
+    ) -> None:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
-                "UPDATE repos SET index_mode=? WHERE owner=? AND repo=?",
-                (mode, owner, repo),
+                "UPDATE repos SET index_mode=? WHERE platform=? AND owner=? AND repo=?",
+                (mode, platform, owner, repo),
             )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE repos SET index_mode=%s WHERE owner=%s AND repo=%s",
-                    (mode, owner, repo),
+                    "UPDATE repos SET index_mode=%s WHERE platform=%s AND owner=%s AND repo=%s",
+                    (mode, platform, owner, repo),
                 )
 
     def list_repos(self) -> list[RepoRecord]:
@@ -744,8 +823,8 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             rows = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
-                "FROM repos ORDER BY owner, repo"
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
+                "platform FROM repos ORDER BY owner, repo"
             ).fetchall()
             return [
                 RepoRecord(
@@ -762,6 +841,7 @@ class AppDatabase:
                     last_indexed_at=r[10] or 0.0,
                     conventions=r[11] or "",
                     private=(None if r[12] is None else bool(r[12])),
+                    platform=r[13],
                 )
                 for r in rows
             ]
@@ -769,8 +849,8 @@ class AppDatabase:
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
-                "FROM repos ORDER BY owner, repo"
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
+                "platform FROM repos ORDER BY owner, repo"
             )
             return [
                 RepoRecord(
@@ -787,18 +867,19 @@ class AppDatabase:
                     last_indexed_at=r[10].timestamp() if r[10] else 0.0,
                     conventions=r[11] or "",
                     private=(None if r[12] is None else bool(r[12])),
+                    platform=r[13],
                 )
                 for r in cur.fetchall()
             ]
 
-    def get_repo(self, owner: str, repo: str) -> RepoRecord | None:
+    def get_repo(self, owner: str, repo: str, platform: str = "github") -> RepoRecord | None:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
-                "FROM repos WHERE owner=? AND repo=?",
-                (owner, repo),
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
+                "platform FROM repos WHERE platform=? AND owner=? AND repo=?",
+                (platform, owner, repo),
             ).fetchone()
             if row:
                 return RepoRecord(
@@ -815,15 +896,16 @@ class AppDatabase:
                     last_indexed_at=row[10] or 0.0,
                     conventions=row[11] or "",
                     private=(None if row[12] is None else bool(row[12])),
+                    platform=row[13],
                 )
             return None
         assert self._pg_conn is not None
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private "
-                "FROM repos WHERE owner=%s AND repo=%s",
-                (owner, repo),
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
+                "platform FROM repos WHERE platform=%s AND owner=%s AND repo=%s",
+                (platform, owner, repo),
             )
             row = cur.fetchone()
             if row:
@@ -843,43 +925,48 @@ class AppDatabase:
                     last_indexed_at=row[10].timestamp() if row[10] else 0.0,
                     conventions=row[11] or "",
                     private=(None if row[12] is None else bool(row[12])),
+                    platform=row[13],
                 )
             return None
 
-    def set_repo_conventions(self, owner: str, repo: str, conventions: str) -> None:
+    def set_repo_conventions(
+        self, owner: str, repo: str, conventions: str, platform: str = "github"
+    ) -> None:
         """Store the team-conventions string for a repo. Called by the
         indexer after extracting from CONTRIBUTING.md / AGENTS.md / etc."""
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
-                "UPDATE repos SET conventions=? WHERE owner=? AND repo=?",
-                (conventions, owner, repo),
+                "UPDATE repos SET conventions=? WHERE platform=? AND owner=? AND repo=?",
+                (conventions, platform, owner, repo),
             )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE repos SET conventions=%s WHERE owner=%s AND repo=%s",
-                    (conventions, owner, repo),
+                    "UPDATE repos SET conventions=%s WHERE platform=%s AND owner=%s AND repo=%s",
+                    (conventions, platform, owner, repo),
                 )
 
-    def set_repo_visibility(self, owner: str, repo: str, private: bool) -> None:
-        """Record a repo's GitHub visibility. Updates the existing row only;
+    def set_repo_visibility(
+        self, owner: str, repo: str, private: bool, platform: str = "github"
+    ) -> None:
+        """Record a repo's visibility. Updates the existing row only;
         no-op if the repo isn't registered yet (it'll be set on next sync)."""
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
-                "UPDATE repos SET private=? WHERE owner=? AND repo=?",
-                (1 if private else 0, owner, repo),
+                "UPDATE repos SET private=? WHERE platform=? AND owner=? AND repo=?",
+                (1 if private else 0, platform, owner, repo),
             )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE repos SET private=%s WHERE owner=%s AND repo=%s",
-                    (private, owner, repo),
+                    "UPDATE repos SET private=%s WHERE platform=%s AND owner=%s AND repo=%s",
+                    (private, platform, owner, repo),
                 )
             # Explicit commit mirrors set_last_reviewed_sha — the connection is
             # autocommit today, but this keeps the write safe if that changes.
@@ -1095,7 +1182,9 @@ class AppDatabase:
 
     # ── PR review progress ──
 
-    def upsert_pr_review_progress(self, progress: PRReviewProgress) -> None:
+    def upsert_pr_review_progress(
+        self, progress: PRReviewProgress, platform: str = "github"
+    ) -> None:
         """Insert or update progress for a single PR. Idempotent."""
         now = time.time()
         total = json.dumps(progress.total_paths)
@@ -1105,16 +1194,17 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
                 "INSERT INTO pr_review_progress "
-                "(owner, repo, pr_number, total_paths, reviewed_paths, "
+                "(platform, owner, repo, pr_number, total_paths, reviewed_paths, "
                 "skipped_paths, chunk_index, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(owner, repo, pr_number) DO UPDATE SET "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(platform, owner, repo, pr_number) DO UPDATE SET "
                 "total_paths=excluded.total_paths, "
                 "reviewed_paths=excluded.reviewed_paths, "
                 "skipped_paths=excluded.skipped_paths, "
                 "chunk_index=excluded.chunk_index, "
                 "updated_at=excluded.updated_at",
                 (
+                    platform,
                     progress.owner,
                     progress.repo,
                     progress.pr_number,
@@ -1131,16 +1221,17 @@ class AppDatabase:
             with self._pg_conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO pr_review_progress "
-                    "(owner, repo, pr_number, total_paths, reviewed_paths, "
+                    "(platform, owner, repo, pr_number, total_paths, reviewed_paths, "
                     "skipped_paths, chunk_index, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, NOW()) "
-                    "ON CONFLICT (owner, repo, pr_number) DO UPDATE SET "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW()) "
+                    "ON CONFLICT (platform, owner, repo, pr_number) DO UPDATE SET "
                     "total_paths=EXCLUDED.total_paths, "
                     "reviewed_paths=EXCLUDED.reviewed_paths, "
                     "skipped_paths=EXCLUDED.skipped_paths, "
                     "chunk_index=EXCLUDED.chunk_index, "
                     "updated_at=NOW()",
                     (
+                        platform,
                         progress.owner,
                         progress.repo,
                         progress.pr_number,
@@ -1156,13 +1247,14 @@ class AppDatabase:
         owner: str,
         repo: str,
         pr_number: int,
+        platform: str = "github",
     ) -> PRReviewProgress | None:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
                 "SELECT total_paths, reviewed_paths, skipped_paths, chunk_index, updated_at "
-                "FROM pr_review_progress WHERE owner=? AND repo=? AND pr_number=?",
-                (owner, repo, pr_number),
+                "FROM pr_review_progress WHERE platform=? AND owner=? AND repo=? AND pr_number=?",
+                (platform, owner, repo, pr_number),
             ).fetchone()
         else:
             assert self._pg_conn is not None
@@ -1170,8 +1262,8 @@ class AppDatabase:
                 cur.execute(
                     "SELECT total_paths, reviewed_paths, skipped_paths, chunk_index, "
                     "EXTRACT(EPOCH FROM updated_at) "
-                    "FROM pr_review_progress WHERE owner=%s AND repo=%s AND pr_number=%s",
-                    (owner, repo, pr_number),
+                    "FROM pr_review_progress WHERE platform=%s AND owner=%s AND repo=%s AND pr_number=%s",
+                    (platform, owner, repo, pr_number),
                 )
                 row = cur.fetchone()
         if not row:
@@ -1192,6 +1284,7 @@ class AppDatabase:
         owner: str,
         repo: str,
         pr_number: int,
+        platform: str = "github",
     ) -> str:
         """Return the head SHA at the time of the last review on this PR.
 
@@ -1203,16 +1296,16 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
                 "SELECT last_reviewed_sha FROM pr_review_progress "
-                "WHERE owner=? AND repo=? AND pr_number=?",
-                (owner, repo, pr_number),
+                "WHERE platform=? AND owner=? AND repo=? AND pr_number=?",
+                (platform, owner, repo, pr_number),
             ).fetchone()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
                     "SELECT last_reviewed_sha FROM pr_review_progress "
-                    "WHERE owner=%s AND repo=%s AND pr_number=%s",
-                    (owner, repo, pr_number),
+                    "WHERE platform=%s AND owner=%s AND repo=%s AND pr_number=%s",
+                    (platform, owner, repo, pr_number),
                 )
                 row = cur.fetchone()
         return str(row[0]) if row and row[0] else ""
@@ -1223,6 +1316,7 @@ class AppDatabase:
         repo: str,
         pr_number: int,
         sha: str,
+        platform: str = "github",
     ) -> None:
         """Record the head SHA we just reviewed against. Round 2+ uses this
         as the base for the incremental diff.
@@ -1234,12 +1328,12 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
                 "INSERT INTO pr_review_progress "
-                "(owner, repo, pr_number, last_reviewed_sha, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(owner, repo, pr_number) DO UPDATE SET "
+                "(platform, owner, repo, pr_number, last_reviewed_sha, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(platform, owner, repo, pr_number) DO UPDATE SET "
                 "last_reviewed_sha=excluded.last_reviewed_sha, "
                 "updated_at=excluded.updated_at",
-                (owner, repo, pr_number, sha, now),
+                (platform, owner, repo, pr_number, sha, now),
             )
             self._sqlite_conn.commit()
         else:
@@ -1247,29 +1341,31 @@ class AppDatabase:
             with self._pg_conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO pr_review_progress "
-                    "(owner, repo, pr_number, last_reviewed_sha, updated_at) "
-                    "VALUES (%s, %s, %s, %s, NOW()) "
-                    "ON CONFLICT (owner, repo, pr_number) DO UPDATE SET "
+                    "(platform, owner, repo, pr_number, last_reviewed_sha, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s, NOW()) "
+                    "ON CONFLICT (platform, owner, repo, pr_number) DO UPDATE SET "
                     "last_reviewed_sha=EXCLUDED.last_reviewed_sha, "
                     "updated_at=NOW()",
-                    (owner, repo, pr_number, sha),
+                    (platform, owner, repo, pr_number, sha),
                 )
             self._pg_conn.commit()
 
-    def delete_pr_review_progress(self, owner: str, repo: str, pr_number: int) -> None:
+    def delete_pr_review_progress(
+        self, owner: str, repo: str, pr_number: int, platform: str = "github"
+    ) -> None:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             self._sqlite_conn.execute(
-                "DELETE FROM pr_review_progress WHERE owner=? AND repo=? AND pr_number=?",
-                (owner, repo, pr_number),
+                "DELETE FROM pr_review_progress WHERE platform=? AND owner=? AND repo=? AND pr_number=?",
+                (platform, owner, repo, pr_number),
             )
             self._sqlite_conn.commit()
         else:
             assert self._pg_conn is not None
             with self._pg_conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM pr_review_progress WHERE owner=%s AND repo=%s AND pr_number=%s",
-                    (owner, repo, pr_number),
+                    "DELETE FROM pr_review_progress WHERE platform=%s AND owner=%s AND repo=%s AND pr_number=%s",
+                    (platform, owner, repo, pr_number),
                 )
 
     def close(self) -> None:

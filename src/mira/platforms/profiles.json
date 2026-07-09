@@ -1,0 +1,34 @@
+{
+  "_comment": "Code-hosting platform profiles. A profile is pure wire data describing how to talk to a platform — API base url, webhook route + signature scheme, event header, and which platform concepts it supports. Behaviour lives in the BaseProvider subclass (mira.providers) and the PlatformAuth/RepoFetcher implementations; this file just removes the per-platform branching. Adding an OpenAI-style git platform is a one-line entry. Resolved by name (e.g. 'github', 'gitlab').",
+  "_fields": {
+    "api_url": "REST API base. For GitHub Enterprise / self-managed GitLab, override via MIRA_GITHUB_API_URL / MIRA_GITLAB_API_URL.",
+    "graphql_url": "GraphQL endpoint (GitHub only).",
+    "webhook_route": "FastAPI path this platform's webhooks POST to.",
+    "auth_model": "'app' (mints per-installation tokens) or 'token' (static access token).",
+    "signature": "Webhook auth: scheme ('hmac-sha256' | 'shared-token'), header name, and optional prefix.",
+    "event_header": "Request header carrying the event type.",
+    "terminology": "Display strings (pr_short: 'PR' vs 'MR').",
+    "supports": "Capability flags gating platform-specific machinery (e.g. GitHub installations)."
+  },
+
+  "github": {
+    "api_url": "https://api.github.com",
+    "graphql_url": "https://api.github.com/graphql",
+    "webhook_route": "/github/webhook",
+    "auth_model": "app",
+    "signature": { "scheme": "hmac-sha256", "header": "X-Hub-Signature-256", "prefix": "sha256=" },
+    "event_header": "X-GitHub-Event",
+    "terminology": { "pr_short": "PR", "pr": "pull request" },
+    "supports": { "installations": true, "token_minting": true }
+  },
+  "gitlab": {
+    "api_url": "https://gitlab.com/api/v4",
+    "graphql_url": null,
+    "webhook_route": "/gitlab/webhook",
+    "auth_model": "token",
+    "signature": { "scheme": "shared-token", "header": "X-Gitlab-Token" },
+    "event_header": "X-Gitlab-Event",
+    "terminology": { "pr_short": "MR", "pr": "merge request" },
+    "supports": { "installations": false, "token_minting": false }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "_comment": "Per-provider quirks for the OpenAI-compatible client, matched by base_url (fields documented in providers.py). Any endpoint with no entry here gets the portable default: bare model name, no extra headers, no reasoning remap. Override or extend via MIRA_PROVIDERS_JSON_PATH.",
+
+  "openrouter": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "model_prefix": "keep",
+    "extra_headers": {
+      "HTTP-Referer": "https://github.com/miracodeai/mira",
+      "X-Title": "Mira Code Reviewer"
+    },
+    "reasoning_effort_map": { "max": "xhigh" }
+  }
+}

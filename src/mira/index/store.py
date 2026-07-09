@@ -313,23 +313,26 @@ class IndexStore(_StoreSharedMixin):
         self._conn.commit()
 
     @classmethod
-    def open(cls, owner: str, repo: str):  # type: ignore[no-untyped-def]
+    def open(cls, owner: str, repo: str, platform: str = "github"):  # type: ignore[no-untyped-def]
         """Open (or create) the index store for a repo.
 
         Returns a PgIndexStore if DATABASE_URL is set, otherwise an IndexStore
-        backed by a per-repo SQLite file.
+        backed by a per-repo SQLite file. Non-GitHub platforms are namespaced
+        (``_{platform}/{owner}``) so a same-named repo on another platform gets
+        its own store; GitHub paths are unchanged for back-compat.
         """
+        key_owner = owner if platform == "github" else f"_{platform}/{owner}"
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
             try:
                 from mira.index.pg_store import PgIndexStore
 
-                return PgIndexStore(owner, repo, db_url)
+                return PgIndexStore(key_owner, repo, db_url)
             except Exception as exc:
                 logger.warning("Postgres store unavailable (%s), falling back to SQLite", exc)
 
         index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
-        repo_dir = os.path.join(index_dir, owner)
+        repo_dir = os.path.join(index_dir, key_owner)
         os.makedirs(repo_dir, exist_ok=True)
         db_path = os.path.join(repo_dir, f"{repo}.db")
         return cls(db_path)
@@ -1246,20 +1249,33 @@ class IndexStore(_StoreSharedMixin):
 # separate SQLite file under MIRA_INDEX_DIR.
 
 
-def _iter_repo_dbs(index_dir: str) -> list[tuple[str, str, str]]:
-    """Yield (owner, repo, db_path) for each repo SQLite file under index_dir."""
-    out: list[tuple[str, str, str]] = []
+def _iter_repo_dbs(index_dir: str) -> list[tuple[str, str, str, str]]:
+    """Yield (platform, owner, repo, db_path) for each repo SQLite file.
+
+    GitHub repos live flat at ``{owner}/{repo}.db`` (back-compat); other
+    platforms are namespaced under ``_{platform}/`` and may have nested-group
+    owners, so those are walked recursively.
+    """
+    out: list[tuple[str, str, str, str]] = []
     if not os.path.isdir(index_dir):
         return out
-    for owner in sorted(os.listdir(index_dir)):
-        owner_dir = os.path.join(index_dir, owner)
-        if not os.path.isdir(owner_dir) or owner.startswith("_") or owner.startswith("."):
+    for entry in sorted(os.listdir(index_dir)):
+        entry_path = os.path.join(index_dir, entry)
+        if not os.path.isdir(entry_path) or entry.startswith("."):
             continue
-        for fname in sorted(os.listdir(owner_dir)):
-            if not fname.endswith(".db"):
-                continue
-            repo = fname[:-3]
-            out.append((owner, repo, os.path.join(owner_dir, fname)))
+        if entry.startswith("_"):
+            platform = entry[1:]
+            for root, _dirs, files in os.walk(entry_path):
+                for fname in sorted(files):
+                    if not fname.endswith(".db"):
+                        continue
+                    rel = os.path.relpath(os.path.join(root, fname), entry_path)
+                    owner = os.path.dirname(rel)
+                    out.append((platform, owner, fname[:-3], os.path.join(root, fname)))
+            continue
+        for fname in sorted(os.listdir(entry_path)):
+            if fname.endswith(".db"):
+                out.append(("github", entry, fname[:-3], os.path.join(entry_path, fname)))
     return out
 
 
@@ -1267,7 +1283,7 @@ def list_packages_org_wide_sqlite() -> list[dict]:
     """SQLite equivalent of pg_store.list_packages_org_wide."""
     index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
     out: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
@@ -1282,6 +1298,7 @@ def list_packages_org_wide_sqlite() -> list[dict]:
         for kind, name, version, file_path in rows:
             out.append(
                 {
+                    "platform": platform,
                     "owner": owner,
                     "repo": repo,
                     "kind": kind,
@@ -1306,7 +1323,7 @@ def search_packages_org_wide_sqlite(
     version_l = version.lower() if version else None
 
     rows: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
@@ -1324,6 +1341,7 @@ def search_packages_org_wide_sqlite(
                         continue
                     rows.append(
                         {
+                            "platform": platform,
                             "owner": owner,
                             "repo": repo,
                             "name": r_name,
@@ -1347,7 +1365,7 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
     index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
     severity_order = {"critical": 0, "high": 1, "moderate": 2, "low": 3}
     rows: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
@@ -1358,6 +1376,7 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
                 for r in cur.fetchall():
                     rows.append(
                         {
+                            "platform": platform,
                             "owner": owner,
                             "repo": repo,
                             "package_name": r[0],
@@ -1388,7 +1407,7 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = No
     """
     index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
     rows: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
@@ -1413,6 +1432,7 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = No
                     rows.append(
                         {
                             "id": r[0],
+                            "platform": platform,
                             "owner": owner,
                             "repo": repo,
                             "rule_text": r[1],

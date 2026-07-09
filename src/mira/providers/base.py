@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import abc
 
-from mira.models import PRInfo, ReviewResult, UnresolvedThread
+from mira.models import (
+    BotThreadRecord,
+    FileHistoryEntry,
+    HumanReviewComment,
+    PRInfo,
+    ReviewResult,
+    UnresolvedThread,
+)
 
 
 class BaseProvider(abc.ABC):
@@ -12,11 +19,7 @@ class BaseProvider(abc.ABC):
 
     @abc.abstractmethod
     def __init__(self, token: str) -> None:
-        """Initialize the provider with an authentication token.
-
-        Subclasses must implement this to configure their API client
-        using the provided token.
-        """
+        """Configure the API client with an auth token."""
 
     @abc.abstractmethod
     async def get_pr_info(self, pr_url: str) -> PRInfo:
@@ -79,4 +82,47 @@ class BaseProvider(abc.ABC):
 
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref."""
+        return ""
+
+    # The methods below are called by the engine and merge handler. They have
+    # safe defaults so a provider can ship without them and simply degrade
+    # (no incremental re-review, no JIT context, no merge-time learning)
+    # rather than raising AttributeError.
+
+    async def get_compare_diff(self, pr_info: PRInfo, base_sha: str, head_sha: str) -> str:
+        """Diff between two commits, for incremental (round 2+) reviews."""
+        return ""
+
+    async def get_all_bot_threads(
+        self, pr_info: PRInfo, bot_login: str | None = None
+    ) -> list[BotThreadRecord]:
+        """All bot-authored review threads (resolved and unresolved)."""
+        return []
+
+    async def get_human_review_comments(
+        self, pr_info: PRInfo, bot_login: str
+    ) -> list[HumanReviewComment]:
+        """Non-bot line-level review comments, for merge-time learning."""
+        return []
+
+    async def get_repo_tree(self, pr_info: PRInfo, ref: str) -> list[str]:
+        """Every file path in the repo at a ref, for JIT cross-file context."""
+        return []
+
+    async def get_file_history(
+        self, pr_info: PRInfo, paths: list[str], max_per_file: int = 5
+    ) -> dict[str, list[FileHistoryEntry]]:
+        """Recent commit history per path, for decision archaeology."""
+        return {}
+
+    async def reply_to_review_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
+        """Reply to an existing line comment, threading it."""
+        return
+
+    async def get_comment_body(self, pr_info: PRInfo, comment_id: int) -> str:
+        """Fetch a single comment/note body by id (best-effort, "" on failure)."""
+        return ""
+
+    async def get_discussion_root_body(self, pr_info: PRInfo, discussion_id: str) -> str:
+        """The first comment of a thread/discussion (best-effort, "" on failure)."""
         return ""

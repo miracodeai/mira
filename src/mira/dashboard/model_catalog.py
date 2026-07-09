@@ -17,8 +17,9 @@ from collections import defaultdict
 import httpx
 
 from mira.config import LLMConfig
+from mira.llm import provider_profiles as profiles
 from mira.llm import registry
-from mira.llm.provider import _get_api_key, _is_openrouter
+from mira.llm.provider import _get_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,8 @@ def active_backend(config: LLMConfig) -> str:
     """Return "bedrock", "openrouter", or "openai-compatible"."""
     if config.provider == "bedrock":
         return "bedrock"
-    return "openrouter" if _is_openrouter(config.base_url) else "openai-compatible"
+    profile = profiles.resolve(config.base_url)
+    return "openrouter" if profile.get("name") == "openrouter" else "openai-compatible"
 
 
 def _norm(model_id: str) -> str:

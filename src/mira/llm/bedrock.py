@@ -15,7 +15,7 @@ from tenacity import (
 
 from mira.config import LLMConfig
 from mira.exceptions import LLMError
-from mira.llm.provider import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
+from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 
 logger = logging.getLogger(__name__)
 
