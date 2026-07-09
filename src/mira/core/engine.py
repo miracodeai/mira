@@ -577,7 +577,7 @@ class ReviewEngine:
             # No walkthrough (all files excluded, empty diff, or generation
             # failed) — finalize the placeholder so it doesn't sit on
             # "Reviewing this PR…" forever.
-            reason = result.skipped_reason or result.summary or "Walkthrough was not generated."
+            reason = result.skipped_reason or "Walkthrough was not generated."
             markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
             try:
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)

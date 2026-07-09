@@ -283,7 +283,13 @@ def _validate_change_groups(raw_groups: list) -> list[LLMWalkthroughChangeGroup]
                     files.append(LLMWalkthroughFileChange.model_validate(f))
                 except Exception as exc:
                     logger.warning("Skipping malformed walkthrough file entry: %s", exc)
-            item = {**item, "files": files}
+            try:
+                group = LLMWalkthroughChangeGroup.model_validate({**item, "files": []})
+                group.files = files
+                groups.append(group)
+            except Exception as exc:
+                logger.warning("Skipping malformed walkthrough change group: %s", exc)
+            continue
         try:
             groups.append(LLMWalkthroughChangeGroup.model_validate(item))
         except Exception as exc:
