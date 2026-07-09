@@ -8,6 +8,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from typing import Any
 
 from mira.index._store_shared import _StoreSharedMixin
 from mira.index.store import (
@@ -192,14 +195,24 @@ _schema_initialized = False
 _lock = threading.Lock()
 
 
-def _get_conn(url: str):
+def _drop_pg_conn() -> None:
+    """Close and discard the module-level shared connection."""
+    global _pg_conn
+    with _lock:
+        if _pg_conn is not None:
+            with suppress(Exception):
+                _pg_conn.close()
+            _pg_conn = None
+
+
+def _get_conn(url: str) -> Any:
     """Get the shared Postgres connection, initializing schema on first use."""
     global _pg_conn, _schema_initialized
     with _lock:
-        if _pg_conn is None:
-            import psycopg
+        from mira.db.postgres import connect
 
-            _pg_conn = psycopg.connect(url, autocommit=True)
+        if _pg_conn is None:
+            _pg_conn = connect(url)
         if not _schema_initialized:
             with _pg_conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
@@ -219,16 +232,29 @@ def _get_conn(url: str):
         return _pg_conn
 
 
+@contextmanager
+def _pg_cursor(url: str) -> Iterator[Any]:
+    """Yield a cursor that reconnects once on stale-connection errors."""
+    from mira.db.postgres import ReconnectingCursor
+
+    def refresh() -> Any:
+        _drop_pg_conn()
+        return _get_conn(url)
+
+    conn = _get_conn(url)
+    with ReconnectingCursor(conn.cursor(), on_reconnect=refresh) as cur:
+        yield cur
+
+
 def list_learned_rules_org_wide(
     url: str, limit: int = 1000, status: str | None = None
 ) -> list[dict]:
     """List learned rules across every repo, optionally filtered by status.
     Used by the org-wide learnings dashboard so admins can review, approve, and
     manage what Mira has synthesized across the org."""
-    conn = _get_conn(url)
     where = "WHERE status = %s" if status else ""
     params: tuple = (status, limit) if status else (limit,)
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute(
             "SELECT id, owner, repo, rule_text, source_signal, category, "
             "path_pattern, sample_count, active, status, created_by, "
@@ -260,8 +286,7 @@ def list_learned_rules_org_wide(
 
 def count_vulnerabilities_org_wide(url: str) -> dict[str, int]:
     """Count open vulnerabilities org-wide by severity, for the dashboard widget."""
-    conn = _get_conn(url)
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute("SELECT severity, COUNT(*) FROM vulnerabilities GROUP BY severity")
         rows = cur.fetchall()
     return {r[0]: r[1] for r in rows}
@@ -269,8 +294,7 @@ def count_vulnerabilities_org_wide(url: str) -> dict[str, int]:
 
 def list_vulnerabilities_org_wide(url: str, limit: int = 1000) -> list[dict]:
     """List every open vulnerability across the org, ordered by severity."""
-    conn = _get_conn(url)
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute(
             "SELECT owner, repo, package_name, ecosystem, package_version, "
             "cve_id, summary, severity, advisory_url, fixed_in, last_seen_at "
@@ -305,8 +329,7 @@ def list_packages_org_wide(url: str) -> list[dict]:
     """List every (owner, repo, ecosystem, name, version, file_path) tuple
     across the whole org. Used by the OSV poller to know what to query;
     file_path lets the poller prefer lockfile rows over manifest rows."""
-    conn = _get_conn(url)
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute(
             "SELECT DISTINCT owner, repo, kind, name, version, file_path "
             "FROM package_manifests "
@@ -342,7 +365,6 @@ def search_packages_org_wide(
     used for incident response ("which repos use lodash@4.17.20 after this
     CVE?") and upgrade audits.
     """
-    conn = _get_conn(url)
     clauses: list[str] = []
     params: list = []
     if name:
@@ -367,7 +389,7 @@ def search_packages_org_wide(
     )
     params.append(limit)
 
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
 
@@ -395,21 +417,36 @@ class PgIndexStore(_StoreSharedMixin):
     def __init__(self, owner: str, repo: str, url: str) -> None:
         self._owner = owner
         self._repo = repo
+        self._url = url
         self._conn = _get_conn(url)
+
+    def _refresh_conn(self) -> Any:
+        """Drop the shared module connection and bind a fresh handle."""
+        _drop_pg_conn()
+        self._conn = _get_conn(self._url)
+        return self._conn
+
+    @contextmanager
+    def _cursor(self) -> Iterator[Any]:
+        """Like main's ``self._conn.cursor()``, but reconnects once on idle drop."""
+        from mira.db.postgres import ReconnectingCursor
+
+        with ReconnectingCursor(self._conn.cursor(), on_reconnect=self._refresh_conn) as cur:
+            yield cur
 
     def _exec(self, sql: str, params: tuple = ()):
         """Execute a query and return the cursor."""
-        cur = self._conn.cursor()
-        cur.execute(sql, params)
-        return cur
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            return cur
 
     def _fetchone(self, sql: str, params: tuple = ()):
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchone()
 
     def _fetchall(self, sql: str, params: tuple = ()):
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()
 
@@ -446,7 +483,7 @@ class PgIndexStore(_StoreSharedMixin):
 
     def upsert_summary(self, summary: FileSummary) -> None:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO files (owner, repo, path, language, summary, content_hash, "
                 "loc, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
@@ -529,7 +566,7 @@ class PgIndexStore(_StoreSharedMixin):
                 )
 
     def remove_paths(self, paths: list[str]) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             for path in paths:
                 for table in ("files", "symbols", "imports", "symbol_refs", "external_refs"):
                     col = (
@@ -563,7 +600,7 @@ class PgIndexStore(_StoreSharedMixin):
 
     def upsert_directory(self, summary: DirectorySummary) -> None:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO directories (owner, repo, path, summary, file_count, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s) "
@@ -603,7 +640,7 @@ class PgIndexStore(_StoreSharedMixin):
     def get_inbound_edge_counts(self, paths: list[str]) -> dict[str, int]:
         """Count how many other files reference each path via symbol_refs or imports."""
         counts: dict[str, int] = {}
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             for path in paths:
                 cur.execute(
                     "SELECT COUNT(*) FROM imports WHERE owner=%s AND repo=%s AND target_path=%s",
@@ -690,7 +727,7 @@ class PgIndexStore(_StoreSharedMixin):
         created_at: float | None = None,
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO review_events (owner, repo, pr_number, pr_title, pr_url, "
                 "comments_posted, blockers, warnings, suggestions, files_reviewed, "
@@ -835,7 +872,7 @@ class PgIndexStore(_StoreSharedMixin):
         self, title: str, content: str, context_id: int | None = None
     ) -> ReviewContext:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             if context_id is not None:
                 cur.execute(
                     "UPDATE review_context SET title=%s, content=%s, updated_at=%s "
@@ -852,7 +889,7 @@ class PgIndexStore(_StoreSharedMixin):
         return self.get_review_context(context_id)  # type: ignore[return-value]
 
     def delete_review_context(self, context_id: int) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM review_context WHERE owner=%s AND repo=%s AND id=%s",
                 (self._owner, self._repo, context_id),
@@ -919,7 +956,7 @@ class PgIndexStore(_StoreSharedMixin):
         actor: str,
     ) -> FeedbackEventRow:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
@@ -982,7 +1019,7 @@ class PgIndexStore(_StoreSharedMixin):
             )
             for e in events
         ]
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.executemany(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
@@ -1051,7 +1088,7 @@ class PgIndexStore(_StoreSharedMixin):
         )
         if existing:
             # Preserve the existing approval status across re-synthesis.
-            with self._conn.cursor() as cur:
+            with self._cursor() as cur:
                 cur.execute(
                     "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
                     "sample_count=%s, updated_at=%s WHERE id=%s",
@@ -1069,7 +1106,7 @@ class PgIndexStore(_StoreSharedMixin):
                 created_at=now,
                 updated_at=now,
             )
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO learned_rules "
                 "(owner, repo, rule_text, source_signal, category, path_pattern, "
@@ -1164,7 +1201,7 @@ class PgIndexStore(_StoreSharedMixin):
         created_by: str = "",
     ) -> LearnedRuleRow:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO learned_rules "
                 "(owner, repo, rule_text, source_signal, category, path_pattern, "
@@ -1191,7 +1228,7 @@ class PgIndexStore(_StoreSharedMixin):
     def update_learned_rule(
         self, rule_id: int, rule_text: str, category: str, path_pattern: str
     ) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "UPDATE learned_rules SET rule_text=%s, category=%s, path_pattern=%s, "
                 "updated_at=%s WHERE id=%s AND owner=%s AND repo=%s",
@@ -1200,7 +1237,7 @@ class PgIndexStore(_StoreSharedMixin):
         self._conn.commit()
 
     def set_learned_rule_status(self, rule_id: int, status: str) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "UPDATE learned_rules SET status=%s, updated_at=%s "
                 "WHERE id=%s AND owner=%s AND repo=%s",
@@ -1209,7 +1246,7 @@ class PgIndexStore(_StoreSharedMixin):
         self._conn.commit()
 
     def set_learned_rule_active(self, rule_id: int, active: bool) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "UPDATE learned_rules SET active=%s, updated_at=%s "
                 "WHERE id=%s AND owner=%s AND repo=%s",
@@ -1218,7 +1255,7 @@ class PgIndexStore(_StoreSharedMixin):
         self._conn.commit()
 
     def delete_learned_rule(self, rule_id: int) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM learned_rules WHERE id=%s AND owner=%s AND repo=%s",
                 (rule_id, self._owner, self._repo),
@@ -1233,7 +1270,7 @@ class PgIndexStore(_StoreSharedMixin):
         from mira.index.store import PackageManifestRow  # noqa: F401
 
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",
                 (self._owner, self._repo, file_path),
@@ -1295,7 +1332,7 @@ class PgIndexStore(_StoreSharedMixin):
         stale = existing - live_paths
         if not stale:
             return 0
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.executemany(
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",
                 [(self._owner, self._repo, p) for p in stale],
@@ -1322,7 +1359,7 @@ class PgIndexStore(_StoreSharedMixin):
                 (self._owner, self._repo, package_name, ecosystem, package_version),
             )
         }
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM vulnerabilities "
                 "WHERE owner=%s AND repo=%s AND package_name=%s "
@@ -1374,7 +1411,7 @@ class PgIndexStore(_StoreSharedMixin):
         stale = [(n, e, v) for n, e, v in rows if (n, e, v) not in active_keys]
         if not stale:
             return 0
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.executemany(
                 "DELETE FROM vulnerabilities WHERE owner=%s AND repo=%s "
                 "AND package_name=%s AND ecosystem=%s AND package_version=%s",

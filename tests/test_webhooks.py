@@ -7,6 +7,7 @@ import hmac
 import json
 from unittest.mock import AsyncMock, patch
 
+import psycopg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -92,6 +93,54 @@ async def test_health(client: AsyncClient) -> None:
     resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+async def test_health_returns_503_when_postgres_unreachable(
+    app_auth: GitHubAppAuth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+
+    def failing_connect(_url: str) -> None:
+        raise psycopg.OperationalError("connection refused")
+
+    with patch("mira.db.postgres.connect", failing_connect):
+        app = create_app(app_auth=app_auth, webhook_secret=WEBHOOK_SECRET, bot_name=BOT_NAME)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/health")
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "database unavailable"
+
+
+async def test_health_closes_postgres_probe_connection(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    closed: list[int] = []
+
+    class _ProbeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple = ()) -> None:
+            return None
+
+    class _ProbeConnection:
+        def cursor(self) -> _ProbeCursor:
+            return _ProbeCursor()
+
+        def close(self) -> None:
+            closed.append(1)
+
+    with patch("mira.db.postgres.connect", side_effect=lambda _url: _ProbeConnection()):
+        await client.get("/health")
+        await client.get("/health")
+
+    assert len(closed) == 2
 
 
 async def test_invalid_signature(client: AsyncClient) -> None:
