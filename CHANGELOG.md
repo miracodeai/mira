@@ -4,6 +4,19 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Stale PostgreSQL connections after idle** — `AppDatabase` and `pg_store` keep
+  long-lived psycopg handles that can go dead behind poolers or `idle_session_timeout`.
+  A new `mira.db.postgres` module adds `ReconnectingCursor`, which retries once on
+  `OperationalError` for `execute` and `executemany` (covering dashboard API routes,
+  indexing, and the vulnerability poller) without adding per-query liveness probes.
+- **`/health` reflects Postgres availability** — when `DATABASE_URL` is Postgres,
+  the endpoint runs a one-shot `SELECT 1` on a dedicated connection that is always
+  closed afterward, and returns HTTP 503 if the database is unreachable.
+
 ## [0.6.0] — 2026-07-09
 
 ### Added

@@ -11,7 +11,10 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -259,6 +262,7 @@ class AppDatabase:
         self._url = url
         self._admin_password = admin_password
         self._pg_conn = None
+        self._pg_lock = threading.Lock()
         self._sqlite_conn: sqlite3.Connection | None = None
 
         if url.startswith("postgresql://") or url.startswith("postgres://"):
@@ -350,11 +354,11 @@ class AppDatabase:
     def _init_postgres(self, url: str) -> None:
         self._backend = "postgres"
         try:
-            import psycopg
+            from mira.db.postgres import connect
 
-            self._pg_conn = psycopg.connect(url)
-            self._pg_conn.autocommit = True
-            with self._pg_conn.cursor() as cur:
+            conn = connect(url)
+            self._pg_conn = conn
+            with conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
                 # Lightweight migration for columns added after launch.
                 cur.execute(
@@ -411,6 +415,28 @@ class AppDatabase:
             logger.warning("PostgreSQL connection failed (%s), falling back to SQLite", exc)
             self._init_sqlite("")
 
+    @contextmanager
+    def _pg_cursor(self) -> Iterator[Any]:
+        """Yield a Postgres cursor that reconnects once on stale-connection errors."""
+        from mira.db.postgres import ReconnectingCursor, connect, reconnect
+
+        def refresh() -> Any:
+            with self._pg_lock:
+                self._pg_conn = reconnect(self._url, self._pg_conn)
+                return self._pg_conn
+
+        with self._pg_lock:
+            if self._pg_conn is None:
+                self._pg_conn = connect(self._url)
+            conn = self._pg_conn
+        with ReconnectingCursor(conn.cursor(), on_reconnect=refresh) as cur:
+            yield cur
+
+    def _pg_commit(self) -> None:
+        with self._pg_lock:
+            if self._pg_conn is not None:
+                self._pg_conn.commit()
+
     def _ensure_default_admin(self) -> None:
         """Create default admin user if none exists. Uses configured admin_password."""
         if self._backend == "sqlite":
@@ -422,8 +448,7 @@ class AppDatabase:
                 self.create_user("admin", self._admin_password, is_admin=True)
                 logger.info("Created default admin user (password from config)")
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM users WHERE is_admin = TRUE")
                 row = cur.fetchone()
                 if row and row[0] == 0:
@@ -442,8 +467,7 @@ class AppDatabase:
             self._sqlite_conn.commit()
             row_id = self._sqlite_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             return User(id=row_id, username=username, is_admin=is_admin, created_at=now)
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(
                 "INSERT INTO users (username, password_hash, is_admin) VALUES (%s, %s, %s) RETURNING id",
                 (username, pw_hash, is_admin),
@@ -468,8 +492,7 @@ class AppDatabase:
                     created_at=row[4],
                 )
             return None
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(
                 "SELECT id, username, is_admin, theme FROM users WHERE username = %s AND password_hash = %s",
                 (username, pw_hash),
@@ -491,8 +514,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "INSERT INTO sessions (token, user_id, expires_at) VALUES (%s, %s, to_timestamp(%s))",
                     (token, user_id, expires),
@@ -517,8 +539,7 @@ class AppDatabase:
                     created_at=row[4],
                 )
             return None
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(
                 "SELECT u.id, u.username, u.is_admin, u.theme FROM sessions s "
                 "JOIN users u ON s.user_id = u.id "
@@ -536,8 +557,7 @@ class AppDatabase:
             self._sqlite_conn.execute("UPDATE users SET theme = ? WHERE id = ?", (theme, user_id))
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute("UPDATE users SET theme = %s WHERE id = %s", (theme, user_id))
 
     def update_password(self, user_id: int, new_password: str) -> None:
@@ -550,11 +570,10 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (pw_hash, user_id))
             # autocommit today, but this keeps the write safe if that changes.
-            self._pg_conn.commit()
+            self._pg_commit()
 
     def record_login(self, user_id: int) -> None:
         """Stamp a user's last-login time (called on each successful login)."""
@@ -566,11 +585,10 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute("UPDATE users SET last_login_at = %s WHERE id = %s", (now, user_id))
             # autocommit today, but this keeps the write safe if that changes.
-            self._pg_conn.commit()
+            self._pg_commit()
 
     def list_users(self) -> list[User]:
         if self._backend == "sqlite":
@@ -588,8 +606,7 @@ class AppDatabase:
                 )
                 for r in rows
             ]
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute("SELECT id, username, is_admin, last_login_at FROM users ORDER BY id")
             return [
                 User(id=r[0], username=r[1], is_admin=bool(r[2]), last_login_at=r[3])
@@ -602,8 +619,7 @@ class AppDatabase:
             self._sqlite_conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
 
     def delete_session(self, token: str) -> None:
@@ -612,8 +628,7 @@ class AppDatabase:
             self._sqlite_conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute("DELETE FROM sessions WHERE token = %s", (token,))
 
     # ── Repos ──
@@ -632,8 +647,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "INSERT INTO repos (platform, owner, repo, installation_id) VALUES (%s, %s, %s, %s) "
                     "ON CONFLICT(platform, owner, repo) DO UPDATE SET "
@@ -684,8 +698,7 @@ class AppDatabase:
                 )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 if bump_last_indexed:
                     cur.execute(
                         "UPDATE repos SET status=%s, files_indexed=%s, error=%s, "
@@ -713,8 +726,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "INSERT INTO pending_uninstalls (installation_id, owner) VALUES (%s, %s) "
                     "ON CONFLICT(installation_id) DO NOTHING",
@@ -728,8 +740,7 @@ class AppDatabase:
                 "SELECT installation_id, owner FROM pending_uninstalls"
             ).fetchall()
             return [(r[0], r[1]) for r in rows]
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute("SELECT installation_id, owner FROM pending_uninstalls")
             return [(r[0], r[1]) for r in cur.fetchall()]
 
@@ -742,8 +753,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "DELETE FROM pending_uninstalls WHERE installation_id=%s",
                     (installation_id,),
@@ -758,8 +768,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
             return cur.rowcount
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(
                 "DELETE FROM repos WHERE installation_id=%s",
                 (installation_id,),
@@ -775,8 +784,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "DELETE FROM repos WHERE platform=%s AND owner=%s AND repo=%s",
                     (platform, owner, repo),
@@ -793,8 +801,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "UPDATE repos SET file_count_estimate=%s WHERE platform=%s AND owner=%s AND repo=%s",
                     (count, platform, owner, repo),
@@ -811,8 +818,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "UPDATE repos SET index_mode=%s WHERE platform=%s AND owner=%s AND repo=%s",
                     (mode, platform, owner, repo),
@@ -845,8 +851,7 @@ class AppDatabase:
                 )
                 for r in rows
             ]
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
@@ -899,8 +904,7 @@ class AppDatabase:
                     platform=row[13],
                 )
             return None
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
@@ -942,8 +946,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "UPDATE repos SET conventions=%s WHERE platform=%s AND owner=%s AND repo=%s",
                     (conventions, platform, owner, repo),
@@ -962,15 +965,14 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "UPDATE repos SET private=%s WHERE platform=%s AND owner=%s AND repo=%s",
                     (private, platform, owner, repo),
                 )
             # Explicit commit mirrors set_last_reviewed_sha — the connection is
             # autocommit today, but this keeps the write safe if that changes.
-            self._pg_conn.commit()
+            self._pg_commit()
 
     # ── Settings ──
 
@@ -981,8 +983,7 @@ class AppDatabase:
                 "SELECT value FROM settings WHERE key=?", (key,)
             ).fetchone()
             return row[0] if row else None
-        assert self._pg_conn is not None
-        with self._pg_conn.cursor() as cur:
+        with self._pg_cursor() as cur:
             cur.execute("SELECT value FROM settings WHERE key=%s", (key,))
             row = cur.fetchone()
             return row[0] if row else None
@@ -996,8 +997,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
                     (key, value),
@@ -1059,7 +1059,7 @@ class AppDatabase:
                 "FROM global_rules ORDER BY updated_at DESC"
             ).fetchall()
         else:
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "SELECT id, title, content, enabled, created_at, updated_at "
                     "FROM global_rules ORDER BY updated_at DESC"
@@ -1085,7 +1085,7 @@ class AppDatabase:
                 (rule_id,),
             ).fetchone()
         else:
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "SELECT id, title, content, enabled, created_at, updated_at "
                     "FROM global_rules WHERE id = %s",
@@ -1137,13 +1137,13 @@ class AppDatabase:
                 rule_id = cur.lastrowid
         else:
             if rule_id:
-                with self._pg_conn.cursor() as cur:
+                with self._pg_cursor() as cur:
                     cur.execute(
                         "UPDATE global_rules SET title=%s, content=%s, updated_at=NOW() WHERE id=%s",
                         (title, content, rule_id),
                     )
             else:
-                with self._pg_conn.cursor() as cur:
+                with self._pg_cursor() as cur:
                     cur.execute(
                         "INSERT INTO global_rules (title, content, enabled) "
                         "VALUES (%s, %s, TRUE) RETURNING id",
@@ -1157,7 +1157,7 @@ class AppDatabase:
             self._sqlite_conn.execute("DELETE FROM global_rules WHERE id=?", (rule_id,))
             self._sqlite_conn.commit()
         else:
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute("DELETE FROM global_rules WHERE id=%s", (rule_id,))
 
     def toggle_global_rule(self, rule_id: int) -> GlobalRule | None:
@@ -1168,7 +1168,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "UPDATE global_rules SET enabled = NOT enabled, updated_at = NOW() WHERE id = %s",
                     (rule_id,),
@@ -1217,8 +1217,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "INSERT INTO pr_review_progress "
                     "(platform, owner, repo, pr_number, total_paths, reviewed_paths, "
@@ -1257,8 +1256,7 @@ class AppDatabase:
                 (platform, owner, repo, pr_number),
             ).fetchone()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "SELECT total_paths, reviewed_paths, skipped_paths, chunk_index, "
                     "EXTRACT(EPOCH FROM updated_at) "
@@ -1300,8 +1298,7 @@ class AppDatabase:
                 (platform, owner, repo, pr_number),
             ).fetchone()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "SELECT last_reviewed_sha FROM pr_review_progress "
                     "WHERE platform=%s AND owner=%s AND repo=%s AND pr_number=%s",
@@ -1337,8 +1334,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "INSERT INTO pr_review_progress "
                     "(platform, owner, repo, pr_number, last_reviewed_sha, updated_at) "
@@ -1348,7 +1344,7 @@ class AppDatabase:
                     "updated_at=NOW()",
                     (platform, owner, repo, pr_number, sha),
                 )
-            self._pg_conn.commit()
+            self._pg_commit()
 
     def delete_pr_review_progress(
         self, owner: str, repo: str, pr_number: int, platform: str = "github"
@@ -1361,8 +1357,7 @@ class AppDatabase:
             )
             self._sqlite_conn.commit()
         else:
-            assert self._pg_conn is not None
-            with self._pg_conn.cursor() as cur:
+            with self._pg_cursor() as cur:
                 cur.execute(
                     "DELETE FROM pr_review_progress WHERE platform=%s AND owner=%s AND repo=%s AND pr_number=%s",
                     (platform, owner, repo, pr_number),

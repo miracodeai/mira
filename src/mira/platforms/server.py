@@ -13,7 +13,7 @@ import logging
 import os
 import re
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +104,22 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, str]:
+        db_url = os.environ.get("DATABASE_URL", "")
+        if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+            from mira.db.postgres import connect
+
+            conn = None
+            try:
+                conn = connect(db_url)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except Exception:
+                logger.exception("Health check: database unavailable")
+                raise HTTPException(status_code=503, detail="database unavailable") from None
+            finally:
+                if conn is not None:
+                    with suppress(Exception):
+                        conn.close()
         return {"status": "ok"}
 
     # `/webhook` is a deprecated alias from before the `/github/webhook` rename.
