@@ -115,7 +115,7 @@ async def sync_repos() -> dict:
             if db_repo.platform != "github":
                 continue
             if (db_repo.owner, db_repo.repo) not in actual_repos:
-                _api._app_db.delete_repo(db_repo.owner, db_repo.repo)
+                _api._app_db.delete_repo(db_repo.owner, db_repo.repo, platform=db_repo.platform)
                 removed += 1
 
     return {
