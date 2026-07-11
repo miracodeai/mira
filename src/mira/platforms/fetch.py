@@ -247,6 +247,8 @@ class GitLabRepoFetcher:
             logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
             return None
         return _strip_tarball(blob, max_file_size, f"{owner}/{repo}")
+
+
 class ForgejoRepoFetcher:
     """Fetches repo content via the Gitea/Forgejo REST API (/api/v1).
 
@@ -280,13 +282,20 @@ class ForgejoRepoFetcher:
         url = f"{self._repo(owner, repo)}/git/trees/{branch}?recursive=true"
         paths: list[str] = []
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self._headers(), timeout=30)
-            if resp.status_code == 404:
-                raise EmptyRepoError(owner, repo)
-            resp.raise_for_status()
-            for item in resp.json():
-                if item.get("type") == "blob":
-                    paths.append(item["path"])
+            page = 1
+            while True:
+                page_url = f"{url}&page={page}" if page > 1 else url
+                resp = await client.get(page_url, headers=self._headers(), timeout=30)
+                if resp.status_code == 404:
+                    raise EmptyRepoError(owner, repo)
+                resp.raise_for_status()
+                data = resp.json()
+                for item in data.get("tree", []):
+                    if item.get("type") == "blob":
+                        paths.append(item["path"])
+                if not data.get("truncated", False):
+                    break
+                page += 1
         return paths
 
     async def file_content(

@@ -328,16 +328,16 @@ def serve(
     config_path: str | None,
     verbose: bool,
 ) -> None:
-    """Run the Mira webhook server for GitHub, GitLab, or both."""
+    """Run the Mira webhook server for GitHub, GitLab, and/or Forgejo."""
     try:
         import asyncio
 
         import uvicorn
 
         from mira.config import set_global_defaults
+        from mira.platforms.forgejo.auth import ForgejoTokenAuth
         from mira.platforms.github.auth import GitHubAppAuth
         from mira.platforms.gitlab.auth import GitLabTokenAuth
-        from mira.platforms.forgejo.auth import ForgejoTokenAuth
         from mira.platforms.server import create_app
     except ImportError as exc:
         raise click.ClickException(
@@ -372,6 +372,7 @@ def serve(
 
     if github_configured:
         assert private_key is not None
+        assert app_id is not None
         if private_key.startswith("@"):
             key_path = private_key[1:]
             try:
@@ -387,14 +388,19 @@ def serve(
 
     if forgejo_configured:
         assert forgejo_token is not None
-        forgejo_auth = ForgejoTokenAuth(forgejo_token, forgejo_base_url or "https://codeberg.org/api/v1")
+        forgejo_auth = ForgejoTokenAuth(
+            forgejo_token, forgejo_base_url or "https://codeberg.org/api/v1"
+        )
 
     # Auto-detect the bot @mention from whichever platform's own identity when
     # the user didn't override it. Falls back to "miracodeai" on a lookup blip.
     if not bot_name:
         identity_auth = app_auth or gitlab_auth or forgejo_auth
-        bot_name = asyncio.run(identity_auth.get_bot_identity()) or "miracodeai"
-        click.echo(f"Detected bot @mention: @{bot_name}")
+        if identity_auth is not None:
+            bot_name = asyncio.run(identity_auth.get_bot_identity()) or "miracodeai"
+            click.echo(f"Detected bot @mention: @{bot_name}")
+        else:
+            bot_name = "miracodeai"
 
     # Persist the resolved name so the dashboard UI can show the real handle.
     try:
@@ -415,11 +421,13 @@ def serve(
     )
 
     platforms = ", ".join(
-        p for p, on in [
+        p
+        for p, on in [
             ("GitHub", github_configured),
             ("GitLab", gitlab_configured),
             ("Forgejo", forgejo_configured),
-        ] if on
+        ]
+        if on
     )
     click.echo(f"Starting Mira webhook server ({platforms}) on {host}:{port}")
     uvicorn.run(app, host=host, port=port)

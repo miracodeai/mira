@@ -80,9 +80,9 @@ class ForgejoProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.request(method, url, headers=headers, **kw)
         if resp.status_code not in ok:
-            raise ProviderError(
-                f"Forgejo {method} {url} → {resp.status_code}: {resp.text[:300]}"
-            )
+            err = ProviderError(f"Forgejo {method} {url} → {resp.status_code}: {resp.text[:300]}")
+            err.status_code = resp.status_code  # type: ignore[attr-defined]
+            raise err
         return resp
 
     async def _paginate(self, url: str) -> list[dict[str, Any]]:
@@ -90,9 +90,7 @@ class ForgejoProvider(BaseProvider):
         next_url: str | None = url + ("&" if "?" in url else "?") + "limit=100"
         async with httpx.AsyncClient(timeout=30) as client:
             while next_url:
-                resp = await client.get(
-                    next_url, headers={"Authorization": f"token {self._token}"}
-                )
+                resp = await client.get(next_url, headers={"Authorization": f"token {self._token}"})
                 resp.raise_for_status()
                 out.extend(resp.json())
                 next_url = _next_link(resp.headers.get("link", ""))
@@ -115,7 +113,8 @@ class ForgejoProvider(BaseProvider):
         owner, repo, number = parse_pr_url(pr_url)
         try:
             resp = await self._request(
-                "GET", f"{self._api}/repos/{owner}/{repo}/pulls/{number}",
+                "GET",
+                f"{self._api}/repos/{owner}/{repo}/pulls/{number}",
             )
             pr = resp.json()
         except ProviderError:
@@ -163,9 +162,7 @@ class ForgejoProvider(BaseProvider):
             f"{quote(head_sha, safe='')}.diff"
         )
         try:
-            resp = await self._request(
-                "GET", url, headers={"Accept": "text/plain"}, ok=(200, 404)
-            )
+            resp = await self._request("GET", url, headers={"Accept": "text/plain"}, ok=(200, 404))
             return resp.text if resp.status_code == 200 else ""
         except ProviderError as exc:
             logger.warning("Compare diff failed: %s", exc)
@@ -175,10 +172,7 @@ class ForgejoProvider(BaseProvider):
 
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Raw file content at a ref — used to verify a thread's fix landed."""
-        url = (
-            f"{self._repo(pr_info)}/contents/{quote(path, safe='')}"
-            f"?ref={quote(ref, safe='')}"
-        )
+        url = f"{self._repo(pr_info)}/contents/{quote(path, safe='')}?ref={quote(ref, safe='')}"
         try:
             resp = await self._request("GET", url, ok=(200, 404))
         except ProviderError as exc:
@@ -274,14 +268,10 @@ class ForgejoProvider(BaseProvider):
         }
 
         try:
-            await self._request(
-                "POST", f"{self._pr(pr_info)}/reviews", json=review_body
-            )
+            await self._request("POST", f"{self._pr(pr_info)}/reviews", json=review_body)
         except ProviderError as exc:
-            if "422" in str(exc):
-                logger.warning(
-                    "Inline review failed (%s); posting as individual comments", exc
-                )
+            if getattr(exc, "status_code", None) == 422:
+                logger.warning("Inline review failed (%s); posting as individual comments", exc)
                 for comment in result.comments:
                     body = format_comment_body(comment, bot_name=bot_name)
                     note = f"**`{comment.path}:{comment.line}`**\n\n{body}"
@@ -336,9 +326,7 @@ class ForgejoProvider(BaseProvider):
     async def get_comment_body(self, pr_info: PRInfo, comment_id: int) -> str:
         """Fetch an issue comment's body by id. Best-effort."""
         try:
-            resp = await self._request(
-                "GET", f"{self._repo(pr_info)}/issues/comments/{comment_id}"
-            )
+            resp = await self._request("GET", f"{self._repo(pr_info)}/issues/comments/{comment_id}")
             return (resp.json().get("body") or "")[:1500]
         except Exception:
             return ""
@@ -350,6 +338,14 @@ class ForgejoProvider(BaseProvider):
         await self.post_comment(pr_info, body)
 
     # ── reviews / threads ──────────────────────────────────────────
+
+    async def _fetch_review_comments(self, pr_info: PRInfo, review_id: int) -> list[dict[str, Any]]:
+        """Fetch review comments for a given review id."""
+        resp = await self._request("GET", f"{self._pr(pr_info)}/reviews/{review_id}/comments")
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        return [data]
 
     async def get_all_bot_threads(
         self, pr_info: PRInfo, bot_login: str | None = None
@@ -368,14 +364,9 @@ class ForgejoProvider(BaseProvider):
                 continue
 
             try:
-                comments = await self._request(
-                    "GET", f"{self._pr(pr_info)}/reviews/{review['id']}/comments"
-                ).json()
+                comments = await self._fetch_review_comments(pr_info, review["id"])
             except Exception:
                 comments = []
-
-            if not isinstance(comments, list):
-                comments = [comments]
 
             for comment in comments:
                 comment_user = (comment.get("user") or {}).get("username", "")
@@ -401,18 +392,14 @@ class ForgejoProvider(BaseProvider):
     ) -> list[UnresolvedThread]:
         threads = await self.get_all_bot_threads(pr_info, bot_login)
         return [
-            UnresolvedThread(
-                thread_id=t.thread_id, path=t.path, line=t.line, body=t.body
-            )
+            UnresolvedThread(thread_id=t.thread_id, path=t.path, line=t.line, body=t.body)
             for t in threads
             if not t.is_resolved
         ]
 
     async def resolve_threads(self, pr_info: PRInfo, thread_ids: list[str]) -> int:
         """Resolve review threads — no-op (Forgejo hasn't shipped comment resolution)."""
-        logger.debug(
-            "resolve_threads is a no-op for Forgejo (%d threads)", len(thread_ids)
-        )
+        logger.debug("resolve_threads is a no-op for Forgejo (%d threads)", len(thread_ids))
         return 0
 
     async def resolve_outdated_review_threads(self, pr_info: PRInfo) -> int:
@@ -420,9 +407,7 @@ class ForgejoProvider(BaseProvider):
         logger.debug("resolve_outdated_review_threads is a no-op for Forgejo")
         return 0
 
-    async def get_thread_id_for_comment(
-        self, comment_node_id: str, pr_info: PRInfo
-    ) -> str | None:
+    async def get_thread_id_for_comment(self, comment_node_id: str, pr_info: PRInfo) -> str | None:
         """Look up the review thread for a comment by iterating reviews' comments."""
         try:
             reviews = await self._paginate(f"{self._pr(pr_info)}/reviews")
@@ -431,14 +416,9 @@ class ForgejoProvider(BaseProvider):
 
         for review in reviews:
             try:
-                comments = await self._request(
-                    "GET", f"{self._pr(pr_info)}/reviews/{review['id']}/comments"
-                ).json()
+                comments = await self._fetch_review_comments(pr_info, review["id"])
             except Exception:
                 continue
-
-            if not isinstance(comments, list):
-                comments = [comments]
 
             for comment in comments:
                 if str(comment.get("id")) == comment_node_id:
@@ -463,14 +443,9 @@ class ForgejoProvider(BaseProvider):
                 continue
 
             try:
-                comments = await self._request(
-                    "GET", f"{self._pr(pr_info)}/reviews/{review['id']}/comments"
-                ).json()
+                comments = await self._fetch_review_comments(pr_info, review["id"])
             except Exception:
                 continue
-
-            if not isinstance(comments, list):
-                comments = [comments]
 
             for comment in comments:
                 comment_user = (comment.get("user") or {}).get("username", "")
@@ -501,7 +476,7 @@ class ForgejoProvider(BaseProvider):
     async def remove_label(self, pr_info: PRInfo, label: str) -> None:
         await self._request(
             "DELETE",
-            f"{self._repo(pr_info)}/issues/{pr_info.number}/labels?name={label}",
+            f"{self._repo(pr_info)}/issues/{pr_info.number}/labels?name={quote(label, safe='')}",
         )
 
     async def get_discussion_root_body(self, pr_info: PRInfo, discussion_id: str) -> str:

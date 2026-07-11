@@ -26,20 +26,23 @@ logger = logging.getLogger(__name__)
 async def list_forgejo_repos(token: str, base_url: str) -> list[dict]:
     """Every repo the token can access (paginated via page/limit)."""
     out: list[dict] = []
-    url: str | None = f"{base_url.rstrip('/')}/repos/current?page=1&limit=50"
+    page = 1
+    limit = 50
     async with httpx.AsyncClient(timeout=30) as client:
-        while url:
+        while True:
+            url = f"{base_url.rstrip('/')}/repos/current?page={page}&limit={limit}"
             resp = await client.get(url, headers={"Authorization": f"token {token}"})
             if resp.status_code != 200:
-                logger.warning(
-                    "Forgejo repo list failed: %d %s", resp.status_code, resp.text[:200]
-                )
+                logger.warning("Forgejo repo list failed: %d %s", resp.status_code, resp.text[:200])
                 break
-            page = resp.json()
-            if not page:
+            repos = resp.json()
+            if not repos:
                 break
-            out.extend(page)
-            url = None
+            out.extend(repos)
+            if len(repos) < limit:
+                break
+            page += 1
+    return out
 
 
 async def backfill_forgejo_repos(auth: PlatformAuth) -> int:
@@ -58,9 +61,7 @@ async def backfill_forgejo_repos(auth: PlatformAuth) -> int:
             continue
         owner, repo = full_name.split("/", 1)
         db.register_repo(owner, repo, platform="forgejo")
-        db.set_repo_visibility(
-            owner, repo, r.get("private", True), platform="forgejo"
-        )
+        db.set_repo_visibility(owner, repo, r.get("private", True), platform="forgejo")
         n += 1
     logger.info("Forgejo: discovered + registered %d accessible repo(s)", n)
     return n
@@ -108,7 +109,9 @@ async def handle_forgejo_pr(payload: dict[str, Any], auth: PlatformAuth, bot_nam
     names = mention_names(bot_name, await auth.get_bot_identity())
     description = pr.get("body", "") or ""
     if any(re.search(rf"@{re.escape(n)}[ \t]+ignore\b", description, re.IGNORECASE) for n in names):
-        logger.info("PR %s/%s#%d ignored via @%s ignore in description", owner, repo_name, number, bot_name)
+        logger.info(
+            "PR %s/%s#%d ignored via @%s ignore in description", owner, repo_name, number, bot_name
+        )
         return
     labels = pr.get("labels") or []
     if any((lbl.get("name") or lbl.get("title")) == PAUSE_LABEL for lbl in labels):
@@ -123,7 +126,9 @@ async def handle_forgejo_pr(payload: dict[str, Any], auth: PlatformAuth, bot_nam
             provider, owner, repo_name, number, pr_url, is_private, bot_name, platform="forgejo"
         )
     except Exception:
-        logger.exception("Error handling Forgejo pull_request event for %s/%s#%d", owner, repo_name, number)
+        logger.exception(
+            "Error handling Forgejo pull_request event for %s/%s#%d", owner, repo_name, number
+        )
 
 
 async def handle_forgejo_push(payload: dict[str, Any], auth: PlatformAuth, bot_name: str) -> None:
@@ -143,9 +148,15 @@ async def handle_forgejo_push(payload: dict[str, Any], auth: PlatformAuth, bot_n
     if not ref.startswith("refs/heads/"):
         return
 
-    branch = ref[len("refs/heads/"):]
+    branch = ref[len("refs/heads/") :]
     if branch != default_branch:
-        logger.debug("Forgejo push to %s/%s on %s (not default %s), skipping index", owner, repo_name, branch, default_branch)
+        logger.debug(
+            "Forgejo push to %s/%s on %s (not default %s), skipping index",
+            owner,
+            repo_name,
+            branch,
+            default_branch,
+        )
         return
 
     repo_record = _get_app_db().get_repo(owner, repo_name, platform="forgejo")
@@ -212,8 +223,8 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
     except ValueError:
         return
 
-    # Build PR URL from issue URL or construct from repo html_url
-    pr_url = issue.get("url", "") or f"{repo.get('html_url', '')}/pulls/{number}"
+    # Build PR URL from repo html_url (like GitHub does)
+    pr_url = f"{repo.get('html_url', '')}/pulls/{number}"
 
     # Actor is the comment author
     commenter = comment.get("user", {})
@@ -272,7 +283,7 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
 
         # Free-form @-mention on an inline comment → LLM intent classification.
         if comment_path:
-            original = await provider.get_comment_body(pr_info, thread_id)
+            original = await provider.get_comment_body(pr_info, int(thread_id))
             await run_thread_reply(
                 provider,
                 pr_info,
@@ -290,10 +301,20 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
 
         # General PR comment → review / help / Q&A.
         await run_pr_command(
-            provider, owner, repo_name, number, pr_url, question, actor, bot_name, platform="forgejo"
+            provider,
+            owner,
+            repo_name,
+            number,
+            pr_url,
+            question,
+            actor,
+            bot_name,
+            platform="forgejo",
         )
     except Exception:
-        logger.exception("Error handling Forgejo issue_comment on %s/%s#%d", owner, repo_name, number)
+        logger.exception(
+            "Error handling Forgejo issue_comment on %s/%s#%d", owner, repo_name, number
+        )
 
 
 async def dispatch_forgejo_event(
