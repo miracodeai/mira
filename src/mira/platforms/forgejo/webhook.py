@@ -1,13 +1,16 @@
-"""Forgejo webhook handling: token verification, event normalization, handlers.
+"""Forgejo webhook handling: HMAC-SHA256 signature verification, event
+normalization, handlers.
 
 Forgejo sends GitHub-shaped payloads with ``X-Forgejo-Event`` (the event name
 matches GitHub's event types: ``pull_request``, ``push``, ``issue_comment``).
-Token verification uses the shared-secret in ``X-Forgejo-Token``.
+Signature verification uses HMAC-SHA256 of the request body in
+``X-Forgejo-Signature`` (matching Forgejo/Gitea webhook behavior).
 """
 
 from __future__ import annotations
 
 import hmac
+import hashlib
 import logging
 import re
 from typing import Any
@@ -78,11 +81,13 @@ async def backfill_forgejo_repos(auth: PlatformAuth) -> int:
         n += 1
     logger.info("Forgejo: discovered + registered %d accessible repo(s)", n)
     return n
-
-
-def verify_forgejo_token(header_value: str, secret: str) -> bool:
-    """Forgejo sends the configured secret verbatim in X-Forgejo-Token."""
-    return hmac.compare_digest(header_value or "", secret or "")
+def verify_forgejo_signature(signature: str, body: bytes, secret: str) -> bool:
+    """Forgejo signs the request body with HMAC-SHA256 and sends the hex
+    digest in ``X-Forgejo-Signature``. The secret is never sent in plaintext."""
+    expected = hmac.new(
+        (secret or "").encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature or "", expected)
 
 
 def _split_repo_path(full_name: str) -> tuple[str, str]:

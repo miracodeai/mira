@@ -181,15 +181,16 @@ def create_app(
 
     if forgejo_auth is not None and forgejo_webhook_secret is not None:
         from mira.platforms.forgejo.webhook import (
-            dispatch_forgejo_event, verify_forgejo_token,
+            dispatch_forgejo_event, verify_forgejo_signature,
         )
 
         @app.post("/forgejo/webhook")
         async def forgejo_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
-            token = request.headers.get("X-Forgejo-Token", "")
-            if not verify_forgejo_token(token, forgejo_webhook_secret):
+            body = await request.body()
+            signature = request.headers.get("X-Forgejo-Signature", "")
+            if not verify_forgejo_signature(signature, body, forgejo_webhook_secret):
                 return Response(
-                    content='{"error": "invalid token"}',
+                    content='{"error": "invalid signature"}',
                     status_code=401,
                     media_type="application/json",
                 )

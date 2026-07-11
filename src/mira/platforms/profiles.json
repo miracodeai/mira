@@ -36,7 +36,7 @@
     "graphql_url": null,
     "webhook_route": "/forgejo/webhook",
     "auth_model": "token",
-    "signature": { "scheme": "shared-token", "header": "X-Forgejo-Token" },
+    "signature": { "scheme": "hmac-sha256", "header": "X-Forgejo-Signature" },
     "event_header": "X-Forgejo-Event",
     "terminology": { "pr_short": "PR", "pr": "pull request" },
     "supports": { "installations": false, "token_minting": false }
