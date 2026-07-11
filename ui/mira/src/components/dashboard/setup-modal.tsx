@@ -111,6 +111,19 @@ export function SetupModal({
   const totalFiles = estimate?.file_count ?? 0
   const hasFileCounts = totalFiles > 0
 
+  const accessHelp = {
+    github:
+      "To change which repos Mira can access, update your GitHub App installation permissions.",
+    forgejo:
+      "To change which repos Mira can access, update your Forgejo access token scopes.",
+    gitlab:
+      "To change which repos Mira can access, update your GitLab access token scopes.",
+  } as const
+  const platform = repos[0]?.platform ?? "github"
+  const helpText =
+    accessHelp[platform as keyof typeof accessHelp] ??
+    "To change which repos Mira can access, update your platform token or installation permissions."
+
   return (
     <Dialog open={open}>
       <DialogContent className="sm:max-w-md [&>button]:hidden">
@@ -222,8 +235,7 @@ export function SetupModal({
             </div>
 
             <p className="text-xs text-muted-foreground">
-              To change which repos Mira can access, update your GitHub App
-              installation permissions.
+              {helpText}
             </p>
           </>
         )}

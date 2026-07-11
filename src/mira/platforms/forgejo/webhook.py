@@ -48,12 +48,15 @@ async def list_forgejo_repos(token: str, base_url: str) -> list[dict]:
 async def backfill_forgejo_repos(auth: PlatformAuth) -> int:
     """Register every accessible Forgejo repo so they show in the dashboard
     ready to index — without waiting for a webhook. Returns the count."""
+    from mira.config import load_config
     from mira.platforms.index_handlers import _get_app_db
 
     token = await auth.get_token()
     base_url = profiles.resolve("forgejo")["api_url"]
     repos = await list_forgejo_repos(token, base_url)
     db = _get_app_db()
+    exclude_patterns = load_config().filter.exclude_patterns
+    fetcher = make_fetcher("forgejo", token)
     n = 0
     for r in repos:
         full_name = r.get("full_name", "")
@@ -62,6 +65,16 @@ async def backfill_forgejo_repos(auth: PlatformAuth) -> int:
         owner, repo = full_name.split("/", 1)
         db.register_repo(owner, repo, platform="forgejo")
         db.set_repo_visibility(owner, repo, r.get("private", True), platform="forgejo")
+        try:
+            from mira.index.indexer import _should_index
+
+            branch = await fetcher.default_branch(owner, repo)
+            tree_paths = await fetcher.repo_tree(owner, repo, branch)
+            indexable = [p for p in tree_paths if _should_index(p, exclude_patterns)]
+            db.set_repo_file_count(owner, repo, len(indexable), platform="forgejo")
+            logger.info("Counted %d indexable files in %s", len(indexable), full_name)
+        except Exception as exc:
+            logger.warning("Failed to count files for %s: %s", full_name, exc)
         n += 1
     logger.info("Forgejo: discovered + registered %d accessible repo(s)", n)
     return n
