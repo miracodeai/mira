@@ -30,7 +30,7 @@ async def list_forgejo_repos(token: str, base_url: str) -> list[dict]:
     limit = 50
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
-            url = f"{base_url.rstrip('/')}/repos/current?page={page}&limit={limit}"
+            url = f"{base_url.rstrip('/')}/user/repos?page={page}&limit={limit}"
             resp = await client.get(url, headers={"Authorization": f"token {token}"})
             if resp.status_code != 200:
                 logger.warning("Forgejo repo list failed: %d %s", resp.status_code, resp.text[:200])
