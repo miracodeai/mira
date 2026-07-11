@@ -66,7 +66,7 @@ def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
     """
     repo_record = _app_db.get_repo(owner, repo, platform="github") or _app_db.get_repo(
         owner, repo, platform="gitlab"
-    )
+    ) or _app_db.get_repo(owner, repo, platform="forgejo")
     if repo_record is None:
         raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
 
@@ -435,6 +435,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
         except Exception as exc:
             logger.warning("Failed to get GitHub token for indexing: %s", exc)
     gitlab_token = os.environ.get("MIRA_GITLAB_TOKEN", "")
+    forgejo_token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
 
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
@@ -448,7 +449,9 @@ async def _run_initial_indexing(default_mode: str) -> None:
     for repo_record in to_index:
         owner, repo, platform = repo_record.owner, repo_record.repo, repo_record.platform
         full_name = f"{owner}/{repo}"
-        token = gitlab_token if platform == "gitlab" else github_token
+        token = gitlab_token if platform == "gitlab" else (
+            forgejo_token if platform == "forgejo" else github_token
+        )
         if not token:
             # No usable token for this platform — leave it pending instead of
             # crashing on an empty auth header.

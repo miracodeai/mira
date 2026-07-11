@@ -6,6 +6,7 @@ import asyncio
 import os
 
 from fastapi import HTTPException, Request
+from pydantic import BaseModel
 
 from mira.dashboard import api as _api
 from mira.dashboard.api import (
@@ -88,6 +89,68 @@ async def register_gitlab_repo(body: GitLabRepoRegister) -> dict:
 
     asyncio.create_task(_index())
     return {"status": "indexing", "owner": owner, "repo": repo, "platform": "gitlab"}
+@router.post("/api/forgejo/sync")
+async def sync_forgejo_repos() -> dict:
+    """Discover every Forgejo repo the configured token can access and
+    register them (status pending), so they appear ready-to-index without
+    waiting for a webhook. Idempotent."""
+    token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured")
+    from mira.platforms.forgejo.auth import ForgejoTokenAuth
+    from mira.platforms.forgejo.webhook import backfill_forgejo_repos
+
+    base_url = os.environ.get("MIRA_FORGEJO_API_URL", "https://codeberg.org/api/v1")
+    count = await backfill_forgejo_repos(ForgejoTokenAuth(token, base_url))
+    return {"registered": count}
+
+
+class ForgejoRepoRegister(BaseModel):
+    project: str  # "owner/repo"
+
+
+@router.post("/api/forgejo/repos")
+async def register_forgejo_repo(body: ForgejoRepoRegister) -> dict:
+    """Register a Forgejo repo and index it in the background.
+
+    Forgejo has no installation webhook, so repos are added explicitly. The
+    access token comes from MIRA_FORGEJO_TOKEN; add a repo webhook pointing
+    at ``/forgejo/webhook`` to get auto-review on new PRs.
+    """
+    token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured")
+    owner, _, repo = body.project.strip("/").rpartition("/")
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="project must be 'owner/repo'")
+
+    _api._app_db.register_repo(owner, repo, platform="forgejo")
+    _api._app_db.set_repo_status(owner, repo, "indexing", platform="forgejo")
+
+    async def _index() -> None:
+        from mira.index.indexer import index_repo
+        from mira.platforms.fetch import EmptyRepoError, make_fetcher
+
+        store = None
+        try:
+            store = IndexStore.open(owner, repo, platform="forgejo")
+            count = await index_repo(
+                owner=owner, repo=repo, store=store, fetcher=make_fetcher("forgejo", token)
+            )
+            _api._app_db.set_repo_status(
+                owner, repo, "ready", files_indexed=count, bump_last_indexed=True, platform="forgejo"
+            )
+        except EmptyRepoError as empty:
+            _api._app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform="forgejo")
+        except Exception as exc:
+            logger.exception("Forgejo indexing failed for %s/%s", owner, repo)
+            _api._app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform="forgejo")
+        finally:
+            if store is not None:
+                store.close()
+
+    asyncio.create_task(_index())
+    return {"status": "indexing", "owner": owner, "repo": repo, "platform": "forgejo"}
 
 
 @router.get("/api/settings/models", response_model=ModelsResponse)

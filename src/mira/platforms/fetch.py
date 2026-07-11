@@ -247,6 +247,91 @@ class GitLabRepoFetcher:
             logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
             return None
         return _strip_tarball(blob, max_file_size, f"{owner}/{repo}")
+class ForgejoRepoFetcher:
+    """Fetches repo content via the Gitea/Forgejo REST API (/api/v1).
+
+    Forgejo ``owner`` and ``repo`` are simple names (no nested groups).
+    Uses ``Authorization: token <token>`` for auth.
+    """
+
+    def __init__(self, token: str, base_url: str = "https://codeberg.org/api/v1") -> None:
+        self._token = token
+        self._api = base_url.rstrip("/")
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"token {self._token}"}
+
+    def _repo(self, owner: str, repo: str) -> str:
+        return f"{self._api}/repos/{owner}/{repo}"
+
+    async def default_branch(self, owner: str, repo: str) -> str:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    self._repo(owner, repo), headers=self._headers(), timeout=15
+                )
+                resp.raise_for_status()
+                return str(resp.json().get("default_branch", "main"))
+        except Exception as exc:
+            logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
+            return "main"
+
+    async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
+        url = f"{self._repo(owner, repo)}/git/trees/{branch}?recursive=true"
+        paths: list[str] = []
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=self._headers(), timeout=30)
+            if resp.status_code == 404:
+                raise EmptyRepoError(owner, repo)
+            resp.raise_for_status()
+            for item in resp.json():
+                if item.get("type") == "blob":
+                    paths.append(item["path"])
+        return paths
+
+    async def file_content(
+        self, owner: str, repo: str, path: str, ref: str, semaphore=None
+    ) -> str | None:
+        import base64
+
+        url = f"{self._repo(owner, repo)}/contents/{quote(path, safe='')}?ref={ref}"
+
+        async def _fetch() -> str | None:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, headers=self._headers(), timeout=30)
+                    if resp.status_code == 404:
+                        return None
+                    resp.raise_for_status()
+                    data = resp.json()
+                    raw = data["content"]
+                    return base64.b64decode(raw).decode("utf-8")
+            except Exception as exc:
+                logger.warning("Failed to fetch %s: %s", path, exc)
+                return None
+
+        if semaphore:
+            async with semaphore:
+                return await _fetch()
+        return await _fetch()
+
+    async def repo_tarball(
+        self, owner: str, repo: str, ref: str, max_file_size: int = 1_048_576
+    ) -> dict[str, str] | None:
+        url = f"{self._repo(owner, repo)}/archive/{ref}.tar.gz"
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+                resp = await client.get(url, headers=self._headers())
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Tarball fetch failed for %s/%s: %d", owner, repo, resp.status_code
+                    )
+                    return None
+                blob = resp.content
+        except Exception as exc:
+            logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
+            return None
+        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}")
 
 
 def _next_link(link_header: str) -> str | None:
@@ -265,4 +350,6 @@ def make_fetcher(platform: str, token: str) -> RepoFetcher:
     api_url = profile["api_url"]
     if platform == "gitlab":
         return GitLabRepoFetcher(token, api_url or "https://gitlab.com/api/v4")
+    if platform == "forgejo":
+        return ForgejoRepoFetcher(token, api_url or "https://codeberg.org/api/v1")
     return GitHubRepoFetcher(token, api_url or "https://api.github.com")

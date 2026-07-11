@@ -198,6 +198,8 @@ def review(
         # Infer the platform from the URL shape; fall back to the configured default.
         if "/-/merge_requests/" in pr_url or "gitlab" in pr_url:
             provider_type = "gitlab"
+        elif "/pulls/" in pr_url or "forgejo" in pr_url:
+            provider_type = "forgejo"
         elif "/pull/" in pr_url or "github" in pr_url:
             provider_type = "github"
         else:
@@ -275,6 +277,24 @@ def review(
     help="GitLab API base for self-managed instances, e.g. https://gitlab.acme.com/api/v4",
 )
 @click.option(
+    "--forgejo-token",
+    envvar="MIRA_FORGEJO_TOKEN",
+    default=None,
+    help="Forgejo access token (enables the Forgejo webhook route)",
+)
+@click.option(
+    "--forgejo-webhook-secret",
+    envvar="MIRA_FORGEJO_WEBHOOK_SECRET",
+    default=None,
+    help="Secret string configured on the Forgejo webhook (X-Forgejo-Token)",
+)
+@click.option(
+    "--forgejo-base-url",
+    envvar="MIRA_FORGEJO_API_URL",
+    default=None,
+    help="Forgejo API base, e.g. https://forgejo.example.com/api/v1",
+)
+@click.option(
     "--bot-name",
     envvar="MIRA_BOT_NAME",
     default=None,
@@ -301,6 +321,9 @@ def serve(
     gitlab_token: str | None,
     gitlab_webhook_secret: str | None,
     gitlab_base_url: str | None,
+    forgejo_token: str | None,
+    forgejo_webhook_secret: str | None,
+    forgejo_base_url: str | None,
     bot_name: str | None,
     config_path: str | None,
     verbose: bool,
@@ -314,6 +337,7 @@ def serve(
         from mira.config import set_global_defaults
         from mira.platforms.github.auth import GitHubAppAuth
         from mira.platforms.gitlab.auth import GitLabTokenAuth
+        from mira.platforms.forgejo.auth import ForgejoTokenAuth
         from mira.platforms.server import create_app
     except ImportError as exc:
         raise click.ClickException(
@@ -335,7 +359,8 @@ def serve(
 
     github_configured = bool(app_id and private_key and webhook_secret)
     gitlab_configured = bool(gitlab_token and gitlab_webhook_secret)
-    if not github_configured and not gitlab_configured:
+    forgejo_configured = bool(forgejo_token and forgejo_webhook_secret)
+    if not github_configured and not gitlab_configured and not forgejo_configured:
         raise click.ClickException(
             "No platform configured. Provide GitHub App creds (--app-id, --private-key, "
             "--webhook-secret) and/or GitLab creds (--gitlab-token, --gitlab-webhook-secret)."
@@ -343,6 +368,7 @@ def serve(
 
     app_auth = None
     gitlab_auth = None
+    forgejo_auth = None
 
     if github_configured:
         assert private_key is not None
@@ -359,10 +385,14 @@ def serve(
         assert gitlab_token is not None
         gitlab_auth = GitLabTokenAuth(gitlab_token, gitlab_base_url or "https://gitlab.com/api/v4")
 
+    if forgejo_configured:
+        assert forgejo_token is not None
+        forgejo_auth = ForgejoTokenAuth(forgejo_token, forgejo_base_url or "https://codeberg.org/api/v1")
+
     # Auto-detect the bot @mention from whichever platform's own identity when
     # the user didn't override it. Falls back to "miracodeai" on a lookup blip.
     if not bot_name:
-        identity_auth = app_auth or gitlab_auth
+        identity_auth = app_auth or gitlab_auth or forgejo_auth
         bot_name = asyncio.run(identity_auth.get_bot_identity()) or "miracodeai"
         click.echo(f"Detected bot @mention: @{bot_name}")
 
@@ -380,10 +410,16 @@ def serve(
         bot_name=bot_name,
         gitlab_auth=gitlab_auth,
         gitlab_webhook_secret=gitlab_webhook_secret,
+        forgejo_auth=forgejo_auth,
+        forgejo_webhook_secret=forgejo_webhook_secret,
     )
 
     platforms = ", ".join(
-        p for p, on in [("GitHub", github_configured), ("GitLab", gitlab_configured)] if on
+        p for p, on in [
+            ("GitHub", github_configured),
+            ("GitLab", gitlab_configured),
+            ("Forgejo", forgejo_configured),
+        ] if on
     )
     click.echo(f"Starting Mira webhook server ({platforms}) on {host}:{port}")
     uvicorn.run(app, host=host, port=port)
