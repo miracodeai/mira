@@ -63,9 +63,13 @@ def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
     The dashboard routes are keyed by (owner, repo) only, so resolve the
     platform from the registry with a single cross-platform lookup.
     """
-    repo_record = _app_db.get_repo_any_platform(owner, repo)
-    if repo_record is None:
+    repo_records = _app_db.get_repo_any_platform(owner, repo)
+    if not repo_records:
         raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    # The same owner/repo can exist on more than one platform; prefer
+    # github → gitlab → forgejo (the historical fallback order).
+    _order = {"github": 0, "gitlab": 1, "forgejo": 2}
+    repo_record = min(repo_records, key=lambda r: _order.get(r.platform, 99))
 
     store = IndexStore.open(owner, repo, platform=repo_record.platform)
     try:

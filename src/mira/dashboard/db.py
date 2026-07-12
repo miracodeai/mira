@@ -909,8 +909,14 @@ class AppDatabase:
                 return self._pg_row_to_repo(row)
             return None
 
-    def get_repo_any_platform(self, owner: str, repo: str) -> RepoRecord | None:
-        """Look up a repo by (owner, repo) regardless of platform.
+    def get_repo_any_platform(self, owner: str, repo: str) -> list[RepoRecord]:
+        """Look up every repo matching (owner, repo) across all platforms.
+
+        Returns one ``RepoRecord`` per platform that hosts the given
+        owner/repo (typically 0 or 1 entries; at most one per platform).
+        When more than one is returned the caller decides how to
+        disambiguate — see ``_platform_pref`` callers in the dashboard
+        routers, which prefer github → gitlab → forgejo.
 
         Single query replacing the former triple ``get_repo`` fallback
         (github → gitlab → forgejo). That pattern made 3 sequential SQLite
@@ -920,26 +926,21 @@ class AppDatabase:
         """
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
-            row = self._sqlite_conn.execute(
+            rows = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos WHERE owner=? AND repo=? LIMIT 1",
+                "platform FROM repos WHERE owner=? AND repo=?",
                 (owner, repo),
-            ).fetchone()
-            if row:
-                return self._sqlite_row_to_repo(row)
-            return None
+            ).fetchall()
+            return [self._sqlite_row_to_repo(r) for r in rows]
         with self._pg_cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos WHERE owner=%s AND repo=%s LIMIT 1",
+                "platform FROM repos WHERE owner=%s AND repo=%s",
                 (owner, repo),
             )
-            row = cur.fetchone()
-            if row:
-                return self._pg_row_to_repo(row)
-            return None
+            return [self._pg_row_to_repo(r) for r in cur.fetchall()]
 
     def set_repo_conventions(
         self, owner: str, repo: str, conventions: str, platform: str = "github"

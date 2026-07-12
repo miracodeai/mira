@@ -448,8 +448,15 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
             return {"status": "already_indexing"}
 
     # Resolve the repo's platform and build the matching fetcher.
-    record = _api._app_db.get_repo_any_platform(owner, repo)
-    platform = record.platform if record else "github"
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    # Same owner/repo can exist on multiple platforms; prefer
+    # github → gitlab → forgejo (the historical fallback order).
+    _order = {"github": 0, "gitlab": 1, "forgejo": 2}
+    platform = (
+        min(records, key=lambda r: _order.get(r.platform, 99)).platform
+        if records
+        else "github"
+    )
 
     from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
