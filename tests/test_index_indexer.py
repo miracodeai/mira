@@ -198,7 +198,7 @@ class _FakeFetcher:
             return self._contents.get(path)
         return self._contents
 
-    async def repo_tarball(self, owner, repo, ref, max_file_size=1_048_576):
+    async def repo_tarball(self, owner, repo, ref, max_file_size=1_048_576, indexable_paths=None):
         return self._tarball
 
 

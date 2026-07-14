@@ -43,6 +43,17 @@ class TestStripTarball:
         blob = _make_targz("r-sha", {"big.py": "y" * 50})
         assert _strip_tarball(blob, max_file_size=10, label="o/r") == {}
 
+    def test_indexable_paths_skips_others(self):
+        blob = _make_targz(
+            "r-sha", {"src/main.py": "x = 1", "logo.svg": "<svg/>", "vendor/lib.js": "!"}
+        )
+        out = _strip_tarball(blob, 1_048_576, "o/r", indexable_paths={"src/main.py"})
+        assert out == {"src/main.py": "x = 1"}
+
+    def test_no_indexable_paths_keeps_all(self):
+        blob = _make_targz("r-sha", {"a.py": "1", "b.md": "2"})
+        assert _strip_tarball(blob, 1_048_576, "o/r") == {"a.py": "1", "b.md": "2"}
+
 
 def _resp(json_data=None, *, text="", headers=None, status=200):
     r = MagicMock()
