@@ -824,6 +824,50 @@ class AppDatabase:
                     (mode, platform, owner, repo),
                 )
 
+    @staticmethod
+    def _sqlite_row_to_repo(row) -> RepoRecord:
+        """Map a SELECT row (sqlite backend) to a RepoRecord."""
+        return RepoRecord(
+            owner=row[0],
+            repo=row[1],
+            status=row[2],
+            index_mode=row[3],
+            files_indexed=row[4],
+            file_count_estimate=row[5],
+            error=row[6],
+            installation_id=row[7],
+            created_at=row[8],
+            updated_at=row[9],
+            last_indexed_at=row[10] or 0.0,
+            conventions=row[11] or "",
+            private=(None if row[12] is None else bool(row[12])),
+            platform=row[13],
+        )
+
+    @staticmethod
+    def _pg_row_to_repo(row) -> RepoRecord:
+        """Map a SELECT row (postgres backend) to a RepoRecord.
+
+        Postgres returns timestamptz as datetime; downstream code
+        expects epoch float. Coerce here.
+        """
+        return RepoRecord(
+            owner=row[0],
+            repo=row[1],
+            status=row[2],
+            index_mode=row[3],
+            files_indexed=row[4],
+            file_count_estimate=row[5],
+            error=row[6],
+            installation_id=row[7],
+            created_at=row[8].timestamp() if row[8] else 0.0,
+            updated_at=row[9].timestamp() if row[9] else 0.0,
+            last_indexed_at=row[10].timestamp() if row[10] else 0.0,
+            conventions=row[11] or "",
+            private=(None if row[12] is None else bool(row[12])),
+            platform=row[13],
+        )
+
     def list_repos(self) -> list[RepoRecord]:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
@@ -832,50 +876,14 @@ class AppDatabase:
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
                 "platform FROM repos ORDER BY owner, repo"
             ).fetchall()
-            return [
-                RepoRecord(
-                    owner=r[0],
-                    repo=r[1],
-                    status=r[2],
-                    index_mode=r[3],
-                    files_indexed=r[4],
-                    file_count_estimate=r[5],
-                    error=r[6],
-                    installation_id=r[7],
-                    created_at=r[8],
-                    updated_at=r[9],
-                    last_indexed_at=r[10] or 0.0,
-                    conventions=r[11] or "",
-                    private=(None if r[12] is None else bool(r[12])),
-                    platform=r[13],
-                )
-                for r in rows
-            ]
+            return [self._sqlite_row_to_repo(r) for r in rows]
         with self._pg_cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
                 "platform FROM repos ORDER BY owner, repo"
             )
-            return [
-                RepoRecord(
-                    owner=r[0],
-                    repo=r[1],
-                    status=r[2],
-                    index_mode=r[3],
-                    files_indexed=r[4],
-                    file_count_estimate=r[5],
-                    error=r[6],
-                    installation_id=r[7],
-                    created_at=r[8].timestamp() if r[8] else 0.0,
-                    updated_at=r[9].timestamp() if r[9] else 0.0,
-                    last_indexed_at=r[10].timestamp() if r[10] else 0.0,
-                    conventions=r[11] or "",
-                    private=(None if r[12] is None else bool(r[12])),
-                    platform=r[13],
-                )
-                for r in cur.fetchall()
-            ]
+            return [self._pg_row_to_repo(r) for r in cur.fetchall()]
 
     def get_repo(self, owner: str, repo: str, platform: str = "github") -> RepoRecord | None:
         if self._backend == "sqlite":
@@ -887,22 +895,7 @@ class AppDatabase:
                 (platform, owner, repo),
             ).fetchone()
             if row:
-                return RepoRecord(
-                    owner=row[0],
-                    repo=row[1],
-                    status=row[2],
-                    index_mode=row[3],
-                    files_indexed=row[4],
-                    file_count_estimate=row[5],
-                    error=row[6],
-                    installation_id=row[7],
-                    created_at=row[8],
-                    updated_at=row[9],
-                    last_indexed_at=row[10] or 0.0,
-                    conventions=row[11] or "",
-                    private=(None if row[12] is None else bool(row[12])),
-                    platform=row[13],
-                )
+                return self._sqlite_row_to_repo(row)
             return None
         with self._pg_cursor() as cur:
             cur.execute(
@@ -913,25 +906,41 @@ class AppDatabase:
             )
             row = cur.fetchone()
             if row:
-                # Postgres returns timestamptz as datetime; downstream code
-                # expects epoch float. Coerce here.
-                return RepoRecord(
-                    owner=row[0],
-                    repo=row[1],
-                    status=row[2],
-                    index_mode=row[3],
-                    files_indexed=row[4],
-                    file_count_estimate=row[5],
-                    error=row[6],
-                    installation_id=row[7],
-                    created_at=row[8].timestamp() if row[8] else 0.0,
-                    updated_at=row[9].timestamp() if row[9] else 0.0,
-                    last_indexed_at=row[10].timestamp() if row[10] else 0.0,
-                    conventions=row[11] or "",
-                    private=(None if row[12] is None else bool(row[12])),
-                    platform=row[13],
-                )
+                return self._pg_row_to_repo(row)
             return None
+
+    def get_repo_any_platform(self, owner: str, repo: str) -> list[RepoRecord]:
+        """Look up every repo matching (owner, repo) across all platforms.
+
+        Returns one ``RepoRecord`` per platform that hosts the given
+        owner/repo (typically 0 or 1 entries; at most one per platform).
+        When more than one is returned the caller decides how to
+        disambiguate — see ``_platform_pref`` callers in the dashboard
+        routers, which prefer github → gitlab → forgejo.
+
+        Single query replacing the former triple ``get_repo`` fallback
+        (github → gitlab → forgejo). That pattern made 3 sequential SQLite
+        calls on a threadpool worker, and the widened window collided with
+        event-loop-thread access — producing ``InterfaceError`` on Forgejo
+        repos (which always miss the github lookup and hit all three).
+        """
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            rows = self._sqlite_conn.execute(
+                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
+                "platform FROM repos WHERE owner=? AND repo=?",
+                (owner, repo),
+            ).fetchall()
+            return [self._sqlite_row_to_repo(r) for r in rows]
+        with self._pg_cursor() as cur:
+            cur.execute(
+                "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
+                "platform FROM repos WHERE owner=%s AND repo=%s",
+                (owner, repo),
+            )
+            return [self._pg_row_to_repo(r) for r in cur.fetchall()]
 
     def set_repo_conventions(
         self, owner: str, repo: str, conventions: str, platform: str = "github"

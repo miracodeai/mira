@@ -46,6 +46,8 @@ def create_app(
     *,
     gitlab_auth: Any = None,
     gitlab_webhook_secret: str | None = None,
+    forgejo_auth: Any = None,
+    forgejo_webhook_secret: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI app. GitHub (``app_auth`` + ``webhook_secret``) and
     GitLab (``gitlab_auth`` + ``gitlab_webhook_secret``) routes each activate
@@ -83,6 +85,20 @@ def create_app(
                 )
             )
 
+        # Forgejo's equivalent: discover repos the token can access and
+        # register them so they're in the dashboard ready to index up front.
+        if forgejo_auth is not None:
+            from mira.platforms.forgejo.webhook import backfill_forgejo_repos
+
+            fj_task = asyncio.create_task(backfill_forgejo_repos(forgejo_auth))
+            fj_task.add_done_callback(
+                lambda t: (
+                    logger.warning("Forgejo discovery failed: %s", t.exception())
+                    if t.exception()
+                    else None
+                )
+            )
+
         from mira.security.poller import run_forever as run_vuln_poller
 
         vuln_task = asyncio.create_task(run_vuln_poller())
@@ -97,6 +113,8 @@ def create_app(
         yield
         if backfill_task is not None and not backfill_task.done():
             backfill_task.cancel()
+        if forgejo_auth is not None and not fj_task.done():
+            fj_task.cancel()
         if not vuln_task.done():
             vuln_task.cancel()
 
@@ -157,6 +175,29 @@ def create_app(
             payload = await request.json()
             status = await dispatch_gitlab_event(
                 event, payload, gitlab_auth, bot_name, background_tasks
+            )
+            return _json_status(status)
+
+    if forgejo_auth is not None and forgejo_webhook_secret is not None:
+        from mira.platforms.forgejo.webhook import (
+            dispatch_forgejo_event,
+            verify_forgejo_signature,
+        )
+
+        @app.post("/forgejo/webhook")
+        async def forgejo_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+            body = await request.body()
+            signature = request.headers.get("X-Forgejo-Signature", "")
+            if not verify_forgejo_signature(signature, body, forgejo_webhook_secret):
+                return Response(
+                    content='{"error": "invalid signature"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+            event = request.headers.get("X-Forgejo-Event", "")
+            payload = await request.json()
+            status = await dispatch_forgejo_event(
+                event, payload, forgejo_auth, bot_name, background_tasks
             )
             return _json_status(status)
 

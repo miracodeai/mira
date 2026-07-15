@@ -36,3 +36,6 @@ from mira.providers.gitlab import GitLabProvider  # noqa: E402
 
 register_provider("github", GitHubProvider)
 register_provider("gitlab", GitLabProvider)
+from mira.providers.forgejo import ForgejoProvider  # noqa: E402
+
+register_provider("forgejo", ForgejoProvider)

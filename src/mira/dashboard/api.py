@@ -56,19 +56,27 @@ def _get_index_dir() -> str:
     return os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
 
 
+# Cross-platform preference order used when the same owner/repo exists on
+# more than one platform: github → gitlab → forgejo.
+_PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2}
+
+
+def _pick_platform_record(records: list) -> object:
+    """Return the highest-priority record from a cross-platform list."""
+    return min(records, key=lambda r: _PLATFORM_ORDER.get(r.platform, 99))
+
+
 @contextmanager
 def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
     """Open an IndexStore via the factory (Postgres or SQLite).
 
     The dashboard routes are keyed by (owner, repo) only, so resolve the
-    platform from the registry (github first, then gitlab) to open the right
-    per-platform store.
+    platform from the registry with a single cross-platform lookup.
     """
-    repo_record = _app_db.get_repo(owner, repo, platform="github") or _app_db.get_repo(
-        owner, repo, platform="gitlab"
-    )
-    if repo_record is None:
+    repo_records = _app_db.get_repo_any_platform(owner, repo)
+    if not repo_records:
         raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    repo_record = _pick_platform_record(repo_records)
 
     store = IndexStore.open(owner, repo, platform=repo_record.platform)
     try:
@@ -282,6 +290,10 @@ class GitLabRepoRegister(BaseModel):
     project: str  # "group/project" or "group/subgroup/project"
 
 
+class ForgejoRepoRegister(BaseModel):
+    project: str  # "owner/repo"
+
+
 class CostEstimate(BaseModel):
     estimated_usd: float
     input_tokens: int
@@ -435,6 +447,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
         except Exception as exc:
             logger.warning("Failed to get GitHub token for indexing: %s", exc)
     gitlab_token = os.environ.get("MIRA_GITLAB_TOKEN", "")
+    forgejo_token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
 
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
@@ -448,7 +461,11 @@ async def _run_initial_indexing(default_mode: str) -> None:
     for repo_record in to_index:
         owner, repo, platform = repo_record.owner, repo_record.repo, repo_record.platform
         full_name = f"{owner}/{repo}"
-        token = gitlab_token if platform == "gitlab" else github_token
+        token = (
+            gitlab_token
+            if platform == "gitlab"
+            else (forgejo_token if platform == "forgejo" else github_token)
+        )
         if not token:
             # No usable token for this platform — leave it pending instead of
             # crashing on an empty auth header.

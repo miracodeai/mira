@@ -30,5 +30,15 @@
     "event_header": "X-Gitlab-Event",
     "terminology": { "pr_short": "MR", "pr": "merge request" },
     "supports": { "installations": false, "token_minting": false }
+  },
+  "forgejo": {
+    "api_url": "https://codeberg.org/api/v1",
+    "graphql_url": null,
+    "webhook_route": "/forgejo/webhook",
+    "auth_model": "token",
+    "signature": { "scheme": "hmac-sha256", "header": "X-Forgejo-Signature" },
+    "event_header": "X-Forgejo-Event",
+    "terminology": { "pr_short": "PR", "pr": "pull request" },
+    "supports": { "installations": false, "token_minting": false }
   }
 }
