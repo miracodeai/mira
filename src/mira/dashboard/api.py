@@ -839,7 +839,9 @@ def get_contributor(login: str, request: Request, period: str = "") -> Contribut
     accepted = rejected = 0
     for repo_record in _app_db.list_repos():
         try:
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            store = IndexStore.open(
+                repo_record.owner, repo_record.repo, platform=repo_record.platform
+            )
             try:
                 rq = store.get_review_quality_by_author(contributor.external_login, since=since)
                 fq = store.get_feedback_quality_by_author(contributor.external_login)

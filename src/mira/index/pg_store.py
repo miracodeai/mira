@@ -418,21 +418,28 @@ class PgIndexStore(_StoreSharedMixin):
         self._owner = owner
         self._repo = repo
         self._url = url
-        self._conn = _get_conn(url)
+        _get_conn(url)  # eager connect + schema init
 
     def _refresh_conn(self) -> Any:
         """Drop the shared module connection and bind a fresh handle."""
         _drop_pg_conn()
-        self._conn = _get_conn(self._url)
-        return self._conn
+        return _get_conn(self._url)
 
     @contextmanager
     def _cursor(self) -> Iterator[Any]:
-        """Like main's ``self._conn.cursor()``, but reconnects once on idle drop."""
+        """Cursor on the current shared connection; reconnects once on idle drop."""
         from mira.db.postgres import ReconnectingCursor
 
-        with ReconnectingCursor(self._conn.cursor(), on_reconnect=self._refresh_conn) as cur:
+        with ReconnectingCursor(
+            _get_conn(self._url).cursor(), on_reconnect=self._refresh_conn
+        ) as cur:
             yield cur
+
+    def _commit(self) -> None:
+        # Always commit the current shared connection — a reconnect (from this
+        # or any other store instance) closes the old handle, so caching one
+        # per instance would commit on a dead connection.
+        _get_conn(self._url).commit()
 
     def _exec(self, sql: str, params: tuple = ()):
         """Execute a query and return the cursor."""
@@ -978,7 +985,7 @@ class PgIndexStore(_StoreSharedMixin):
                 ),
             )
             row_id = cur.fetchone()[0]
-        self._conn.commit()
+        self._commit()
         return FeedbackEventRow(
             id=row_id,
             pr_number=pr_number,
@@ -1027,7 +1034,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 rows,
             )
-        self._conn.commit()
+        self._commit()
         return len(rows)
 
     def list_feedback(self, limit: int = 500) -> list[FeedbackEventRow]:
@@ -1094,7 +1101,7 @@ class PgIndexStore(_StoreSharedMixin):
                     "sample_count=%s, updated_at=%s WHERE id=%s",
                     (rule_text, source_signal, sample_count, now, existing[0]),
                 )
-            self._conn.commit()
+            self._commit()
             return LearnedRuleRow(
                 id=existing[0],
                 rule_text=rule_text,
@@ -1126,7 +1133,7 @@ class PgIndexStore(_StoreSharedMixin):
                 ),
             )
             row_id = cur.fetchone()[0]
-        self._conn.commit()
+        self._commit()
         return LearnedRuleRow(
             id=row_id,
             rule_text=rule_text,
@@ -1222,7 +1229,7 @@ class PgIndexStore(_StoreSharedMixin):
                 ),
             )
             row_id = cur.fetchone()[0]
-        self._conn.commit()
+        self._commit()
         return self.get_learned_rule(row_id)  # type: ignore[return-value]
 
     def update_learned_rule(
@@ -1234,7 +1241,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "updated_at=%s WHERE id=%s AND owner=%s AND repo=%s",
                 (rule_text, category, path_pattern, time.time(), rule_id, self._owner, self._repo),
             )
-        self._conn.commit()
+        self._commit()
 
     def set_learned_rule_status(self, rule_id: int, status: str) -> None:
         with self._cursor() as cur:
@@ -1243,7 +1250,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "WHERE id=%s AND owner=%s AND repo=%s",
                 (status, time.time(), rule_id, self._owner, self._repo),
             )
-        self._conn.commit()
+        self._commit()
 
     def set_learned_rule_active(self, rule_id: int, active: bool) -> None:
         with self._cursor() as cur:
@@ -1252,7 +1259,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "WHERE id=%s AND owner=%s AND repo=%s",
                 (int(active), time.time(), rule_id, self._owner, self._repo),
             )
-        self._conn.commit()
+        self._commit()
 
     def delete_learned_rule(self, rule_id: int) -> None:
         with self._cursor() as cur:
@@ -1260,7 +1267,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "DELETE FROM learned_rules WHERE id=%s AND owner=%s AND repo=%s",
                 (rule_id, self._owner, self._repo),
             )
-        self._conn.commit()
+        self._commit()
 
     def replace_manifest_packages(
         self,
@@ -1298,7 +1305,7 @@ class PgIndexStore(_StoreSharedMixin):
                     "updated_at=EXCLUDED.updated_at",
                     rows,
                 )
-        self._conn.commit()
+        self._commit()
         return len(packages)
 
     def list_manifest_packages(self):  # type: ignore[no-untyped-def]
@@ -1337,7 +1344,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",
                 [(self._owner, self._repo, p) for p in stale],
             )
-        self._conn.commit()
+        self._commit()
         return len(stale)
 
     # ── Vulnerabilities ──
@@ -1392,7 +1399,7 @@ class PgIndexStore(_StoreSharedMixin):
                     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     rows,
                 )
-        self._conn.commit()
+        self._commit()
         return len(vulns)
 
     def prune_stale_vulnerabilities(self, active_keys: set[tuple[str, str, str]]) -> int:
@@ -1417,7 +1424,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "AND package_name=%s AND ecosystem=%s AND package_version=%s",
                 [(self._owner, self._repo, *k) for k in stale],
             )
-        self._conn.commit()
+        self._commit()
         return len(stale)
 
     def list_vulnerabilities(self):  # type: ignore[no-untyped-def]

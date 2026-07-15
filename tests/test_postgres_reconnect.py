@@ -62,6 +62,9 @@ class _FakeConnection:
         self.closed = False
 
     def cursor(self) -> _FakeCursor:
+        if self.closed:
+            # psycopg raises at cursor creation on a client-closed connection.
+            raise psycopg.OperationalError("the connection is closed")
         return _FakeCursor(self)
 
     def kill(self) -> None:
@@ -108,6 +111,23 @@ def test_pg_store_recovers_after_idle_drop_without_restart() -> None:
     assert summary is not None
     assert len(connections) == 2
     assert connections[1].conn_id == 2
+
+
+def test_write_survives_shared_conn_dropped_by_another_store() -> None:
+    """One store's reconnect closes the shared handle. Another store instance
+    must then cursor and commit on the fresh connection, not a cached closed one."""
+    _reset_pg_store()
+    with _fake_connections() as connections:
+        store_a = pg_store.PgIndexStore("owner", "repo", "postgresql://example/db")
+        store_b = pg_store.PgIndexStore("owner", "repo", "postgresql://example/db")
+
+        connections[0].kill()
+        assert store_a.get_summary("warmup.py") is not None  # reconnects, closes conn 1
+
+        store_b.set_learned_rule_active(1, True)  # write + commit must hit conn 2
+
+    assert len(connections) == 2
+    assert not connections[1].closed
 
 
 def test_app_database_recovers_after_idle_drop_without_restart() -> None:

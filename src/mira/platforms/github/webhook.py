@@ -1066,16 +1066,18 @@ def _reconcile_repo_statuses() -> None:
         if r.status != "indexing":
             continue
         try:
-            store = IndexStore.open(r.owner, r.repo)
+            store = IndexStore.open(r.owner, r.repo, platform=r.platform)
             count = len(store.all_paths())
             store.close()
         except Exception:
             count = 0
         if count > 0:
-            app_db.set_repo_status(r.owner, r.repo, "ready", files_indexed=count)
+            app_db.set_repo_status(
+                r.owner, r.repo, "ready", files_indexed=count, platform=r.platform
+            )
             logger.info("Reconciled %s/%s: indexing → ready (%d files)", r.owner, r.repo, count)
         else:
-            app_db.set_repo_status(r.owner, r.repo, "pending")
+            app_db.set_repo_status(r.owner, r.repo, "pending", platform=r.platform)
             logger.info("Reconciled %s/%s: indexing → pending (no files)", r.owner, r.repo)
 
 
