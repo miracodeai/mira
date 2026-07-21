@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   Sun,
   Users,
+  Users2,
 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router"
@@ -71,6 +72,7 @@ const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/activity", icon: Activity, label: "Activity" },
   { to: "/repos", icon: Database, label: "Repositories" },
+  { to: "/contributors", icon: Users2, label: "Reviewers", adminOnly: true },
   { to: "/packages", icon: Package, label: "Packages" },
   { to: "/vulnerabilities", icon: ShieldAlert, label: "Vulnerabilities" },
   { to: "/relationships", icon: GitFork, label: "Relationships" },
@@ -90,6 +92,7 @@ const settingsSubItems = [
 const PAGE_LABELS: Record<string, string> = {
   activity: "Activity",
   repos: "Repositories",
+  contributors: "Reviewers",
   packages: "Packages",
   vulnerabilities: "Vulnerabilities",
   relationships: "Relationships",
@@ -98,6 +101,7 @@ const PAGE_LABELS: Record<string, string> = {
   settings: "Settings",
   users: "Users",
   new: "New",
+  edit: "Edit",
   account: "Account",
   password: "Password",
   models: "Models",

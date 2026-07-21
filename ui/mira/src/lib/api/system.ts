@@ -11,7 +11,7 @@ export const systemApi = {
     ),
 
   completeSetup: (
-    repos: { owner: string; repo: string; enabled: boolean }[],
+    repos: { owner: string; repo: string; platform: string; enabled: boolean }[],
     index_mode: string
   ) =>
     postJson<{ status: string; repos: number }>("/api/setup/complete", {

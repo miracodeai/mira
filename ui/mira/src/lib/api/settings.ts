@@ -6,6 +6,11 @@ export const settingsApi = {
     fetchJson<{
       indexing_model: string
       review_model: string
+      backend: string
+      indexing_source: "dashboard" | "config"
+      review_source: "dashboard" | "config"
+      config_indexing_model: string
+      config_review_model: string
       indexing_options: {
         value: string
         label: string

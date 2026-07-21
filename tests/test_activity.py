@@ -9,6 +9,7 @@ import pytest
 
 from mira.dashboard import api
 from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers import core
 from mira.index.store import IndexStore
 
 
@@ -66,7 +67,7 @@ def _seed(db: AppDatabase) -> None:
 
 def test_lists_all_repos_newest_first(patched_db: AppDatabase):
     _seed(patched_db)
-    out = api.list_activity()
+    out = core.list_activity()
 
     assert [(e.repo, e.pr_number) for e in out.events] == [
         ("web", 2),  # created_at 300
@@ -80,7 +81,7 @@ def test_lists_all_repos_newest_first(patched_db: AppDatabase):
 
 def test_repo_filter_narrows_results(patched_db: AppDatabase):
     _seed(patched_db)
-    out = api.list_activity(repo="acme/api")
+    out = core.list_activity(repo="acme/api")
     assert [e.pr_number for e in out.events] == [7]
     # repo dropdown still lists every repo, not just the filtered one
     assert set(out.repos) == {"acme/web", "acme/api"}
@@ -89,18 +90,18 @@ def test_repo_filter_narrows_results(patched_db: AppDatabase):
 def test_search_matches_title_repo_and_category(patched_db: AppDatabase):
     _seed(patched_db)
 
-    by_title = api.list_activity(q="dark")
+    by_title = core.list_activity(q="dark")
     assert [e.pr_number for e in by_title.events] == [2]
 
-    by_category = api.list_activity(q="security")
+    by_category = core.list_activity(q="security")
     assert {e.pr_number for e in by_category.events} == {1, 7}
 
-    by_repo = api.list_activity(q="api")
+    by_repo = core.list_activity(q="api")
     assert [e.pr_number for e in by_repo.events] == [7]
 
 
 def test_search_ands_multiple_terms(patched_db: AppDatabase):
     _seed(patched_db)
     # "security" matches PRs 1 and 7; adding "web" narrows to just PR 1.
-    out = api.list_activity(q="security web")
+    out = core.list_activity(q="security web")
     assert [e.pr_number for e in out.events] == [1]

@@ -16,13 +16,9 @@ from fastapi import HTTPException
 
 import mira.config as mira_config
 from mira.config import load_config, set_global_defaults
-from mira.dashboard.api import (
-    _ALLOWED_OVERRIDE_SECTIONS,
-    GlobalSettingsUpdate,
-    get_global_settings,
-    set_global_settings,
-)
+from mira.dashboard.api import _ALLOWED_OVERRIDE_SECTIONS, GlobalSettingsUpdate
 from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers.admin import get_global_settings, set_global_settings
 
 
 @pytest.fixture
@@ -184,7 +180,7 @@ class TestVersionEndpoint:
     """The /api/version endpoint reads `mira.__version__` and returns it."""
 
     def test_returns_version(self):
-        from mira.dashboard.api import get_version
+        from mira.dashboard.routers.core import get_version
 
         result = get_version()
         assert "version" in result

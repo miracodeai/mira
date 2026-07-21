@@ -2,11 +2,9 @@ name: Benchmark
 
 # The noisy, threshold-based quality evals (the F1 scorecard). Tracked over
 # time, NOT a release gate — a single probabilistic run shouldn't block a
-# ship. Runs nightly and on manual dispatch; failures here are a signal to
-# investigate, not a stop-the-line.
+# ship. Manual dispatch only; failures here are a signal to investigate,
+# not a stop-the-line.
 on:
-  schedule:
-    - cron: "0 6 * * *" # daily ~06:00 UTC
   workflow_dispatch:
 
 permissions:

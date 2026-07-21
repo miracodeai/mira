@@ -7,11 +7,12 @@ import hmac
 import json
 from unittest.mock import AsyncMock, patch
 
+import psycopg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from mira.github_app.auth import GitHubAppAuth
-from mira.github_app.webhooks import create_app
+from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.server import create_app
 
 WEBHOOK_SECRET = "test-secret-123"
 BOT_NAME = "mira-bot"
@@ -94,6 +95,54 @@ async def test_health(client: AsyncClient) -> None:
     assert resp.json() == {"status": "ok"}
 
 
+async def test_health_returns_503_when_postgres_unreachable(
+    app_auth: GitHubAppAuth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+
+    def failing_connect(_url: str) -> None:
+        raise psycopg.OperationalError("connection refused")
+
+    with patch("mira.db.postgres.connect", failing_connect):
+        app = create_app(app_auth=app_auth, webhook_secret=WEBHOOK_SECRET, bot_name=BOT_NAME)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/health")
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "database unavailable"
+
+
+async def test_health_closes_postgres_probe_connection(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    closed: list[int] = []
+
+    class _ProbeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple = ()) -> None:
+            return None
+
+    class _ProbeConnection:
+        def cursor(self) -> _ProbeCursor:
+            return _ProbeCursor()
+
+        def close(self) -> None:
+            closed.append(1)
+
+    with patch("mira.db.postgres.connect", side_effect=lambda _url: _ProbeConnection()):
+        await client.get("/health")
+        await client.get("/health")
+
+    assert len(closed) == 2
+
+
 async def test_invalid_signature(client: AsyncClient) -> None:
     payload = json.dumps({"action": "opened"}).encode()
     resp = await client.post(
@@ -108,7 +157,7 @@ async def test_invalid_signature(client: AsyncClient) -> None:
     assert resp.status_code == 401
 
 
-@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_opened_triggers_handler(mock_handler: AsyncMock, client: AsyncClient) -> None:
     payload_bytes = json.dumps(_pr_opened_payload()).encode()
     resp = await client.post(
@@ -142,7 +191,7 @@ async def test_pr_closed_ignored(client: AsyncClient) -> None:
     assert resp.json()["status"] == "ignored"
 
 
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_comment_with_mention_triggers_handler(
     mock_handler: AsyncMock, client: AsyncClient
 ) -> None:
@@ -214,7 +263,7 @@ def _review_comment_payload(body: str, user: str = "alice") -> dict:
     }
 
 
-@patch("mira.github_app.webhooks.handle_thread_reject", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_thread_reject", new_callable=AsyncMock)
 async def test_review_comment_reject_triggers_handler(
     mock_handler: AsyncMock, client: AsyncClient
 ) -> None:
@@ -269,7 +318,7 @@ async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None
 # ── pause / resume / ignore tests ────────────────────────────────────────────
 
 
-@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_with_paused_label_returns_paused(
     mock_handler: AsyncMock, client: AsyncClient
 ) -> None:
@@ -289,7 +338,7 @@ async def test_pr_with_paused_label_returns_paused(
     mock_handler.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pull_request", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_with_ignore_in_description(mock_handler: AsyncMock, client: AsyncClient) -> None:
     payload = _make_pr_payload(body="Some text\n@mira-bot ignore\nMore text")
     payload_bytes = json.dumps(payload).encode()
@@ -307,8 +356,8 @@ async def test_pr_with_ignore_in_description(mock_handler: AsyncMock, client: As
     mock_handler.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_pause_comment_dispatches_pause_handler(
     mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
 ) -> None:
@@ -329,8 +378,8 @@ async def test_pause_comment_dispatches_pause_handler(
     mock_comment.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_resume_comment_dispatches_pause_handler(
     mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
 ) -> None:
@@ -351,8 +400,8 @@ async def test_resume_comment_dispatches_pause_handler(
     mock_comment.assert_not_awaited()
 
 
-@patch("mira.github_app.webhooks.handle_pause_resume", new_callable=AsyncMock)
-@patch("mira.github_app.webhooks.handle_comment", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_pause_resume", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
 async def test_review_comment_still_dispatches_handle_comment(
     mock_comment: AsyncMock, mock_pause: AsyncMock, client: AsyncClient
 ) -> None:

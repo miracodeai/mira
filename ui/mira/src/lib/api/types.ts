@@ -4,6 +4,7 @@
 export interface RepoListItem {
   owner: string
   repo: string
+  platform: string
   status: string
   index_mode: string
   file_count: number
@@ -107,11 +108,15 @@ export interface VulnerabilitySummary {
 }
 
 export interface LearnedRuleModel {
+  id: number
   rule_text: string
   source_signal: string
   category: string
   path_pattern: string
   sample_count: number
+  active: boolean
+  status: "pending" | "approved" | "rejected"
+  created_by: string
   updated_at: number
 }
 
@@ -267,4 +272,144 @@ export interface RuleModel {
   enabled: boolean
   created_at: number
   updated_at: number
+}
+
+// ── Contributors ──
+
+export interface ContributorListItem {
+  id: number
+  provider: string
+  login: string
+  display_name: string
+  avatar_url: string
+  is_bot: boolean
+  prs_opened: number
+  prs_merged: number
+  commits: number
+  reviews: number
+  additions: number
+  deletions: number
+  last_active: number | null
+  repos_touched: number
+}
+
+export interface HeatmapDay {
+  day: string
+  total: number
+  commits: number
+  prs_opened: number
+  prs_merged: number
+  reviews: number
+}
+
+export interface ContributorRepoBreakdown {
+  owner: string
+  repo: string
+  commits: number
+  prs_opened: number
+  prs_merged: number
+  reviews: number
+}
+
+export interface ReviewQuality {
+  reviews: number
+  blockers: number
+  warnings: number
+  suggestions: number
+  feedback_accepted: number
+  feedback_rejected: number
+  accept_rate: number
+}
+
+export interface ContributorDetail {
+  contributor: ContributorListItem
+  heatmap: HeatmapDay[]
+  repos: ContributorRepoBreakdown[]
+  quality: ReviewQuality
+}
+
+export interface ContributionWindow {
+  commits: number
+  prs_opened: number
+  prs_merged: number
+  reviews: number
+  additions: number
+  contributors: number
+}
+
+export interface ContributorSummary {
+  days: number
+  current: ContributionWindow
+  previous: ContributionWindow
+}
+
+export type ContributorSort = "commits" | "prs" | "reviews" | "recent" | "additions"
+export type StatsPeriod = "day" | "week" | "month"
+
+// ── Review insights ──
+
+export interface ThroughputWindow {
+  time_to_first_review_secs: number | null
+  time_to_first_review_count: number
+  time_to_merge_secs: number | null
+  time_to_merge_count: number
+}
+
+export interface HealthComponent {
+  key: string
+  label: string
+  score: number // 0–1
+  detail: string
+}
+
+export interface ReviewSummary {
+  days: number
+  open_prs: number
+  stale_prs: number
+  awaiting_review: number
+  merged: number
+  approved_merged: number
+  approvals: number
+  rubber_stamps: number
+  health_score: number | null
+  health: HealthComponent[]
+  current: ThroughputWindow
+  previous: ThroughputWindow
+}
+
+export interface ReviewerStat {
+  reviewer: string
+  avatar_url: string
+  pending: number
+  reviews: number
+  median_response_secs: number | null
+  approvals: number
+  rubber_stamps: number
+  rubber_stamp_rate: number
+}
+
+export interface OpenPrReviewer {
+  reviewer: string
+  state: string
+  requested: boolean
+  responded: boolean
+}
+
+export interface OpenPr {
+  owner: string
+  repo: string
+  number: number
+  author: string
+  title: string
+  url: string
+  draft: boolean
+  created_at: number
+  updated_at: number
+  age_secs: number
+  idle_secs: number
+  reviewed: boolean
+  stale: boolean
+  status: string
+  waiting_on: string[]
+  reviewers: OpenPrReviewer[]
 }

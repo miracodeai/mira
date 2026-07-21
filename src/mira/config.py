@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from mira.exceptions import ConfigError
 
@@ -18,6 +20,18 @@ logger = logging.getLogger(__name__)
 # is accepted for backward compat with repos that committed it before the
 # 0.1.1 standardization on the .yaml extension.
 _DEFAULT_CONFIG_FILENAMES = (".mira.yaml", ".mira.yml")
+
+
+def _is_local_host(host: str) -> bool:
+    """Loopback, private/link-local IP literals, and dotless hostnames
+    (docker-compose services) — where a plain-http endpoint is legitimate."""
+    if host == "localhost" or "." not in host:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
 class LLMConfig(BaseModel):
@@ -48,6 +62,20 @@ class LLMConfig(BaseModel):
     # (env vars, instance profile, ECS task role, SSO).
     region: str = "us-east-1"
     aws_profile: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"llm.base_url must be an http(s) URL, got {v!r}")
+        if parsed.scheme == "http" and not _is_local_host(parsed.hostname):
+            raise ValueError(
+                f"llm.base_url {v!r} uses plain http to a public host — use https "
+                "(http is allowed only for localhost, private IPs, and dotless "
+                "hostnames like docker-compose services)"
+            )
+        return v
 
 
 class FilterConfig(BaseModel):

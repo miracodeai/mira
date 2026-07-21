@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from mira.dashboard import api
 from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers import core
 from mira.index.store import IndexStore
 
 
@@ -38,7 +39,7 @@ def _seed(db: AppDatabase) -> None:
         suggestions=0,
         categories="bug,security",
         created_at=100.0,
-        author_username="octocat",
+        author="octocat",
         author_avatar_url="https://avatars.example/octocat.png",
         reviewed_paths=json.dumps(["src/auth.ts", "src/session.ts"]),
     )
@@ -75,7 +76,7 @@ def _seed(db: AppDatabase) -> None:
         suggestions=0,
         categories="bug",
         created_at=300.0,
-        author_username="octocat",
+        author="octocat",
         author_avatar_url="https://avatars.example/octocat.png",
         reviewed_paths=json.dumps(["src/auth.ts"]),
     )
@@ -97,7 +98,7 @@ def _seed(db: AppDatabase) -> None:
 
 def test_activity_list_includes_author(patched_db: AppDatabase):
     _seed(patched_db)
-    out = api.list_activity()
+    out = core.list_activity()
     assert out.events
     ev = out.events[0]
     assert ev.author_username == "octocat"

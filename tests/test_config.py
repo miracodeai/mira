@@ -25,6 +25,43 @@ def _reset_global_defaults(monkeypatch: pytest.MonkeyPatch):
         mira_config._global_defaults = saved
 
 
+class TestBaseUrlValidation:
+    """base_url is trusted deployment input, but obvious misconfigurations
+    (non-http schemes, plain http to a public host) fail loudly at load."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://openrouter.ai/api/v1",
+            "https://api.together.xyz/v1",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://ollama:11434/v1",
+            "http://10.0.0.5:8000/v1",
+        ],
+    )
+    def test_accepted(self, url):
+        from mira.config import LLMConfig
+
+        assert LLMConfig(base_url=url).base_url == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "ftp://openrouter.ai/api/v1",
+            "file:///etc/passwd",
+            "openrouter.ai/api/v1",
+            "",
+            "http://api.example.com/v1",
+        ],
+    )
+    def test_rejected(self, url):
+        from mira.config import LLMConfig
+
+        with pytest.raises(ValueError):
+            LLMConfig(base_url=url)
+
+
 class TestLoadConfig:
     def test_default_config(self):
         config = load_config()

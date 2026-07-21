@@ -4,9 +4,11 @@
 // keeps working everywhere.
 
 import { activityApi } from "./api/activity"
+import { contributorsApi } from "./api/contributors"
 import { packagesApi } from "./api/packages"
 import { relationshipsApi } from "./api/relationships"
 import { reposApi } from "./api/repos"
+import { reviewInsightsApi } from "./api/review-insights"
 import { rulesApi } from "./api/rules"
 import { settingsApi } from "./api/settings"
 import { statsApi } from "./api/stats"
@@ -29,4 +31,6 @@ export const api = {
   ...rulesApi,
   ...usersApi,
   ...webhooksApi,
+  ...contributorsApi,
+  ...reviewInsightsApi,
 }

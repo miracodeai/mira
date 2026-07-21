@@ -1,3 +1,3 @@
 """Mira — AI-powered PR reviewer."""
 
-__version__ = "0.4.1"
+__version__ = "0.7.0"

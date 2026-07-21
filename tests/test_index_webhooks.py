@@ -10,8 +10,8 @@ from unittest.mock import patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from mira.github_app.auth import GitHubAppAuth
-from mira.github_app.webhooks import create_app
+from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.server import create_app
 
 WEBHOOK_SECRET = "test-secret-123"
 BOT_NAME = "mira-bot"
@@ -51,7 +51,7 @@ class TestInstallationWebhook:
         }
         body = json.dumps(payload).encode()
 
-        with patch("mira.github_app.webhooks.handle_installation") as mock_handler:
+        with patch("mira.platforms.github.webhook.handle_installation") as mock_handler:
             resp = await client.post(
                 "/webhook",
                 content=body,
@@ -97,7 +97,7 @@ class TestReposAddedWebhook:
         }
         body = json.dumps(payload).encode()
 
-        with patch("mira.github_app.webhooks.handle_repos_added") as mock_handler:
+        with patch("mira.platforms.github.webhook.handle_repos_added") as mock_handler:
             resp = await client.post(
                 "/webhook",
                 content=body,
@@ -129,7 +129,7 @@ class TestPushWebhook:
         }
         body = json.dumps(payload).encode()
 
-        with patch("mira.github_app.webhooks.handle_push_index") as mock_handler:
+        with patch("mira.platforms.github.webhook.handle_push_index") as mock_handler:
             resp = await client.post(
                 "/webhook",
                 content=body,

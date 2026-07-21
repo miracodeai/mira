@@ -97,7 +97,9 @@
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
     --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
+    /* Lighter than --card so floating surfaces (selects, menus) read as
+       elevated instead of blending into the card underneath. */
+    --popover: oklch(0.255 0 0);
     --popover-foreground: oklch(0.985 0 0);
     --primary: oklch(0.922 0 0);
     --primary-foreground: oklch(0.205 0 0);

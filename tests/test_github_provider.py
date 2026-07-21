@@ -416,7 +416,7 @@ class TestFormatCommentBody:
 
     def test_basic_comment(self):
         body = _format_comment_body(self._make_comment())
-        assert "\U0001f41b **Bug**\n\u26a0\ufe0f Warning" in body
+        assert "**Bug**  \n\u26a0\ufe0f Warning" in body
         assert "**Something is wrong**" in body
         assert "Detailed explanation." in body
         assert "Suggested fix:" not in body
@@ -429,16 +429,16 @@ class TestFormatCommentBody:
 
     def test_blocker_badge(self):
         body = _format_comment_body(self._make_comment(severity=Severity.BLOCKER))
-        assert "\U0001f41b **Bug**\n\U0001f6d1 Blocker \u2014 must fix before merge" in body
+        assert "**Bug**  \n\U0001f6d1 Blocker \u2014 must fix before merge" in body
 
     def test_unknown_category_fallback(self):
         body = _format_comment_body(self._make_comment(category="unknown_cat"))
-        assert "\U0001f4cc **Note**" in body
+        assert "**Note**" in body
 
     def test_all_known_categories(self):
-        for cat, (emoji, label) in _CATEGORY_DISPLAY.items():
+        for cat, (_emoji, label) in _CATEGORY_DISPLAY.items():
             body = _format_comment_body(self._make_comment(category=cat))
-            assert f"{emoji} **{label}**" in body
+            assert f"**{label}**" in body
 
 
 class TestFormatCommentBodyAgentPrompt:

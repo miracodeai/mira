@@ -87,8 +87,14 @@ class WebhookConfig(BaseModel):
 
 def detect_format(url: str) -> str:
     """Classify a webhook URL as ``"slack"``, ``"teams"`` or ``"generic"``."""
-    host = (urlparse(url).hostname or "").lower()
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
     if host == "hooks.slack.com":
+        return "slack"
+    # Discord's Slack-compatible variant (…/webhooks/{id}/{token}/slack).
+    # A bare Discord URL expects Discord's own schema, which Mira doesn't
+    # emit — leave it "generic" so the test button surfaces the 400 loudly.
+    if host in ("discord.com", "discordapp.com") and parsed.path.rstrip("/").endswith("/slack"):
         return "slack"
     # Classic Teams connector (*.webhook.office.com) and the newer Teams
     # Workflows endpoints (Power Automate / Logic Apps, *.logic.azure.com).

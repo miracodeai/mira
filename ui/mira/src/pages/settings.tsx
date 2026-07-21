@@ -1,6 +1,7 @@
 import { Loader2 } from "lucide-react"
 import { useEffect, useState } from "react"
 
+import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -28,18 +29,16 @@ export function SettingsPage() {
   const { user: currentUser } = useAuth()
   const { section = "models" } = useParams()
 
+  // "" = inherit from deployment config; anything else is a model id.
   const [indexingModel, setIndexingModel] = useState("")
   const [reviewModel, setReviewModel] = useState("")
-  const [indexingOptions, setIndexingOptions] = useState<
-    { value: string; label: string; recommended?: boolean }[]
-  >([])
-  const [reviewOptions, setReviewOptions] = useState<
-    { value: string; label: string; recommended?: boolean }[]
-  >([])
+  const [configIndexingModel, setConfigIndexingModel] = useState("")
+  const [configReviewModel, setConfigReviewModel] = useState("")
+  const [backend, setBackend] = useState("")
+  const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
+  const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
   const [thinkingMode, setThinkingMode] = useState("off")
-  const [thinkingOptions, setThinkingOptions] = useState<
-    { value: string; label: string; recommended?: boolean }[]
-  >([])
+  const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
 
@@ -66,8 +65,11 @@ export function SettingsPage() {
   useEffect(() => {
     if (!currentUser?.is_admin) return
     api.getModels().then((m) => {
-      setIndexingModel(m.indexing_model)
-      setReviewModel(m.review_model)
+      setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
+      setReviewModel(m.review_source === "config" ? "" : m.review_model)
+      setConfigIndexingModel(m.config_indexing_model)
+      setConfigReviewModel(m.config_review_model)
+      setBackend(m.backend)
       setIndexingOptions(m.indexing_options)
       setReviewOptions(m.review_options)
       setThinkingMode(m.review_thinking_mode)
@@ -317,28 +319,23 @@ export function SettingsPage() {
             <CardTitle>Models</CardTitle>
             <CardDescription>
               Choose models for indexing and PR reviews
+              {backend &&
+                ` — listed from ${
+                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
+                    backend
+                  ] ?? "your configured endpoint"
+                }`}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Indexing Model</label>
-              <Select value={indexingModel} onValueChange={setIndexingModel}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {indexingOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                      {opt.recommended && (
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          Recommended
-                        </span>
-                      )}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <ModelCombobox
+                value={indexingModel}
+                onChange={setIndexingModel}
+                options={indexingOptions}
+                configModel={configIndexingModel}
+              />
               <p className="text-xs text-muted-foreground">
                 Used to summarize files when building the code index. A cheaper
                 model is recommended since it runs over every file.
@@ -346,23 +343,12 @@ export function SettingsPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Review Model</label>
-              <Select value={reviewModel} onValueChange={setReviewModel}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {reviewOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                      {opt.recommended && (
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          Recommended
-                        </span>
-                      )}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <ModelCombobox
+                value={reviewModel}
+                onChange={setReviewModel}
+                options={reviewOptions}
+                configModel={configReviewModel}
+              />
               <p className="text-xs text-muted-foreground">
                 Used to analyze PRs and post review comments. A more powerful
                 model gives better review quality.

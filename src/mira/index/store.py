@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS review_events (
     pr_number INTEGER NOT NULL DEFAULT 0,
     pr_title TEXT NOT NULL DEFAULT '',
     pr_url TEXT NOT NULL DEFAULT '',
+    -- GitHub login of the PR author, so the blockers/warnings a person's PRs
+    -- trigger can be attributed to them in contributor analytics.
+    author TEXT NOT NULL DEFAULT '',
     comments_posted INTEGER NOT NULL DEFAULT 0,
     blockers INTEGER NOT NULL DEFAULT 0,
     warnings INTEGER NOT NULL DEFAULT 0,
@@ -80,7 +83,6 @@ CREATE TABLE IF NOT EXISTS review_events (
     tokens_used INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     categories TEXT NOT NULL DEFAULT '',
-    author_username TEXT NOT NULL DEFAULT '',
     author_avatar_url TEXT NOT NULL DEFAULT '',
     reviewed_paths TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0
@@ -136,6 +138,9 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     comment_title TEXT NOT NULL DEFAULT '',
     signal TEXT NOT NULL DEFAULT '',
     actor TEXT NOT NULL DEFAULT '',
+    -- GitHub login of the PR author (distinct from `actor`, who is the human
+    -- that accepted/rejected). Lets accept/reject rate attribute to the author.
+    pr_author TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0
 );
 
@@ -147,6 +152,11 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     path_pattern TEXT NOT NULL DEFAULT '',
     sample_count INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    -- 'pending' | 'approved' | 'rejected'. Auto-synthesized rules start
+    -- 'pending' and only feed reviews once an admin approves them.
+    status TEXT NOT NULL DEFAULT 'approved',
+    -- Username of the admin who authored a manual rule; '' for synthesized.
+    created_by TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0
 );
@@ -230,6 +240,7 @@ class ReviewEvent:
     pr_number: int
     pr_title: str
     pr_url: str
+    author: str
     comments_posted: int
     blockers: int
     warnings: int
@@ -240,7 +251,6 @@ class ReviewEvent:
     duration_ms: int
     categories: str  # comma-separated: "bug,security,performance"
     created_at: float = 0.0
-    author_username: str = ""
     author_avatar_url: str = ""
     reviewed_paths: str = ""  # JSON array of filenames reviewed this pass
 
@@ -297,6 +307,7 @@ class FeedbackEventRow:
     comment_title: str
     signal: str
     actor: str
+    pr_author: str = ""
     created_at: float = 0.0
 
 
@@ -309,6 +320,8 @@ class LearnedRuleRow:
     path_pattern: str
     sample_count: int
     active: bool = True
+    status: str = "approved"  # 'pending' | 'approved' | 'rejected'
+    created_by: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -362,31 +375,52 @@ class IndexStore(_StoreSharedMixin):
             self._conn.execute("ALTER TABLE files ADD COLUMN loc INTEGER NOT NULL DEFAULT 0")
         # Columns added to review_events post-schema (PR author + reviewed files).
         re_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(review_events)").fetchall()}
-        for col in ("author_username", "author_avatar_url", "reviewed_paths"):
+        for col in ("author", "author_avatar_url", "reviewed_paths"):
             if col not in re_cols:
                 self._conn.execute(
                     f"ALTER TABLE review_events ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
                 )
+        feedback_cols = {
+            r[1] for r in self._conn.execute("PRAGMA table_info(feedback_events)").fetchall()
+        }
+        if "pr_author" not in feedback_cols:
+            self._conn.execute(
+                "ALTER TABLE feedback_events ADD COLUMN pr_author TEXT NOT NULL DEFAULT ''"
+            )
+        # learned_rules.status added post-schema. Default 'approved' so existing
+        # rules keep feeding reviews; new synthesized rules are inserted 'pending'.
+        lr_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(learned_rules)").fetchall()}
+        if "status" not in lr_cols:
+            self._conn.execute(
+                "ALTER TABLE learned_rules ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'"
+            )
+        if "created_by" not in lr_cols:
+            self._conn.execute(
+                "ALTER TABLE learned_rules ADD COLUMN created_by TEXT NOT NULL DEFAULT ''"
+            )
         self._conn.commit()
 
     @classmethod
-    def open(cls, owner: str, repo: str):  # type: ignore[no-untyped-def]
+    def open(cls, owner: str, repo: str, platform: str = "github"):  # type: ignore[no-untyped-def]
         """Open (or create) the index store for a repo.
 
         Returns a PgIndexStore if DATABASE_URL is set, otherwise an IndexStore
-        backed by a per-repo SQLite file.
+        backed by a per-repo SQLite file. Non-GitHub platforms are namespaced
+        (``_{platform}/{owner}``) so a same-named repo on another platform gets
+        its own store; GitHub paths are unchanged for back-compat.
         """
+        key_owner = owner if platform == "github" else f"_{platform}/{owner}"
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
             try:
                 from mira.index.pg_store import PgIndexStore
 
-                return PgIndexStore(owner, repo, db_url)
+                return PgIndexStore(key_owner, repo, db_url)
             except Exception as exc:
                 logger.warning("Postgres store unavailable (%s), falling back to SQLite", exc)
 
         index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
-        repo_dir = os.path.join(index_dir, owner)
+        repo_dir = os.path.join(index_dir, key_owner)
         os.makedirs(repo_dir, exist_ok=True)
         db_path = os.path.join(repo_dir, f"{repo}.db")
         return cls(db_path)
@@ -629,21 +663,22 @@ class IndexStore(_StoreSharedMixin):
         duration_ms: int = 0,
         categories: str = "",
         created_at: float | None = None,
-        author_username: str = "",
+        author: str = "",
         author_avatar_url: str = "",
         reviewed_paths: str = "",
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
         self._conn.execute(
             "INSERT INTO review_events "
-            "(pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
+            "(pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, author_username, author_avatar_url, reviewed_paths, created_at) "
+            "categories, author_avatar_url, reviewed_paths, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pr_number,
                 pr_title,
                 pr_url,
+                author,
                 comments_posted,
                 blockers,
                 warnings,
@@ -653,7 +688,6 @@ class IndexStore(_StoreSharedMixin):
                 tokens_used,
                 duration_ms,
                 categories,
-                author_username,
                 author_avatar_url,
                 reviewed_paths,
                 now,
@@ -666,6 +700,7 @@ class IndexStore(_StoreSharedMixin):
             pr_number=pr_number,
             pr_title=pr_title,
             pr_url=pr_url,
+            author=author,
             comments_posted=comments_posted,
             blockers=blockers,
             warnings=warnings,
@@ -676,16 +711,15 @@ class IndexStore(_StoreSharedMixin):
             duration_ms=duration_ms,
             categories=categories,
             created_at=now,
-            author_username=author_username,
             author_avatar_url=author_avatar_url,
             reviewed_paths=reviewed_paths,
         )
 
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._conn.execute(
-            "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
+            "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author_username, author_avatar_url, reviewed_paths "
+            "categories, created_at, author_avatar_url, reviewed_paths "
             "FROM review_events ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -695,17 +729,17 @@ class IndexStore(_StoreSharedMixin):
                 pr_number=r[1],
                 pr_title=r[2],
                 pr_url=r[3],
-                comments_posted=r[4],
-                blockers=r[5],
-                warnings=r[6],
-                suggestions=r[7],
-                files_reviewed=r[8],
-                lines_changed=r[9],
-                tokens_used=r[10],
-                duration_ms=r[11],
-                categories=r[12],
-                created_at=r[13],
-                author_username=r[14],
+                author=r[4],
+                comments_posted=r[5],
+                blockers=r[6],
+                warnings=r[7],
+                suggestions=r[8],
+                files_reviewed=r[9],
+                lines_changed=r[10],
+                tokens_used=r[11],
+                duration_ms=r[12],
+                categories=r[13],
+                created_at=r[14],
                 author_avatar_url=r[15],
                 reviewed_paths=r[16],
             )
@@ -844,6 +878,46 @@ class IndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    def get_review_quality_by_author(self, author: str, since: float | None = None) -> dict:
+        """Sum the blockers/warnings/suggestions raised on one author's PRs.
+
+        Mira's differentiated signal: how much review attention a contributor's
+        code drew. Keyed by GitHub login recorded on each review event.
+        """
+        where = "WHERE author = ?"
+        params: list = [author]
+        if since:
+            where += " AND created_at >= ?"
+            params.append(since)
+        row = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(blockers),0), COALESCE(SUM(warnings),0), "
+            "COALESCE(SUM(suggestions),0), COALESCE(SUM(comments_posted),0) "
+            f"FROM review_events {where}",
+            tuple(params),
+        ).fetchone()
+        return {
+            "reviews": int(row[0] or 0),
+            "blockers": int(row[1] or 0),
+            "warnings": int(row[2] or 0),
+            "suggestions": int(row[3] or 0),
+            "comments_posted": int(row[4] or 0),
+        }
+
+    def get_feedback_quality_by_author(self, pr_author: str) -> dict:
+        """Accept/reject tallies for Mira's feedback on one author's PRs."""
+        rows = self._conn.execute(
+            "SELECT signal, COUNT(*) FROM feedback_events WHERE pr_author = ? GROUP BY signal",
+            (pr_author,),
+        ).fetchall()
+        counts = {signal: int(count) for signal, count in rows}
+        accepted = counts.get("accepted", 0)
+        rejected = counts.get("rejected", 0)
+        return {
+            "accepted": accepted,
+            "rejected": rejected,
+            "human_review": counts.get("human_review", 0),
+        }
+
     def get_review_stats(self, since: float | None = None) -> dict:
         """Aggregate review statistics, optionally filtered to events after *since* (epoch)."""
         where = " WHERE created_at >= ?" if since else ""
@@ -981,13 +1055,14 @@ class IndexStore(_StoreSharedMixin):
         comment_title: str,
         signal: str,
         actor: str,
+        pr_author: str = "",
     ) -> FeedbackEventRow:
         now = time.time()
         cur = self._conn.execute(
             "INSERT INTO feedback_events "
             "(pr_number, pr_url, comment_path, comment_line, comment_category, "
-            "comment_severity, comment_title, signal, actor, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "comment_severity, comment_title, signal, actor, pr_author, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pr_number,
                 pr_url,
@@ -998,12 +1073,16 @@ class IndexStore(_StoreSharedMixin):
                 comment_title,
                 signal,
                 actor,
+                pr_author,
                 now,
             ),
         )
         self._conn.commit()
+        row_id = cur.lastrowid
+        if row_id is None:
+            raise RuntimeError("INSERT into feedback_events did not return a row id")
         return FeedbackEventRow(
-            id=cur.lastrowid or 0,
+            id=row_id,
             pr_number=pr_number,
             pr_url=pr_url,
             comment_path=comment_path,
@@ -1013,6 +1092,7 @@ class IndexStore(_StoreSharedMixin):
             comment_title=comment_title,
             signal=signal,
             actor=actor,
+            pr_author=pr_author,
             created_at=now,
         )
 
@@ -1036,6 +1116,7 @@ class IndexStore(_StoreSharedMixin):
                 e["comment_title"],
                 e["signal"],
                 e["actor"],
+                e.get("pr_author", ""),
                 now,
             )
             for e in events
@@ -1043,8 +1124,8 @@ class IndexStore(_StoreSharedMixin):
         self._conn.executemany(
             "INSERT INTO feedback_events "
             "(pr_number, pr_url, comment_path, comment_line, comment_category, "
-            "comment_severity, comment_title, signal, actor, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "comment_severity, comment_title, signal, actor, pr_author, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         self._conn.commit()
@@ -1053,7 +1134,7 @@ class IndexStore(_StoreSharedMixin):
     def list_feedback(self, limit: int = 500) -> list[FeedbackEventRow]:
         rows = self._conn.execute(
             "SELECT id, pr_number, pr_url, comment_path, comment_line, "
-            "comment_category, comment_severity, comment_title, signal, actor, created_at "
+            "comment_category, comment_severity, comment_title, signal, actor, pr_author, created_at "
             "FROM feedback_events ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -1069,7 +1150,8 @@ class IndexStore(_StoreSharedMixin):
                 comment_title=r[7],
                 signal=r[8],
                 actor=r[9],
-                created_at=r[10],
+                pr_author=r[10],
+                created_at=r[11],
             )
             for r in rows
         ]
@@ -1094,13 +1176,16 @@ class IndexStore(_StoreSharedMixin):
         category: str,
         path_pattern: str,
         sample_count: int,
+        status: str = "pending",
     ) -> LearnedRuleRow:
         now = time.time()
         existing = self._conn.execute(
-            "SELECT id FROM learned_rules WHERE category = ? AND path_pattern = ?",
+            "SELECT id, status FROM learned_rules WHERE category = ? AND path_pattern = ?",
             (category, path_pattern),
         ).fetchone()
         if existing:
+            # Keep the existing approval status — re-synthesis (more samples)
+            # must never silently re-activate a rejected rule or auto-approve.
             self._conn.execute(
                 "UPDATE learned_rules SET rule_text = ?, source_signal = ?, "
                 "sample_count = ?, updated_at = ? WHERE id = ?",
@@ -1114,47 +1199,142 @@ class IndexStore(_StoreSharedMixin):
                 category=category,
                 path_pattern=path_pattern,
                 sample_count=sample_count,
+                status=existing[1],
                 created_at=now,
                 updated_at=now,
             )
         cur = self._conn.execute(
             "INSERT INTO learned_rules "
             "(rule_text, source_signal, category, path_pattern, sample_count, "
-            "active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-            (rule_text, source_signal, category, path_pattern, sample_count, now, now),
+            "active, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+            (rule_text, source_signal, category, path_pattern, sample_count, status, now, now),
         )
         self._conn.commit()
+        row_id = cur.lastrowid
+        if row_id is None:
+            raise RuntimeError("INSERT into learned_rules did not return a row id")
         return LearnedRuleRow(
-            id=cur.lastrowid or 0,
+            id=row_id,
             rule_text=rule_text,
             source_signal=source_signal,
             category=category,
             path_pattern=path_pattern,
             sample_count=sample_count,
+            status=status,
             created_at=now,
             updated_at=now,
         )
 
+    def _row_to_learned_rule(self, r: tuple) -> LearnedRuleRow:
+        return LearnedRuleRow(
+            id=r[0],
+            rule_text=r[1],
+            source_signal=r[2],
+            category=r[3],
+            path_pattern=r[4],
+            sample_count=r[5],
+            active=bool(r[6]),
+            status=r[7],
+            created_by=r[8],
+            created_at=r[9],
+            updated_at=r[10],
+        )
+
+    _LR_COLS = (
+        "id, rule_text, source_signal, category, path_pattern, "
+        "sample_count, active, status, created_by, created_at, updated_at"
+    )
+
     def list_active_learned_rules(self) -> list[LearnedRuleRow]:
+        # Only approved + enabled rules feed reviews.
         rows = self._conn.execute(
-            "SELECT id, rule_text, source_signal, category, path_pattern, "
-            "sample_count, active, created_at, updated_at "
-            "FROM learned_rules WHERE active = 1 ORDER BY sample_count DESC"
+            f"SELECT {self._LR_COLS} FROM learned_rules "
+            "WHERE active = 1 AND status = 'approved' ORDER BY sample_count DESC"
         ).fetchall()
-        return [
-            LearnedRuleRow(
-                id=r[0],
-                rule_text=r[1],
-                source_signal=r[2],
-                category=r[3],
-                path_pattern=r[4],
-                sample_count=r[5],
-                active=bool(r[6]),
-                created_at=r[7],
-                updated_at=r[8],
-            )
-            for r in rows
-        ]
+        return [self._row_to_learned_rule(r) for r in rows]
+
+    def list_learned_rules(self, status: str | None = None) -> list[LearnedRuleRow]:
+        """List learned rules, optionally filtered by approval status."""
+        if status:
+            rows = self._conn.execute(
+                f"SELECT {self._LR_COLS} FROM learned_rules WHERE status = ? "
+                "ORDER BY updated_at DESC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"SELECT {self._LR_COLS} FROM learned_rules ORDER BY updated_at DESC"
+            ).fetchall()
+        return [self._row_to_learned_rule(r) for r in rows]
+
+    def get_learned_rule(self, rule_id: int) -> LearnedRuleRow | None:
+        row = self._conn.execute(
+            f"SELECT {self._LR_COLS} FROM learned_rules WHERE id = ?", (rule_id,)
+        ).fetchone()
+        return self._row_to_learned_rule(row) if row else None
+
+    def create_learned_rule(
+        self,
+        rule_text: str,
+        category: str,
+        path_pattern: str = "",
+        source_signal: str = "manual",
+        status: str = "approved",
+        active: bool = True,
+        created_by: str = "",
+    ) -> LearnedRuleRow:
+        """Insert an admin-authored rule (not deduped against existing)."""
+        now = time.time()
+        cur = self._conn.execute(
+            "INSERT INTO learned_rules "
+            "(rule_text, source_signal, category, path_pattern, sample_count, "
+            "active, status, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            (
+                rule_text,
+                source_signal,
+                category,
+                path_pattern,
+                int(active),
+                status,
+                created_by,
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+        row_id = cur.lastrowid
+        if row_id is None:
+            raise RuntimeError("INSERT into learned_rules did not return a row id")
+        return self.get_learned_rule(row_id)  # type: ignore[return-value]
+
+    def update_learned_rule(
+        self, rule_id: int, rule_text: str, category: str, path_pattern: str
+    ) -> None:
+        self._conn.execute(
+            "UPDATE learned_rules SET rule_text = ?, category = ?, path_pattern = ?, "
+            "updated_at = ? WHERE id = ?",
+            (rule_text, category, path_pattern, time.time(), rule_id),
+        )
+        self._conn.commit()
+
+    def set_learned_rule_status(self, rule_id: int, status: str) -> None:
+        self._conn.execute(
+            "UPDATE learned_rules SET status = ?, updated_at = ? WHERE id = ?",
+            (status, time.time(), rule_id),
+        )
+        self._conn.commit()
+
+    def set_learned_rule_active(self, rule_id: int, active: bool) -> None:
+        self._conn.execute(
+            "UPDATE learned_rules SET active = ?, updated_at = ? WHERE id = ?",
+            (int(active), time.time(), rule_id),
+        )
+        self._conn.commit()
+
+    def delete_learned_rule(self, rule_id: int) -> None:
+        self._conn.execute("DELETE FROM learned_rules WHERE id = ?", (rule_id,))
+        self._conn.commit()
 
     def replace_manifest_packages(
         self,
@@ -1346,20 +1526,33 @@ class IndexStore(_StoreSharedMixin):
 # separate SQLite file under MIRA_INDEX_DIR.
 
 
-def _iter_repo_dbs(index_dir: str) -> list[tuple[str, str, str]]:
-    """Yield (owner, repo, db_path) for each repo SQLite file under index_dir."""
-    out: list[tuple[str, str, str]] = []
+def _iter_repo_dbs(index_dir: str) -> list[tuple[str, str, str, str]]:
+    """Yield (platform, owner, repo, db_path) for each repo SQLite file.
+
+    GitHub repos live flat at ``{owner}/{repo}.db`` (back-compat); other
+    platforms are namespaced under ``_{platform}/`` and may have nested-group
+    owners, so those are walked recursively.
+    """
+    out: list[tuple[str, str, str, str]] = []
     if not os.path.isdir(index_dir):
         return out
-    for owner in sorted(os.listdir(index_dir)):
-        owner_dir = os.path.join(index_dir, owner)
-        if not os.path.isdir(owner_dir) or owner.startswith("_") or owner.startswith("."):
+    for entry in sorted(os.listdir(index_dir)):
+        entry_path = os.path.join(index_dir, entry)
+        if not os.path.isdir(entry_path) or entry.startswith("."):
             continue
-        for fname in sorted(os.listdir(owner_dir)):
-            if not fname.endswith(".db"):
-                continue
-            repo = fname[:-3]
-            out.append((owner, repo, os.path.join(owner_dir, fname)))
+        if entry.startswith("_"):
+            platform = entry[1:]
+            for root, _dirs, files in os.walk(entry_path):
+                for fname in sorted(files):
+                    if not fname.endswith(".db"):
+                        continue
+                    rel = os.path.relpath(os.path.join(root, fname), entry_path)
+                    owner = os.path.dirname(rel)
+                    out.append((platform, owner, fname[:-3], os.path.join(root, fname)))
+            continue
+        for fname in sorted(os.listdir(entry_path)):
+            if fname.endswith(".db"):
+                out.append(("github", entry, fname[:-3], os.path.join(entry_path, fname)))
     return out
 
 
@@ -1367,7 +1560,7 @@ def list_packages_org_wide_sqlite() -> list[dict]:
     """SQLite equivalent of pg_store.list_packages_org_wide."""
     index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
     out: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
@@ -1382,6 +1575,7 @@ def list_packages_org_wide_sqlite() -> list[dict]:
         for kind, name, version, file_path in rows:
             out.append(
                 {
+                    "platform": platform,
                     "owner": owner,
                     "repo": repo,
                     "kind": kind,
@@ -1406,7 +1600,7 @@ def search_packages_org_wide_sqlite(
     version_l = version.lower() if version else None
 
     rows: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
@@ -1424,6 +1618,7 @@ def search_packages_org_wide_sqlite(
                         continue
                     rows.append(
                         {
+                            "platform": platform,
                             "owner": owner,
                             "repo": repo,
                             "name": r_name,
@@ -1447,7 +1642,7 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
     index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
     severity_order = {"critical": 0, "high": 1, "moderate": 2, "low": 3}
     rows: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
@@ -1458,6 +1653,7 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
                 for r in cur.fetchall():
                     rows.append(
                         {
+                            "platform": platform,
                             "owner": owner,
                             "repo": repo,
                             "package_name": r[0],
@@ -1480,30 +1676,52 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
     return rows[:limit]
 
 
-def list_learned_rules_org_wide_sqlite(limit: int = 500) -> list[dict]:
-    """SQLite equivalent of pg_store.list_learned_rules_org_wide."""
+def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = None) -> list[dict]:
+    """SQLite equivalent of pg_store.list_learned_rules_org_wide.
+
+    Returns every rule with its id/active/status (optionally filtered by
+    status) so the dashboard can approve/reject and CRUD specific rules.
+    """
     index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
     rows: list[dict] = []
-    for owner, repo, db_path in _iter_repo_dbs(index_dir):
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
             conn = sqlite3.connect(db_path)
             try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(learned_rules)").fetchall()}
+                has_status = "status" in cols
+                # Pre-migration DBs have no status column → treat all as approved.
+                if status and not has_status and status != "approved":
+                    continue
+                status_sel = "status" if has_status else "'approved'"
+                created_by_sel = "created_by" if "created_by" in cols else "''"
+                where, params = "", ()
+                if status and has_status:
+                    where, params = " WHERE status = ?", (status,)
                 cur = conn.execute(
-                    "SELECT rule_text, source_signal, category, path_pattern, "
-                    "sample_count, updated_at FROM learned_rules WHERE active = 1 "
-                    "ORDER BY updated_at DESC"
+                    "SELECT id, rule_text, source_signal, category, path_pattern, "
+                    f"sample_count, active, {status_sel}, {created_by_sel}, "
+                    "created_at, updated_at "
+                    f"FROM learned_rules{where} ORDER BY updated_at DESC",
+                    params,
                 )
                 for r in cur.fetchall():
                     rows.append(
                         {
+                            "id": r[0],
+                            "platform": platform,
                             "owner": owner,
                             "repo": repo,
-                            "rule_text": r[0],
-                            "source_signal": r[1],
-                            "category": r[2],
-                            "path_pattern": r[3],
-                            "sample_count": r[4],
-                            "updated_at": r[5],
+                            "rule_text": r[1],
+                            "source_signal": r[2],
+                            "category": r[3],
+                            "path_pattern": r[4],
+                            "sample_count": r[5],
+                            "active": bool(r[6]),
+                            "status": r[7],
+                            "created_by": r[8],
+                            "created_at": r[9],
+                            "updated_at": r[10],
                         }
                     )
             finally:

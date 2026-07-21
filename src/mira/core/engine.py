@@ -397,8 +397,11 @@ class ReviewEngine:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
         # Round 2+ raises the comment threshold so we converge instead of
-        # dripping new findings on every push.
+        # dripping new findings on every push. review-rest is a continuation of
+        # round 1 onto never-reviewed files, so it stays round 1 (full
+        # thresholds, full diff) even though the first pass left threads behind.
         review_round = 1
+        is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
         try:
             if self.bot_name and self.provider is not None:
@@ -406,7 +409,7 @@ class ReviewEngine:
                     pr_info,
                     self.bot_name,
                 )
-                if all_bot_threads:
+                if all_bot_threads and not is_review_rest:
                     review_round = 2
                 resolved_thread_dicts = [
                     {
@@ -429,6 +432,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 if last_sha and last_sha != pr_info.head_sha:
                     incremental = await self.provider.get_compare_diff(
@@ -573,6 +577,16 @@ class ReviewEngine:
                         await self.provider.post_comment(pr_info, markdown)
                 except Exception as exc:
                     logger.warning("Failed to post walkthrough comment: %s", exc)
+        elif placeholder_id is not None:
+            # No walkthrough (all files excluded, empty diff, or generation
+            # failed) — finalize the placeholder so it doesn't sit on
+            # "Reviewing this PR…" forever.
+            reason = result.skipped_reason or "Walkthrough was not generated."
+            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+            try:
+                await self.provider.update_comment(pr_info, placeholder_id, markdown)
+            except Exception as exc:
+                logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",
@@ -625,7 +639,7 @@ class ReviewEngine:
                 tokens_used=result.token_usage.get("total_tokens", 0),
                 duration_ms=duration,
                 categories=categories,
-                author_username=pr_info.author_username,
+                author=pr_info.author,
                 author_avatar_url=pr_info.author_avatar_url,
                 reviewed_paths=reviewed_paths_json,
             )
@@ -670,6 +684,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 prior_reviewed = set(prior.reviewed_paths) if prior else set()
                 prior_skipped = set(prior.skipped_paths) if prior else set()
@@ -684,7 +699,8 @@ class ReviewEngine:
                         reviewed_paths=sorted(new_reviewed),
                         skipped_paths=sorted(new_skipped),
                         chunk_index=(prior.chunk_index + 1) if prior else 1,
-                    )
+                    ),
+                    platform=pr_info.platform,
                 )
             except Exception as progress_err:
                 logger.debug("Failed to persist review progress: %s", progress_err)
@@ -702,6 +718,7 @@ class ReviewEngine:
                     pr_info.repo,
                     pr_info.number,
                     pr_info.head_sha,
+                    platform=pr_info.platform,
                 )
             except Exception as exc:
                 logger.debug("Failed to record last reviewed SHA: %s", exc)
@@ -947,14 +964,14 @@ class ReviewEngine:
                 _rules_store.close()
 
                 try:
-                    from mira.dashboard.db import AppDatabase
+                    from mira.dashboard.api import _app_db
 
-                    _app_db = AppDatabase()
-                    for rule_text in _app_db.get_global_rules_text():
-                        parts = rule_text.split(": ", 1)
-                        title = parts[0] if len(parts) > 1 else "Global Rule"
-                        content = parts[1] if len(parts) > 1 else rule_text
-                        custom_rules.insert(0, {"title": title, "content": content})
+                    if _app_db is not None:
+                        for rule_text in _app_db.get_global_rules_text():
+                            parts = rule_text.split(": ", 1)
+                            title = parts[0] if len(parts) > 1 else "Global Rule"
+                            content = parts[1] if len(parts) > 1 else rule_text
+                            custom_rules.insert(0, {"title": title, "content": content})
                 except Exception:
                     pass
         except Exception:
