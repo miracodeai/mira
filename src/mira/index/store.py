@@ -746,6 +746,37 @@ class IndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    def list_review_events_for_pr(self, pr_number: int) -> list[ReviewEvent]:
+        rows = self._conn.execute(
+            "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
+            "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
+            "categories, created_at, author_avatar_url, reviewed_paths "
+            "FROM review_events WHERE pr_number = ? ORDER BY created_at DESC",
+            (pr_number,),
+        ).fetchall()
+        return [
+            ReviewEvent(
+                id=r[0],
+                pr_number=r[1],
+                pr_title=r[2],
+                pr_url=r[3],
+                author=r[4],
+                comments_posted=r[5],
+                blockers=r[6],
+                warnings=r[7],
+                suggestions=r[8],
+                files_reviewed=r[9],
+                lines_changed=r[10],
+                tokens_used=r[11],
+                duration_ms=r[12],
+                categories=r[13],
+                created_at=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
     def add_review_comments(
         self, review_id: int, pr_number: int, pr_url: str, comments: list[dict]
     ) -> None:

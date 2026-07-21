@@ -512,7 +512,6 @@ export function ActivityPage() {
                   stroke="var(--color-reviews)"
                   fill="url(#fillReviews)"
                   strokeWidth={2}
-                  stackId="a"
                 />
                 <Area
                   type="monotone"
@@ -520,7 +519,6 @@ export function ActivityPage() {
                   stroke="var(--color-comments)"
                   fill="url(#fillComments)"
                   strokeWidth={2}
-                  stackId="a"
                 />
                 <ChartLegend content={<ChartLegendContent />} />
               </AreaChart>
@@ -867,6 +865,7 @@ export function ActivityPage() {
                 {(() => {
                   const matched =
                     detail &&
+                    detail.owner === selected.owner &&
                     detail.pr_number === selected.pr_number &&
                     detail.repo === selected.repo
                       ? detail

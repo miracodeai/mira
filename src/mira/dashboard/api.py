@@ -1284,7 +1284,7 @@ def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetail
     import json as _json
 
     with _open_store(owner, repo) as store:
-        all_events = [e for e in store.list_review_events(limit=500) if e.pr_number == pr_number]
+        all_events = store.list_review_events_for_pr(pr_number)
         if not all_events:
             raise HTTPException(status_code=404, detail="No reviews for this PR")
 

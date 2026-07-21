@@ -862,6 +862,38 @@ class PgIndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    def list_review_events_for_pr(self, pr_number: int) -> list[ReviewEvent]:
+        rows = self._fetchall(
+            "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
+            "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
+            "categories, created_at, author, author_avatar_url, reviewed_paths "
+            "FROM review_events WHERE owner=%s AND repo=%s AND pr_number=%s "
+            "ORDER BY created_at DESC",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            ReviewEvent(
+                id=r[0],
+                pr_number=r[1],
+                pr_title=r[2],
+                pr_url=r[3],
+                comments_posted=r[4],
+                blockers=r[5],
+                warnings=r[6],
+                suggestions=r[7],
+                files_reviewed=r[8],
+                lines_changed=r[9],
+                tokens_used=r[10],
+                duration_ms=r[11],
+                categories=r[12],
+                created_at=r[13],
+                author=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
     def add_review_comments(
         self, review_id: int, pr_number: int, pr_url: str, comments: list[dict]
     ) -> None:
