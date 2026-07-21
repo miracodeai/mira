@@ -83,6 +83,39 @@ CREATE TABLE IF NOT EXISTS review_events (
     tokens_used INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     categories TEXT NOT NULL DEFAULT '',
+    author_avatar_url TEXT NOT NULL DEFAULT '',
+    reviewed_paths TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+-- Individual review comments Mira posted (one row per comment, per pass).
+CREATE TABLE IF NOT EXISTS review_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id INTEGER NOT NULL DEFAULT 0,
+    pr_number INTEGER NOT NULL DEFAULT 0,
+    pr_url TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    line INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    github_comment_id INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0
+);
+
+-- Human replies on a PR (for the conversation timeline).
+CREATE TABLE IF NOT EXISTS pr_replies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pr_number INTEGER NOT NULL DEFAULT 0,
+    pr_url TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    author_avatar_url TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    comment_path TEXT NOT NULL DEFAULT '',
+    comment_line INTEGER NOT NULL DEFAULT 0,
+    github_comment_id INTEGER NOT NULL DEFAULT 0,
+    in_reply_to_id INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT 0
 );
 
@@ -218,6 +251,39 @@ class ReviewEvent:
     duration_ms: int
     categories: str  # comma-separated: "bug,security,performance"
     created_at: float = 0.0
+    author_avatar_url: str = ""
+    reviewed_paths: str = ""  # JSON array of filenames reviewed this pass
+
+
+@dataclass
+class ReviewCommentRow:
+    id: int
+    review_id: int
+    pr_number: int
+    pr_url: str
+    path: str
+    line: int
+    severity: str
+    category: str
+    title: str
+    body: str
+    github_comment_id: int = 0
+    created_at: float = 0.0
+
+
+@dataclass
+class ReplyRow:
+    id: int
+    pr_number: int
+    pr_url: str
+    author: str
+    author_avatar_url: str
+    body: str
+    comment_path: str
+    comment_line: int
+    github_comment_id: int = 0
+    in_reply_to_id: int = 0
+    created_at: float = 0.0
 
 
 @dataclass
@@ -307,14 +373,13 @@ class IndexStore(_StoreSharedMixin):
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)").fetchall()}
         if "loc" not in cols:
             self._conn.execute("ALTER TABLE files ADD COLUMN loc INTEGER NOT NULL DEFAULT 0")
-        # PR-author attribution columns added for contributor analytics.
-        review_cols = {
-            r[1] for r in self._conn.execute("PRAGMA table_info(review_events)").fetchall()
-        }
-        if "author" not in review_cols:
-            self._conn.execute(
-                "ALTER TABLE review_events ADD COLUMN author TEXT NOT NULL DEFAULT ''"
-            )
+        # Columns added to review_events post-schema (PR author + reviewed files).
+        re_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(review_events)").fetchall()}
+        for col in ("author", "author_avatar_url", "reviewed_paths"):
+            if col not in re_cols:
+                self._conn.execute(
+                    f"ALTER TABLE review_events ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
+                )
         feedback_cols = {
             r[1] for r in self._conn.execute("PRAGMA table_info(feedback_events)").fetchall()
         }
@@ -599,14 +664,16 @@ class IndexStore(_StoreSharedMixin):
         categories: str = "",
         created_at: float | None = None,
         author: str = "",
+        author_avatar_url: str = "",
+        reviewed_paths: str = "",
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
         self._conn.execute(
             "INSERT INTO review_events "
             "(pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "categories, author_avatar_url, reviewed_paths, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pr_number,
                 pr_title,
@@ -621,6 +688,8 @@ class IndexStore(_StoreSharedMixin):
                 tokens_used,
                 duration_ms,
                 categories,
+                author_avatar_url,
+                reviewed_paths,
                 now,
             ),
         )
@@ -642,13 +711,15 @@ class IndexStore(_StoreSharedMixin):
             duration_ms=duration_ms,
             categories=categories,
             created_at=now,
+            author_avatar_url=author_avatar_url,
+            reviewed_paths=reviewed_paths,
         )
 
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._conn.execute(
             "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at "
+            "categories, created_at, author_avatar_url, reviewed_paths "
             "FROM review_events ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -669,6 +740,171 @@ class IndexStore(_StoreSharedMixin):
                 duration_ms=r[12],
                 categories=r[13],
                 created_at=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
+    def list_review_events_for_pr(self, pr_number: int) -> list[ReviewEvent]:
+        rows = self._conn.execute(
+            "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
+            "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
+            "categories, created_at, author_avatar_url, reviewed_paths "
+            "FROM review_events WHERE pr_number = ? ORDER BY created_at DESC",
+            (pr_number,),
+        ).fetchall()
+        return [
+            ReviewEvent(
+                id=r[0],
+                pr_number=r[1],
+                pr_title=r[2],
+                pr_url=r[3],
+                author=r[4],
+                comments_posted=r[5],
+                blockers=r[6],
+                warnings=r[7],
+                suggestions=r[8],
+                files_reviewed=r[9],
+                lines_changed=r[10],
+                tokens_used=r[11],
+                duration_ms=r[12],
+                categories=r[13],
+                created_at=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
+    def add_review_comments(
+        self, review_id: int, pr_number: int, pr_url: str, comments: list[dict]
+    ) -> None:
+        """Persist the individual comments Mira posted for a review pass.
+
+        Each dict carries: path, line, severity, category, title, body, and
+        optionally github_comment_id.
+        """
+        if not comments:
+            return
+        now = time.time()
+        self._conn.executemany(
+            "INSERT INTO review_comments "
+            "(review_id, pr_number, pr_url, path, line, severity, category, "
+            "title, body, github_comment_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    review_id,
+                    pr_number,
+                    pr_url,
+                    c.get("path", ""),
+                    c.get("line", 0),
+                    c.get("severity", ""),
+                    c.get("category", ""),
+                    c.get("title", ""),
+                    c.get("body", ""),
+                    c.get("github_comment_id", 0),
+                    now,
+                )
+                for c in comments
+            ],
+        )
+        self._conn.commit()
+
+    def list_review_comments(self, pr_number: int) -> list[ReviewCommentRow]:
+        rows = self._conn.execute(
+            "SELECT id, review_id, pr_number, pr_url, path, line, severity, category, "
+            "title, body, github_comment_id, created_at "
+            "FROM review_comments WHERE pr_number = ? ORDER BY created_at",
+            (pr_number,),
+        ).fetchall()
+        return [
+            ReviewCommentRow(
+                id=r[0],
+                review_id=r[1],
+                pr_number=r[2],
+                pr_url=r[3],
+                path=r[4],
+                line=r[5],
+                severity=r[6],
+                category=r[7],
+                title=r[8],
+                body=r[9],
+                github_comment_id=r[10],
+                created_at=r[11],
+            )
+            for r in rows
+        ]
+
+    def record_reply(
+        self,
+        pr_number: int,
+        pr_url: str,
+        author: str,
+        body: str,
+        author_avatar_url: str = "",
+        comment_path: str = "",
+        comment_line: int = 0,
+        github_comment_id: int = 0,
+        in_reply_to_id: int = 0,
+        created_at: float | None = None,
+    ) -> ReplyRow:
+        """Record a human reply on a PR for the conversation timeline."""
+        now = created_at if created_at is not None else time.time()
+        cur = self._conn.execute(
+            "INSERT INTO pr_replies "
+            "(pr_number, pr_url, author, author_avatar_url, body, comment_path, "
+            "comment_line, github_comment_id, in_reply_to_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                pr_number,
+                pr_url,
+                author,
+                author_avatar_url,
+                body,
+                comment_path,
+                comment_line,
+                github_comment_id,
+                in_reply_to_id,
+                now,
+            ),
+        )
+        self._conn.commit()
+        return ReplyRow(
+            id=cur.lastrowid or 0,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            author=author,
+            author_avatar_url=author_avatar_url,
+            body=body,
+            comment_path=comment_path,
+            comment_line=comment_line,
+            github_comment_id=github_comment_id,
+            in_reply_to_id=in_reply_to_id,
+            created_at=now,
+        )
+
+    def list_replies(self, pr_number: int) -> list[ReplyRow]:
+        rows = self._conn.execute(
+            "SELECT id, pr_number, pr_url, author, author_avatar_url, body, "
+            "comment_path, comment_line, github_comment_id, in_reply_to_id, created_at "
+            "FROM pr_replies WHERE pr_number = ? ORDER BY created_at",
+            (pr_number,),
+        ).fetchall()
+        return [
+            ReplyRow(
+                id=r[0],
+                pr_number=r[1],
+                pr_url=r[2],
+                author=r[3],
+                author_avatar_url=r[4],
+                body=r[5],
+                comment_path=r[6],
+                comment_line=r[7],
+                github_comment_id=r[8],
+                in_reply_to_id=r[9],
+                created_at=r[10],
             )
             for r in rows
         ]

@@ -170,11 +170,54 @@ export interface ReviewEventModel {
 export interface ActivityEventModel extends ReviewEventModel {
   owner: string
   repo: string
+  author_username: string
+  author_avatar_url: string
 }
 
 export interface ActivityResponse {
   events: ActivityEventModel[]
   repos: string[]
+}
+
+export interface ReviewCommentModel {
+  id: number
+  review_id: number
+  path: string
+  line: number
+  severity: string
+  category: string
+  title: string
+  body: string
+  github_comment_id: number
+  created_at: number
+}
+
+export interface PRReplyModel {
+  id: number
+  author: string
+  author_avatar_url: string
+  body: string
+  comment_path: string
+  comment_line: number
+  in_reply_to_id: number
+  created_at: number
+}
+
+export interface ActivityReviewModel extends ReviewEventModel {
+  reviewed_paths: string[]
+  comments: ReviewCommentModel[]
+}
+
+export interface ActivityDetailModel {
+  owner: string
+  repo: string
+  pr_number: number
+  pr_title: string
+  pr_url: string
+  author_username: string
+  author_avatar_url: string
+  reviews: ActivityReviewModel[]
+  replies: PRReplyModel[]
 }
 
 export interface ReviewStatsModel {

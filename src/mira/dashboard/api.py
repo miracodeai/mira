@@ -205,11 +205,56 @@ class ReviewEventModel(BaseModel):
 class ActivityEventModel(ReviewEventModel):
     owner: str
     repo: str
+    author_username: str = ""
+    author_avatar_url: str = ""
 
 
 class ActivityResponse(BaseModel):
     events: list[ActivityEventModel]
     repos: list[str]
+
+
+class ReviewCommentModel(BaseModel):
+    id: int
+    review_id: int
+    path: str
+    line: int
+    severity: str
+    category: str
+    title: str
+    body: str
+    github_comment_id: int = 0
+    created_at: float
+
+
+class PRReplyModel(BaseModel):
+    id: int
+    author: str
+    author_avatar_url: str
+    body: str
+    comment_path: str
+    comment_line: int
+    in_reply_to_id: int
+    created_at: float
+
+
+class ActivityReviewModel(ReviewEventModel):
+    """One review pass plus the individual comments it posted."""
+
+    reviewed_paths: list[str] = []
+    comments: list[ReviewCommentModel] = []
+
+
+class ActivityDetailModel(BaseModel):
+    owner: str
+    repo: str
+    pr_number: int
+    pr_title: str
+    pr_url: str
+    author_username: str = ""
+    author_avatar_url: str = ""
+    reviews: list[ActivityReviewModel]
+    replies: list[PRReplyModel]
 
 
 class ReviewStatsModel(BaseModel):
@@ -1229,6 +1274,96 @@ import mira.dashboard.routers.relationships  # noqa: E402,F401
 import mira.dashboard.routers.repos  # noqa: E402,F401
 import mira.dashboard.routers.rules  # noqa: E402,F401
 import mira.dashboard.routers.vulnerabilities  # noqa: E402,F401
+
+
+@router.get("/api/activity/{owner}/{repo}/{pr_number}", response_model=ActivityDetailModel)
+def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetailModel:
+    """Full detail for a single PR: every review pass (with the comments it
+    posted and the files it reviewed) plus human replies — i.e. the data the
+    activity timeline renders."""
+    import json as _json
+
+    with _open_store(owner, repo) as store:
+        all_events = store.list_review_events_for_pr(pr_number)
+        # Guard against a mis-scoped store: per-repo SQLite DBs have no
+        # owner/repo columns, so validate via the pr_url each event recorded.
+        marker = f"/{owner}/{repo}/"
+        all_events = [e for e in all_events if not e.pr_url or marker in e.pr_url]
+        if not all_events:
+            raise HTTPException(status_code=404, detail="No reviews for this PR")
+
+        comments_by_review: dict[int, list[ReviewCommentModel]] = {}
+        for c in store.list_review_comments(pr_number):
+            comments_by_review.setdefault(c.review_id, []).append(
+                ReviewCommentModel(
+                    id=c.id,
+                    review_id=c.review_id,
+                    path=c.path,
+                    line=c.line,
+                    severity=c.severity,
+                    category=c.category,
+                    title=c.title,
+                    body=c.body,
+                    github_comment_id=c.github_comment_id,
+                    created_at=c.created_at,
+                )
+            )
+
+        def _paths(raw: str) -> list[str]:
+            try:
+                return _json.loads(raw) if raw else []
+            except Exception:
+                return []
+
+        reviews = [
+            ActivityReviewModel(
+                id=e.id,
+                pr_number=e.pr_number,
+                pr_title=e.pr_title,
+                pr_url=e.pr_url,
+                comments_posted=e.comments_posted,
+                blockers=e.blockers,
+                warnings=e.warnings,
+                suggestions=e.suggestions,
+                files_reviewed=e.files_reviewed,
+                lines_changed=e.lines_changed,
+                tokens_used=e.tokens_used,
+                duration_ms=e.duration_ms,
+                categories=e.categories,
+                created_at=e.created_at,
+                reviewed_paths=_paths(e.reviewed_paths),
+                comments=comments_by_review.get(e.id, []),
+            )
+            for e in all_events
+        ]
+
+        replies = [
+            PRReplyModel(
+                id=r.id,
+                author=r.author,
+                author_avatar_url=r.author_avatar_url,
+                body=r.body,
+                comment_path=r.comment_path,
+                comment_line=r.comment_line,
+                in_reply_to_id=r.in_reply_to_id,
+                created_at=r.created_at,
+            )
+            for r in store.list_replies(pr_number)
+        ]
+
+        latest = all_events[0]
+        return ActivityDetailModel(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_title=latest.pr_title,
+            pr_url=latest.pr_url,
+            author_username=latest.author,
+            author_avatar_url=latest.author_avatar_url,
+            reviews=reviews,
+            replies=replies,
+        )
+
 
 # Wire dashboard routes + middleware onto the standalone app, after all
 # @router.<verb>(...) decorators above have populated `router`.

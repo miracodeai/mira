@@ -35,8 +35,13 @@ class BaseProvider(abc.ABC):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
-    ) -> None:
-        """Post review comments to a pull request."""
+    ) -> list[int]:
+        """Post review comments to a pull request.
+
+        Returns the GitHub comment IDs of the posted inline comments, aligned
+        to ``result.comments`` (0 where the ID couldn't be determined). Used to
+        link human replies back to the exact comment they answer.
+        """
 
     @abc.abstractmethod
     async def post_comment(self, pr_info: PRInfo, body: str) -> None:

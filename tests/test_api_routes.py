@@ -20,6 +20,7 @@ EXPECTED_ROUTES = {
     ("/api/admin/webhooks/{webhook_id}", "PUT"),
     ("/api/admin/webhooks/{webhook_id}/test", "POST"),
     ("/api/activity", "GET"),
+    ("/api/activity/{owner}/{repo}/{pr_number}", "GET"),
     ("/api/contributors", "GET"),
     ("/api/contributors/summary", "GET"),
     ("/api/contributors/backfill/status", "GET"),

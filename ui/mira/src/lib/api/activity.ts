@@ -1,5 +1,5 @@
 import { fetchJson } from "./http"
-import type { ActivityResponse } from "./types"
+import type { ActivityDetailModel, ActivityResponse } from "./types"
 
 // Org-wide feed of review events across all repos.
 export const activityApi = {
@@ -13,4 +13,10 @@ export const activityApi = {
       query ? `/api/activity?${query}` : "/api/activity"
     )
   },
+
+  // Full detail (reviews + comments + files + human replies) for one PR.
+  getActivityDetail: (owner: string, repo: string, prNumber: number) =>
+    fetchJson<ActivityDetailModel>(
+      `/api/activity/${owner}/${repo}/${prNumber}`
+    ),
 }

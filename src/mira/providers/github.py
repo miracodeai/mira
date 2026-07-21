@@ -19,6 +19,7 @@ from mira.models import (
     FileHistoryEntry,
     HumanReviewComment,
     PRInfo,
+    ReviewComment,
     ReviewResult,
     UnresolvedThread,
 )
@@ -160,6 +161,7 @@ class GitHubProvider(BaseProvider):
         def _fetch() -> PRInfo:
             gh_repo = self._github.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
+            user = pr.user
             return PRInfo(
                 title=pr.title or "",
                 description=pr.body or "",
@@ -170,7 +172,8 @@ class GitHubProvider(BaseProvider):
                 owner=owner,
                 repo=repo,
                 head_sha=pr.head.sha or "",
-                author=(pr.user.login if pr.user else ""),
+                author=(user.login or "") if user else "",
+                author_avatar_url=(user.avatar_url or "") if user else "",
             )
 
         try:
@@ -244,9 +247,13 @@ class GitHubProvider(BaseProvider):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
-    ) -> None:
+    ) -> list[int]:
         if not result.comments:
-            return
+            return []
+
+        # The line GitHub anchors a comment to (the end line for multi-line).
+        def _anchor(c: ReviewComment) -> int:
+            return c.end_line if (c.end_line and c.end_line > c.line) else c.line
 
         review_comments: list[dict[str, str | int]] = []
         for comment in result.comments:
@@ -270,7 +277,7 @@ class GitHubProvider(BaseProvider):
             review_body += _format_key_issues(result.key_issues)
 
         @_retry_transient
-        def _post() -> None:
+        def _post() -> list[int]:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
 
@@ -279,14 +286,30 @@ class GitHubProvider(BaseProvider):
                 raise ProviderError("PR has no commits")
             latest_commit = commits[-1]
 
+            # GitHub comment IDs aligned to result.comments (0 = unknown).
+            ids = [0] * len(result.comments)
+
             try:
-                pr.create_review(
+                review = pr.create_review(
                     commit=latest_commit,
                     body=review_body,
                     event="COMMENT",
                     comments=review_comments,  # type: ignore[arg-type]
                 )
-                return
+                # Map the posted comments back to ours by (path, anchored line)
+                # so human replies can later link to the exact comment.
+                try:
+                    by_loc: dict[tuple[str, int], int] = {}
+                    for posted_c in review.get_comments():
+                        ln = posted_c.line
+                        if ln is None:
+                            ln = getattr(posted_c, "original_line", 0) or 0
+                        by_loc[(posted_c.path, ln)] = posted_c.id
+                    for i, c in enumerate(result.comments):
+                        ids[i] = by_loc.get((c.path, _anchor(c)), 0)
+                except Exception:
+                    logger.debug("Could not map review comment IDs", exc_info=True)
+                return ids
             except GithubException as exc:
                 if exc.status != 422:
                     raise
@@ -299,7 +322,7 @@ class GitHubProvider(BaseProvider):
             # than /reviews. Inlines aren't grouped under a review object,
             # but they still show up on the PR.
             posted = 0
-            for rc in review_comments:
+            for i, rc in enumerate(review_comments):
                 try:
                     kwargs: dict = {
                         "body": rc["body"],
@@ -317,7 +340,8 @@ class GitHubProvider(BaseProvider):
                         kwargs.get("line"),
                         len(kwargs.get("body", "")),
                     )
-                    pr.create_review_comment(**kwargs)
+                    created = pr.create_review_comment(**kwargs)
+                    ids[i] = getattr(created, "id", 0) or 0
                     posted += 1
                 except GithubException as exc:
                     if exc.status == 422:
@@ -347,9 +371,10 @@ class GitHubProvider(BaseProvider):
                     )
 
             logger.info("Individual fallback: posted %d/%d comments", posted, len(review_comments))
+            return ids
 
         try:
-            await asyncio.to_thread(_post)
+            return await asyncio.to_thread(_post)
         except ProviderError:
             raise
         except Exception as e:

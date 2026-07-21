@@ -343,6 +343,32 @@ def _schedule_contributor_backfill(
     asyncio.create_task(_run())
 
 
+def _record_human_reply(owner: str, repo: str, number: int, pr_url: str, comment: dict) -> None:
+    """Persist a human reply for the activity conversation timeline.
+
+    Best-effort: any failure is swallowed so it never breaks reply handling.
+    """
+    try:
+        user = comment.get("user", {}) or {}
+        store = IndexStore.open(owner, repo)
+        try:
+            store.record_reply(
+                pr_number=number,
+                pr_url=pr_url,
+                author=user.get("login", ""),
+                author_avatar_url=user.get("avatar_url", ""),
+                body=comment.get("body", ""),
+                comment_path=comment.get("path", ""),
+                comment_line=comment.get("original_line", 0) or comment.get("line", 0),
+                github_comment_id=comment.get("id", 0) or 0,
+                in_reply_to_id=comment.get("in_reply_to_id", 0) or 0,
+            )
+        finally:
+            store.close()
+    except Exception:
+        logger.debug("Failed to record human reply", exc_info=True)
+
+
 async def _handle_thread_freeform_reply(
     payload: dict[str, Any],
     app_auth: GitHubAppAuth,
@@ -371,6 +397,10 @@ async def _handle_thread_freeform_reply(
             owner=owner,
             repo=repo,
         )
+
+        # Record the human reply for the activity conversation timeline
+        # (best-effort — never let bookkeeping break the reply handler).
+        _record_human_reply(owner, repo, number, pr_info.url, comment)
 
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         user_reply = strip_mentions(comment["body"], names)
@@ -604,6 +634,15 @@ async def handle_thread_reject(
         owner = payload["repository"]["owner"]["login"]
         repo = payload["repository"]["name"]
         number = payload["pull_request"]["number"]
+
+        # Capture the human reply for the activity conversation timeline.
+        _record_human_reply(
+            owner,
+            repo,
+            number,
+            f"https://github.com/{owner}/{repo}/pull/{number}",
+            payload["comment"],
+        )
 
         provider = create_provider("github", token)
         from mira.models import PRInfo as _PRInfo

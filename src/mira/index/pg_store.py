@@ -20,6 +20,8 @@ from mira.index.store import (
     FeedbackEventRow,
     FileSummary,
     LearnedRuleRow,
+    ReplyRow,
+    ReviewCommentRow,
     ReviewContext,
     ReviewEvent,
     SymbolInfo,
@@ -105,6 +107,42 @@ CREATE TABLE IF NOT EXISTS review_events (
     tokens_used INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     categories TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    author_avatar_url TEXT NOT NULL DEFAULT '',
+    reviewed_paths TEXT NOT NULL DEFAULT '',
+    created_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS review_comments (
+    id SERIAL PRIMARY KEY,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    review_id INTEGER NOT NULL DEFAULT 0,
+    pr_number INTEGER NOT NULL DEFAULT 0,
+    pr_url TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    line INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    github_comment_id BIGINT NOT NULL DEFAULT 0,
+    created_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS pr_replies (
+    id SERIAL PRIMARY KEY,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL DEFAULT 0,
+    pr_url TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    author_avatar_url TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    comment_path TEXT NOT NULL DEFAULT '',
+    comment_line INTEGER NOT NULL DEFAULT 0,
+    github_comment_id BIGINT NOT NULL DEFAULT 0,
+    in_reply_to_id BIGINT NOT NULL DEFAULT 0,
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
@@ -220,6 +258,11 @@ def _get_conn(url: str) -> Any:
                 cur.execute(
                     "ALTER TABLE files ADD COLUMN IF NOT EXISTS loc INTEGER NOT NULL DEFAULT 0"
                 )
+                for col in ("author", "author_avatar_url", "reviewed_paths"):
+                    cur.execute(
+                        f"ALTER TABLE review_events ADD COLUMN IF NOT EXISTS {col} "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
                 cur.execute(
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
                     "TEXT NOT NULL DEFAULT 'approved'"
@@ -732,14 +775,18 @@ class PgIndexStore(_StoreSharedMixin):
         duration_ms: int = 0,
         categories: str = "",
         created_at: float | None = None,
+        author: str = "",
+        author_avatar_url: str = "",
+        reviewed_paths: str = "",
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO review_events (owner, repo, pr_number, pr_title, pr_url, "
                 "comments_posted, blockers, warnings, suggestions, files_reviewed, "
-                "lines_changed, tokens_used, duration_ms, categories, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "lines_changed, tokens_used, duration_ms, categories, author, "
+                "author_avatar_url, reviewed_paths, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "RETURNING id",
                 (
                     self._owner,
@@ -756,6 +803,9 @@ class PgIndexStore(_StoreSharedMixin):
                     tokens_used,
                     duration_ms,
                     categories,
+                    author,
+                    author_avatar_url,
+                    reviewed_paths,
                     now,
                 ),
             )
@@ -775,13 +825,16 @@ class PgIndexStore(_StoreSharedMixin):
             duration_ms=duration_ms,
             categories=categories,
             created_at=now,
+            author=author,
+            author_avatar_url=author_avatar_url,
+            reviewed_paths=reviewed_paths,
         )
 
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at "
+            "categories, created_at, author, author_avatar_url, reviewed_paths "
             "FROM review_events WHERE owner=%s AND repo=%s "
             "ORDER BY created_at DESC LIMIT %s",
             (self._owner, self._repo, limit),
@@ -802,6 +855,172 @@ class PgIndexStore(_StoreSharedMixin):
                 duration_ms=r[11],
                 categories=r[12],
                 created_at=r[13],
+                author=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
+    def list_review_events_for_pr(self, pr_number: int) -> list[ReviewEvent]:
+        rows = self._fetchall(
+            "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
+            "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
+            "categories, created_at, author, author_avatar_url, reviewed_paths "
+            "FROM review_events WHERE owner=%s AND repo=%s AND pr_number=%s "
+            "ORDER BY created_at DESC",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            ReviewEvent(
+                id=r[0],
+                pr_number=r[1],
+                pr_title=r[2],
+                pr_url=r[3],
+                comments_posted=r[4],
+                blockers=r[5],
+                warnings=r[6],
+                suggestions=r[7],
+                files_reviewed=r[8],
+                lines_changed=r[9],
+                tokens_used=r[10],
+                duration_ms=r[11],
+                categories=r[12],
+                created_at=r[13],
+                author=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
+    def add_review_comments(
+        self, review_id: int, pr_number: int, pr_url: str, comments: list[dict]
+    ) -> None:
+        if not comments:
+            return
+        now = time.time()
+        with self._conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO review_comments (owner, repo, review_id, pr_number, pr_url, "
+                "path, line, severity, category, title, body, github_comment_id, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                [
+                    (
+                        self._owner,
+                        self._repo,
+                        review_id,
+                        pr_number,
+                        pr_url,
+                        c.get("path", ""),
+                        c.get("line", 0),
+                        c.get("severity", ""),
+                        c.get("category", ""),
+                        c.get("title", ""),
+                        c.get("body", ""),
+                        c.get("github_comment_id", 0),
+                        now,
+                    )
+                    for c in comments
+                ],
+            )
+
+    def list_review_comments(self, pr_number: int) -> list[ReviewCommentRow]:
+        rows = self._fetchall(
+            "SELECT id, review_id, pr_number, pr_url, path, line, severity, category, "
+            "title, body, github_comment_id, created_at "
+            "FROM review_comments WHERE owner=%s AND repo=%s AND pr_number=%s "
+            "ORDER BY created_at",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            ReviewCommentRow(
+                id=r[0],
+                review_id=r[1],
+                pr_number=r[2],
+                pr_url=r[3],
+                path=r[4],
+                line=r[5],
+                severity=r[6],
+                category=r[7],
+                title=r[8],
+                body=r[9],
+                github_comment_id=r[10],
+                created_at=r[11],
+            )
+            for r in rows
+        ]
+
+    def record_reply(
+        self,
+        pr_number: int,
+        pr_url: str,
+        author: str,
+        body: str,
+        author_avatar_url: str = "",
+        comment_path: str = "",
+        comment_line: int = 0,
+        github_comment_id: int = 0,
+        in_reply_to_id: int = 0,
+        created_at: float | None = None,
+    ) -> ReplyRow:
+        now = created_at if created_at is not None else time.time()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO pr_replies (owner, repo, pr_number, pr_url, author, "
+                "author_avatar_url, body, comment_path, comment_line, github_comment_id, "
+                "in_reply_to_id, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (
+                    self._owner,
+                    self._repo,
+                    pr_number,
+                    pr_url,
+                    author,
+                    author_avatar_url,
+                    body,
+                    comment_path,
+                    comment_line,
+                    github_comment_id,
+                    in_reply_to_id,
+                    now,
+                ),
+            )
+            row_id = cur.fetchone()[0]
+        return ReplyRow(
+            id=row_id,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            author=author,
+            author_avatar_url=author_avatar_url,
+            body=body,
+            comment_path=comment_path,
+            comment_line=comment_line,
+            github_comment_id=github_comment_id,
+            in_reply_to_id=in_reply_to_id,
+            created_at=now,
+        )
+
+    def list_replies(self, pr_number: int) -> list[ReplyRow]:
+        rows = self._fetchall(
+            "SELECT id, pr_number, pr_url, author, author_avatar_url, body, comment_path, "
+            "comment_line, github_comment_id, in_reply_to_id, created_at "
+            "FROM pr_replies WHERE owner=%s AND repo=%s AND pr_number=%s ORDER BY created_at",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            ReplyRow(
+                id=r[0],
+                pr_number=r[1],
+                pr_url=r[2],
+                author=r[3],
+                author_avatar_url=r[4],
+                body=r[5],
+                comment_path=r[6],
+                comment_line=r[7],
+                github_comment_id=r[8],
+                in_reply_to_id=r[9],
+                created_at=r[10],
             )
             for r in rows
         ]

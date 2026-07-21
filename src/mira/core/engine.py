@@ -595,6 +595,7 @@ class ReviewEngine:
             llm_resolved,
         )
 
+        posted_comment_ids: list[int] = []
         if result.comments:
             if self.dry_run:
                 logger.info(
@@ -603,13 +604,17 @@ class ReviewEngine:
                     pr_info.url,
                 )
             else:
-                await self.provider.post_review(pr_info, result, bot_name=self.bot_name)
+                posted_comment_ids = (
+                    await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
+                )
         else:
             logger.info("No code suggestions for PR %s", pr_info.url)
 
         result.thread_decisions = thread_decisions
 
         try:
+            import json as _json
+
             from mira.models import Severity
 
             store = IndexStore.open(pr_info.owner, pr_info.repo)
@@ -620,7 +625,8 @@ class ReviewEngine:
             )
             categories = ",".join(sorted({c.category for c in result.comments if c.category}))
             duration = int((_time.monotonic() - _review_start) * 1000)
-            store.record_review(
+            reviewed_paths_json = _json.dumps(result.reviewed_paths or [])
+            review_event = store.record_review(
                 pr_number=pr_info.number,
                 pr_title=pr_info.title,
                 pr_url=pr_info.url,
@@ -634,6 +640,31 @@ class ReviewEngine:
                 duration_ms=duration,
                 categories=categories,
                 author=pr_info.author,
+                author_avatar_url=pr_info.author_avatar_url,
+                reviewed_paths=reviewed_paths_json,
+            )
+            # Persist each comment Mira posted so the dashboard can show the
+            # actual review conversation, not just aggregate counts.
+            store.add_review_comments(
+                review_event.id,
+                pr_info.number,
+                pr_info.url,
+                [
+                    {
+                        "path": c.path,
+                        "line": c.line,
+                        "severity": c.severity.value
+                        if hasattr(c.severity, "value")
+                        else str(c.severity),
+                        "category": c.category,
+                        "title": c.title,
+                        "body": c.body,
+                        "github_comment_id": posted_comment_ids[i]
+                        if i < len(posted_comment_ids)
+                        else 0,
+                    }
+                    for i, c in enumerate(result.comments)
+                ],
             )
             try:
                 from mira.analysis.feedback import synthesize_rules

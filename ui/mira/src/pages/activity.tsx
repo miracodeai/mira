@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
-import { CartesianGrid, Line, LineChart, XAxis } from "recharts"
+import { Area, AreaChart, CartesianGrid, XAxis } from "recharts"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -20,6 +20,8 @@ import { GitHubIcon } from "@/components/ui/github-icon"
 import {
   type ChartConfig,
   ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart"
@@ -40,7 +42,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { api, type ActivityEventModel } from "@/lib/api"
+import {
+  api,
+  type ActivityDetailModel,
+  type ActivityEventModel,
+  type ActivityReviewModel,
+  type PRReplyModel,
+} from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 
@@ -91,6 +99,8 @@ type PRGroup = {
   pr_number: number
   pr_title: string
   pr_url: string
+  author_username: string
+  author_avatar_url: string
   reviews: ActivityEventModel[] // newest first
   latest: ActivityEventModel
   reviewCount: number
@@ -143,6 +153,8 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
       pr_number: latest.pr_number,
       pr_title: latest.pr_title,
       pr_url: latest.pr_url,
+      author_username: latest.author_username,
+      author_avatar_url: latest.author_avatar_url,
       reviews,
       latest,
       reviewCount: reviews.length,
@@ -233,6 +245,50 @@ function splitCategories(categories: string): string[] {
     .split(",")
     .map((c) => c.trim())
     .filter(Boolean)
+}
+
+function AuthorAvatar({
+  username,
+  avatarUrl,
+  className,
+}: {
+  username: string
+  avatarUrl?: string
+  className?: string
+}) {
+  const initial = (username || "?").charAt(0).toUpperCase()
+  return (
+    <span
+      title={username || undefined}
+      className={cn(
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-[10px] font-medium text-muted-foreground ring-1 ring-foreground/10",
+        className,
+      )}
+    >
+      {avatarUrl ? (
+        <img src={avatarUrl} alt={username} className="h-full w-full object-cover" />
+      ) : (
+        initial
+      )}
+    </span>
+  )
+}
+
+// Mira's identity mark — mirrors AuthorAvatar so a review pass is visually
+// distinct from a human reply in the timeline.
+function MiraMark({ className }: { className?: string }) {
+  return (
+    <span
+      title="Mira"
+      className={cn(
+        "inline-flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-primary/10 ring-1 ring-primary/20",
+        className,
+      )}
+    >
+      <img src="/logo.png" alt="Mira" className="hidden h-3.5 w-3.5 dark:block" />
+      <img src="/logo-light.png" alt="Mira" className="h-3.5 w-3.5 dark:hidden" />
+    </span>
+  )
 }
 
 function SeverityBadges({
@@ -329,6 +385,15 @@ export function ActivityPage() {
     [debouncedSearch, repo, refreshKey],
   )
 
+  // Full per-PR detail (reviews + comments + files + replies) for the panel.
+  const { data: detail, loading: detailLoading } = useAsync(
+    () =>
+      selected
+        ? api.getActivityDetail(selected.owner, selected.repo, selected.pr_number)
+        : Promise.resolve(null),
+    [selected?.owner, selected?.repo, selected?.pr_number],
+  )
+
   const events = useMemo(() => activity?.events ?? [], [activity?.events])
   // Keep the repo list stable across searches: prefer the unfiltered list.
   const repos = useMemo(() => activity?.repos ?? [], [activity?.repos])
@@ -418,10 +483,20 @@ export function ActivityPage() {
       <Card className="shrink-0">
         <CardContent className="pt-6">
           {chartLoading ? (
-            <Skeleton className="h-[140px] w-full" />
+            <Skeleton className="h-[160px] w-full" />
           ) : timeseries && timeseries.length > 0 ? (
-            <ChartContainer config={chartConfig} className="h-[140px] w-full">
-              <LineChart data={timeseries}>
+            <ChartContainer config={chartConfig} className="h-[160px] w-full">
+              <AreaChart data={timeseries} margin={{ left: 4, right: 4, top: 4 }}>
+                <defs>
+                  <linearGradient id="fillReviews" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="var(--color-reviews)" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="var(--color-reviews)" stopOpacity={0.05} />
+                  </linearGradient>
+                  <linearGradient id="fillComments" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="var(--color-comments)" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="var(--color-comments)" stopOpacity={0.05} />
+                  </linearGradient>
+                </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="date"
@@ -431,12 +506,25 @@ export function ActivityPage() {
                   tickFormatter={formatChartDate}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
-                <Line type="monotone" dataKey="reviews" stroke="var(--color-reviews)" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="comments" stroke="var(--color-comments)" strokeWidth={2} dot={false} />
-              </LineChart>
+                <Area
+                  type="monotone"
+                  dataKey="reviews"
+                  stroke="var(--color-reviews)"
+                  fill="url(#fillReviews)"
+                  strokeWidth={2}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="comments"
+                  stroke="var(--color-comments)"
+                  fill="url(#fillComments)"
+                  strokeWidth={2}
+                />
+                <ChartLegend content={<ChartLegendContent />} />
+              </AreaChart>
             </ChartContainer>
           ) : (
-            <div className="flex h-[140px] items-center justify-center text-sm text-muted-foreground">
+            <div className="flex h-[160px] items-center justify-center text-sm text-muted-foreground">
               No review activity yet.
             </div>
           )}
@@ -545,6 +633,7 @@ export function ActivityPage() {
                 <TableHeader className="sticky top-0 z-10 bg-background shadow-[0_1px_0_0_var(--border)]">
                   <TableRow>
                     <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} />
+                    <TableHead>Author</TableHead>
                     <SortHead label="PR" sortKey="pr_number" sort={sort} onSort={toggleSort} />
                     <SortHead label="Reviews" sortKey="reviews" sort={sort} onSort={toggleSort} />
                     <SortHead label="Last reviewed" sortKey="last_reviewed" sort={sort} onSort={toggleSort} />
@@ -563,6 +652,18 @@ export function ActivityPage() {
                     >
                       <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                         {g.owner}/{g.repo}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <AuthorAvatar
+                            username={g.author_username}
+                            avatarUrl={g.author_avatar_url}
+                            className="h-5 w-5"
+                          />
+                          <span className="truncate text-xs text-muted-foreground">
+                            {g.author_username || "—"}
+                          </span>
+                        </div>
                       </TableCell>
                       <TableCell className="max-w-xs">
                         <div className="flex items-center gap-2">
@@ -689,11 +790,23 @@ export function ActivityPage() {
                     <ExternalLink className="h-4 w-4" />
                   </a>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {selected.owner}/{selected.repo} ·{" "}
-                  {plural(selected.reviewCount, "review")} · last{" "}
-                  {relativeTime(selected.lastReviewedAt)}
-                </p>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <AuthorAvatar
+                    username={selected.author_username}
+                    avatarUrl={selected.author_avatar_url}
+                    className="h-5 w-5"
+                  />
+                  {selected.author_username && (
+                    <span className="font-medium text-foreground">
+                      {selected.author_username}
+                    </span>
+                  )}
+                  <span>
+                    {selected.owner}/{selected.repo} ·{" "}
+                    {plural(selected.reviewCount, "review")} · last{" "}
+                    {relativeTime(selected.lastReviewedAt)}
+                  </span>
+                </div>
               </div>
               <Button
                 variant="ghost"
@@ -744,12 +857,28 @@ export function ActivityPage() {
                 </div>
               )}
 
-              {/* Timeline of review passes */}
+              {/* Conversation timeline — review passes + human replies */}
               <div>
                 <h3 className="mb-4 text-xs font-medium uppercase text-muted-foreground">
                   Timeline
                 </h3>
-                <ReviewTimeline reviews={selected.reviews} />
+                {(() => {
+                  const matched =
+                    detail &&
+                    detail.owner === selected.owner &&
+                    detail.pr_number === selected.pr_number &&
+                    detail.repo === selected.repo
+                      ? detail
+                      : null
+                  if (!matched) {
+                    return (
+                      <div className="text-xs text-muted-foreground">
+                        {detailLoading ? "Loading timeline…" : "No timeline recorded."}
+                      </div>
+                    )
+                  }
+                  return <ConversationTimeline detail={matched} />
+                })()}
               </div>
             </div>
           </>
@@ -759,56 +888,235 @@ export function ActivityPage() {
   )
 }
 
-// Vertical timeline of a PR's review passes, newest first. The dot and the
-// connecting line live in one centered gutter column so the line always runs
-// straight through the middle of each dot.
-function ReviewTimeline({ reviews }: { reviews: ActivityEventModel[] }) {
+// Per-severity dot color for individual comments in the timeline.
+const SEV_DOT: Record<string, string> = {
+  blocker: "bg-destructive",
+  warning: "bg-amber-500",
+  suggestion: "bg-sky-500",
+  nitpick: "bg-sky-500",
+}
+
+// Map of github_comment_id -> human replies to that exact Mira comment.
+type RepliesByComment = Map<number, PRReplyModel[]>
+type ReviewThread = {
+  review: ActivityReviewModel
+  repliesByComment: RepliesByComment
+  looseReplies: PRReplyModel[] // replies not tied to a specific comment
+}
+
+// The timeline as threads — one node per review pass. Human replies are
+// nested under the exact Mira comment they answer (matched by
+// in_reply_to_id → comment.github_comment_id, GitHub-style). Replies we can't
+// tie to a comment fall back to the pass they most likely belong to.
+function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
+  const threads: ReviewThread[] = useMemo(() => {
+    // Which review pass owns each comment id.
+    const reviewIdForComment = new Map<number, number>()
+    for (const r of detail.reviews) {
+      for (const c of r.comments) {
+        if (c.github_comment_id) reviewIdForComment.set(c.github_comment_id, r.id)
+      }
+    }
+
+    const byComment: RepliesByComment = new Map()
+    const looseByReview = new Map<number, PRReplyModel[]>()
+    const passesAsc = [...detail.reviews].sort((a, b) => a.created_at - b.created_at)
+
+    for (const reply of detail.replies) {
+      const owns =
+        reply.in_reply_to_id && reviewIdForComment.has(reply.in_reply_to_id)
+      if (owns) {
+        const arr = byComment.get(reply.in_reply_to_id) ?? []
+        arr.push(reply)
+        byComment.set(reply.in_reply_to_id, arr)
+      } else if (passesAsc.length > 0) {
+        // Fallback: attach to the latest pass that precedes the reply.
+        let target = passesAsc[0]
+        for (const p of passesAsc) {
+          if (p.created_at <= reply.created_at) target = p
+          else break
+        }
+        const arr = looseByReview.get(target.id) ?? []
+        arr.push(reply)
+        looseByReview.set(target.id, arr)
+      }
+    }
+
+    for (const arr of byComment.values()) arr.sort((a, b) => a.created_at - b.created_at)
+
+    return [...detail.reviews]
+      .sort((a, b) => b.created_at - a.created_at)
+      .map((review) => ({
+        review,
+        repliesByComment: byComment,
+        looseReplies: (looseByReview.get(review.id) ?? []).sort(
+          (a, b) => a.created_at - b.created_at,
+        ),
+      }))
+  }, [detail])
+
+  if (threads.length === 0) {
+    return <div className="text-xs text-muted-foreground">No activity recorded.</div>
+  }
+
   return (
     <ol>
-      {reviews.map((r, i) => {
-        const last = i === reviews.length - 1
+      {threads.map((t, i) => {
+        const last = i === threads.length - 1
         return (
-          <li key={r.id} className="flex gap-3">
+          <li key={t.review.id} className="flex gap-3">
             <div className="flex flex-col items-center">
               <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-primary ring-4 ring-background" />
               {!last && <span className="w-px grow bg-border" />}
             </div>
-            <div className={cn("flex-1", last ? "pb-1" : "pb-6")}>
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="text-sm font-medium">
-                  Reviewed {plural(r.files_reviewed, "file")}
-                </span>
-                <span
-                  className="shrink-0 text-xs text-muted-foreground"
-                  title={formatTimestamp(r.created_at)}
-                >
-                  {relativeTime(r.created_at)}
-                </span>
-              </div>
-
-              <div className="mt-2">
-                <SeverityBadges counts={r} />
-              </div>
-
-              {splitCategories(r.categories).length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {splitCategories(r.categories).map((c) => (
-                    <Badge key={c} variant="secondary" className={PILL_RING}>
-                      {c}
-                    </Badge>
+            <div className={cn("flex-1", last ? "pb-1" : "pb-8")}>
+              <ReviewEntry review={t.review} repliesByComment={t.repliesByComment} />
+              {t.looseReplies.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {t.looseReplies.map((r) => (
+                    <ReplyEntry key={r.id} reply={r} />
                   ))}
                 </div>
               )}
-
-              <div className="mt-2 text-xs text-muted-foreground">
-                {plural(r.comments_posted, "comment")} · {r.lines_changed.toLocaleString()} lines ·{" "}
-                {r.tokens_used.toLocaleString()} tokens · {(r.duration_ms / 1000).toFixed(1)}s
-              </div>
             </div>
           </li>
         )
       })}
     </ol>
+  )
+}
+
+function ReviewEntry({
+  review,
+  repliesByComment,
+}: {
+  review: ActivityReviewModel
+  repliesByComment?: RepliesByComment
+}) {
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <MiraMark />
+          <span className="truncate text-sm font-medium">
+            Mira reviewed {plural(review.files_reviewed, "file")}
+          </span>
+        </div>
+        <span
+          className="shrink-0 text-xs text-muted-foreground"
+          title={formatTimestamp(review.created_at)}
+        >
+          {relativeTime(review.created_at)}
+        </span>
+      </div>
+
+      <div className="mt-2">
+        <SeverityBadges counts={review} />
+      </div>
+
+      {review.comments.length > 0 && (
+        <ul className="mt-3 space-y-3">
+          {review.comments.map((c) => (
+            <li key={c.id} className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 shrink-0 rounded-full",
+                    SEV_DOT[c.severity?.toLowerCase()] ?? "bg-muted-foreground",
+                  )}
+                />
+                <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
+                  {c.path}
+                  {c.line ? `:${c.line}` : ""}
+                </span>
+              </div>
+              {c.title && (
+                <div className="mt-0.5 pl-[0.875rem] text-xs font-medium">{c.title}</div>
+              )}
+              {c.body && (
+                <div className="mt-0.5 pl-[0.875rem] whitespace-pre-wrap text-xs text-muted-foreground">
+                  {c.body}
+                </div>
+              )}
+              {/* Human replies threaded under this exact comment. */}
+              {(() => {
+                const reps = c.github_comment_id
+                  ? repliesByComment?.get(c.github_comment_id)
+                  : undefined
+                if (!reps || reps.length === 0) return null
+                return (
+                  <div className="mt-2 space-y-2 pl-[0.875rem]">
+                    {reps.map((r) => (
+                      <ReplyEntry key={r.id} reply={r} />
+                    ))}
+                  </div>
+                )
+              })()}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {review.reviewed_paths.length > 0 && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-muted-foreground">
+            {plural(review.reviewed_paths.length, "file")} reviewed
+          </summary>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {review.reviewed_paths.map((p) => (
+              <span
+                key={p}
+                className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+              >
+                {p}
+              </span>
+            ))}
+          </div>
+        </details>
+      )}
+
+      <div className="mt-2 text-xs text-muted-foreground">
+        {plural(review.comments_posted, "comment")} · {review.lines_changed.toLocaleString()} lines ·{" "}
+        {review.tokens_used.toLocaleString()} tokens · {(review.duration_ms / 1000).toFixed(1)}s
+      </div>
+    </>
+  )
+}
+
+// A human reply, styled as a tinted message bubble so it's clearly distinct
+// from Mira's review entries on the timeline.
+function ReplyEntry({ reply }: { reply: PRReplyModel }) {
+  return (
+    <div className="rounded-lg bg-muted/60 p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <AuthorAvatar
+            username={reply.author}
+            avatarUrl={reply.author_avatar_url}
+            className="h-5 w-5"
+          />
+          <span className="truncate text-sm font-medium">
+            {reply.author || "Someone"}
+          </span>
+          <span className="shrink-0 text-xs text-muted-foreground">replied</span>
+        </div>
+        <span
+          className="shrink-0 text-xs text-muted-foreground"
+          title={formatTimestamp(reply.created_at)}
+        >
+          {relativeTime(reply.created_at)}
+        </span>
+      </div>
+      {reply.comment_path && (
+        <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+          {reply.comment_path}
+          {reply.comment_line ? `:${reply.comment_line}` : ""}
+        </div>
+      )}
+      {reply.body && (
+        <div className="mt-1 whitespace-pre-wrap text-xs">{reply.body}</div>
+      )}
+    </div>
   )
 }
 

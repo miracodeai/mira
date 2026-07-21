@@ -166,6 +166,8 @@ def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResp
                             created_at=e.created_at,
                             owner=repo_record.owner,
                             repo=repo_record.repo,
+                            author_username=e.author,
+                            author_avatar_url=e.author_avatar_url,
                         )
                     )
             finally:
