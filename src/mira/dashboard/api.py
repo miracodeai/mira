@@ -1285,6 +1285,10 @@ def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetail
 
     with _open_store(owner, repo) as store:
         all_events = store.list_review_events_for_pr(pr_number)
+        # Guard against a mis-scoped store: per-repo SQLite DBs have no
+        # owner/repo columns, so validate via the pr_url each event recorded.
+        marker = f"/{owner}/{repo}/"
+        all_events = [e for e in all_events if not e.pr_url or marker in e.pr_url]
         if not all_events:
             raise HTTPException(status_code=404, detail="No reviews for this PR")
 
