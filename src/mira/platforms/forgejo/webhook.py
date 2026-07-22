@@ -17,10 +17,17 @@ from typing import Any
 
 import httpx
 
+from mira.config import load_config
 from mira.platforms import profiles
 from mira.platforms.auth import PlatformAuth
 from mira.platforms.fetch import make_fetcher
-from mira.platforms.mentions import has_mention, mention_names, strip_mentions
+from mira.platforms.mentions import (
+    author_is_filtered,
+    command_after_mention,
+    has_mention,
+    mention_names,
+    strip_mentions,
+)
 from mira.providers import create_provider
 
 logger = logging.getLogger(__name__)
@@ -351,16 +358,36 @@ async def dispatch_forgejo_event(
     bot_identity = await auth.get_bot_identity()
     if actor and bot_identity and actor == bot_identity:
         return "ignored"
+    cfg = load_config()
 
     if event == "pull_request":
         action = payload.get("action", "")
         if action in ("opened", "synchronized", "reopened"):
+            full_name = payload.get("repository", {}).get("full_name", "")
+            number = payload.get("pull_request", {}).get("number", 0)
+            try:
+                owner, repo_name = _split_repo_path(full_name)
+            except ValueError:
+                owner, repo_name = "?", "?"
+
+            if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+                logger.debug(
+                    "PR %s/%s#%s skipped — author %s filtered by author filter",
+                    owner,
+                    repo_name,
+                    number,
+                    actor,
+                )
+                return "ignored"
             background_tasks.add_task(handle_forgejo_pr, payload, auth, bot_name)
             return "processing"
         # Ignore other PR actions (closed, edited, labeled, merged, etc.)
         return "ignored"
 
     if event == "push":
+        if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+            logger.debug("push ignored — author %s filtered", actor)
+            return "ignored"
         background_tasks.add_task(handle_forgejo_push, payload, auth, bot_name)
         return "processing"
 
@@ -370,6 +397,12 @@ async def dispatch_forgejo_event(
         names = mention_names(bot_name, bot_identity)
         comment_body = payload.get("comment", {}).get("body", "") or ""
         if has_mention(comment_body, names):
+            cmd_word = command_after_mention(comment_body, names)
+            if cmd_word == "review":
+                pass  # review command bypasses author filter
+            elif author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+                logger.debug("issue_comment skipped — author %s filtered", actor)
+                return "ignored"
             background_tasks.add_task(handle_forgejo_note, payload, auth, bot_name)
             return "processing"
         return "ignored"

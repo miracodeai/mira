@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mira.platforms.mentions import (
+    author_is_filtered,
     command_after_mention,
     has_mention,
     mention_names,
@@ -36,3 +37,31 @@ def test_command_after_mention():
     assert command_after_mention("@project_1_bot_x Reject", names) == "reject"
     assert command_after_mention("@mira", names) == ""  # no command word
     assert command_after_mention("nothing", names) == ""
+
+
+def test_author_is_filtered_blocked_by_raw_login():
+    assert author_is_filtered("alice", [], ["alice"]) is True
+
+
+def test_author_is_filtered_blocked_by_stripped_bot_suffix():
+    assert author_is_filtered("dependabot[bot]", [], ["dependabot"]) is True
+
+
+def test_author_is_filtered_allowlist_empty_not_filtered():
+    assert author_is_filtered("alice", [], []) is False
+
+
+def test_author_is_filtered_allowlist_set_and_on_list_not_filtered():
+    assert author_is_filtered("alice", ["alice"], []) is False
+
+
+def test_author_is_filtered_allowlist_set_and_off_list_filtered():
+    assert author_is_filtered("bob", ["alice"], []) is True
+
+
+def test_author_is_filtered_blocked_preempts_allowlist():
+    assert author_is_filtered("alice", ["alice"], ["alice"]) is True
+
+
+def test_author_is_filtered_empty_login_not_filtered():
+    assert author_is_filtered("", ["alice"], []) is False

@@ -40,6 +40,13 @@ filter:
     - "*.png"
     - "*.jpg"
     - "*.gif"
+  # Auto-review only PRs from these authors (empty = review all)
+  # allowed_authors:
+  #   - alice
+  # Never auto-review PRs from these authors (takes precedence over allowed)
+  # blocked_authors:
+  #   - app/renovate
+  #   - app/dependabot
   # Skip deleted files
   exclude_deleted: true
   # Maximum number of files to review

@@ -116,6 +116,15 @@ class FilterConfig(BaseModel):
     )
     exclude_deleted: bool = True
     max_files: int = 50
+    # Only auto-review PRs whose author (payload `sender.login` /
+    # `user.username`) is in this list. Empty list = review all (default).
+    # Bot-self events are always excluded regardless of this list.
+    allowed_authors: list[str] = Field(default_factory=list)
+    # Never auto-review PRs from these authors. Takes precedence over
+    # allowed_authors. A trailing `[bot]` suffix on the payload login is
+    # stripped by the dispatcher check so that `dependabot` here matches
+    # `dependabot[bot]` in a webhook payload.
+    blocked_authors: list[str] = Field(default_factory=list)
 
 
 class ReviewConfig(BaseModel):

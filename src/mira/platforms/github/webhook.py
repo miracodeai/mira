@@ -33,6 +33,7 @@ from mira.platforms.handlers import (
 )
 from mira.platforms.index_handlers import _get_app_db, run_incremental_index
 from mira.platforms.mentions import (
+    author_is_filtered,
     command_after_mention,
     has_mention,
     mention_names,
@@ -415,6 +416,7 @@ async def dispatch_github_event(
     avoid review loops.
     """
     action = payload.get("action", "")
+    cfg = load_config()
 
     # Track PR review lifecycle for every pull_request event (open/close/
     # ready/review_requested/...), independent of the review-trigger logic
@@ -444,6 +446,19 @@ async def dispatch_github_event(
         if sender == f"{bot_name}[bot]":
             logger.debug("Ignoring pull_request event from self (%s)", sender)
             return "ignored"
+
+        if author_is_filtered(sender, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+            owner = payload.get("repository", {}).get("owner", {}).get("login", "?")
+            repo = payload.get("repository", {}).get("name", "?")
+            number = payload.get("pull_request", {}).get("number", 0)
+            logger.debug(
+                "PR %s/%s#%s skipped — author %s filtered by author filter",
+                owner,
+                repo,
+                number,
+                sender,
+            )
+            return "ignored"
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         pr_body = payload.get("pull_request", {}).get("body", "") or ""
         if any(re.search(rf"@{re.escape(n)}[ \t]+ignore\b", pr_body, re.IGNORECASE) for n in names):
@@ -466,6 +481,16 @@ async def dispatch_github_event(
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         if "pull_request" in payload.get("issue", {}) and has_mention(comment_body, names):
             cmd_word = command_after_mention(comment_body, names)
+            if cmd_word == "review":
+                pass  # review command bypasses author filter
+            elif author_is_filtered(
+                comment_user, cfg.filter.allowed_authors, cfg.filter.blocked_authors
+            ):
+                logger.debug(
+                    "issue_comment skipped — author %s filtered by author filter",
+                    comment_user,
+                )
+                return "ignored"
             if cmd_word in _PAUSE_KEYWORDS | _RESUME_KEYWORDS:
                 background_tasks.add_task(
                     handle_pause_resume, payload, app_auth, bot_name, cmd_word
@@ -503,6 +528,10 @@ async def dispatch_github_event(
         ref = payload.get("ref", "")
         default_branch = payload.get("repository", {}).get("default_branch", "main")
         if ref == f"refs/heads/{default_branch}":
+            sender = payload.get("sender", {}).get("login", "")
+            if author_is_filtered(sender, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+                logger.debug("push to %s skipped — author %s filtered", ref, sender)
+                return "ignored"
             background_tasks.add_task(handle_push_index, payload, app_auth, bot_name)
             return "processing"
 
