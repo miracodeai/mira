@@ -114,6 +114,7 @@ class ForgejoProvider(BaseProvider):
         owner, repo, number = parse_pr_url(pr_url)
         try:
             resp = await self._request(
+                "GET",
                 f"{self._api}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls/{number}",
             )
             pr = resp.json()
