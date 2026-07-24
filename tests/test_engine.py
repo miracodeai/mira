@@ -8,10 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mira.config import MiraConfig
+from mira.core.diff_parser import parse_diff
 from mira.core.engine import (
     ReviewEngine,
     _clamp_confidence_to_findings,
+    _diff_line_map,
     _drop_orphan_key_issues,
+    _drop_unanchorable_comments,
+    _restrict_diff_to_paths,
     _security_relevant_files,
 )
 from mira.core.threads import _extract_sections
@@ -1793,3 +1797,94 @@ class TestGlobalRules:
         _, kwargs = mock_build.call_args_list[0]
         assert not kwargs["custom_rules"]
         assert not (tmp_path / "_app.db").exists()
+
+
+_TWO_FILE_DIFF = """\
+diff --git a/src/a.py b/src/a.py
+index 0000001..0000002 100644
+--- a/src/a.py
++++ b/src/a.py
+@@ -10,2 +10,3 @@ def f():
+ context
+-old
++new
++more
+diff --git a/src/b.py b/src/b.py
+index 0000003..0000004 100644
+--- a/src/b.py
++++ b/src/b.py
+@@ -1,2 +1,2 @@
+-x = 1
++x = 2
+ y = 3
+"""
+
+
+class TestDiffLineMap:
+    def test_maps_new_side_hunk_ranges(self):
+        line_map = _diff_line_map(_TWO_FILE_DIFF)
+        assert line_map["src/a.py"] == {10, 11, 12}
+        assert line_map["src/b.py"] == {1, 2}
+
+    def test_garbage_diff_yields_empty_map(self):
+        assert _diff_line_map("not a diff") == {}
+
+
+class TestDropUnanchorableComments:
+    """Comments outside the PR's base diff would 422 on GitHub — drop pre-post."""
+
+    def _comment(self, path="src/a.py", line=11, end_line=None):
+        return ReviewComment(
+            path=path,
+            line=line,
+            end_line=end_line,
+            severity=Severity.WARNING,
+            category="bug",
+            title="t",
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_keeps_comment_inside_hunk(self):
+        line_map = _diff_line_map(_TWO_FILE_DIFF)
+        kept, dropped = _drop_unanchorable_comments([self._comment(line=11)], line_map)
+        assert len(kept) == 1 and dropped == []
+
+    def test_drops_comment_outside_hunk(self):
+        # Line 955 of a mainline file the PR never touched — the PR #90 case.
+        line_map = _diff_line_map(_TWO_FILE_DIFF)
+        comments = [self._comment(path="src/mira/index/pg_store.py", line=955)]
+        kept, dropped = _drop_unanchorable_comments(comments, line_map)
+        assert kept == [] and len(dropped) == 1
+
+    def test_drops_when_line_in_diff_file_but_outside_hunks(self):
+        line_map = _diff_line_map(_TWO_FILE_DIFF)
+        kept, dropped = _drop_unanchorable_comments([self._comment(line=500)], line_map)
+        assert kept == [] and len(dropped) == 1
+
+    def test_multiline_comment_needs_both_ends_in_diff(self):
+        line_map = _diff_line_map(_TWO_FILE_DIFF)
+        kept, dropped = _drop_unanchorable_comments([self._comment(line=11, end_line=40)], line_map)
+        assert kept == [] and len(dropped) == 1
+
+
+class TestRestrictDiffToPaths:
+    """Round-2 merge commits pull main's changes into the compare diff —
+    review only the PR's own files."""
+
+    def test_keeps_only_named_paths(self):
+        out = _restrict_diff_to_paths(_TWO_FILE_DIFF, {"src/b.py"})
+        assert "src/b.py" in out
+        assert "src/a.py" not in out
+        assert out.startswith("diff --git a/src/b.py")
+
+    def test_all_paths_kept_verbatim(self):
+        assert _restrict_diff_to_paths(_TWO_FILE_DIFF, {"src/a.py", "src/b.py"}) == _TWO_FILE_DIFF
+
+    def test_no_matching_paths_yields_empty(self):
+        assert _restrict_diff_to_paths(_TWO_FILE_DIFF, {"other.py"}).strip() == ""
+
+    def test_restricted_diff_still_parses(self):
+        out = _restrict_diff_to_paths(_TWO_FILE_DIFF, {"src/a.py"})
+        patch_set = parse_diff(out)
+        assert [f.path for f in patch_set.files] == ["src/a.py"]
