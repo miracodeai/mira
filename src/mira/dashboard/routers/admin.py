@@ -81,10 +81,11 @@ async def _register_and_index_repo(platform: str, env_token: str, body: BaseMode
 
 
 @router.post("/api/gitlab/sync")
-async def sync_gitlab_projects() -> dict:
+async def sync_gitlab_projects(request: Request) -> dict:
     """Discover every GitLab project the configured token can access and
     register them (status pending), so they appear ready-to-index without
     waiting for a webhook. Idempotent."""
+    _require_admin(request)
     from mira.platforms.gitlab.auth import GitLabTokenAuth
     from mira.platforms.gitlab.webhook import backfill_gitlab_projects
 
@@ -99,21 +100,23 @@ async def sync_gitlab_projects() -> dict:
 
 
 @router.post("/api/gitlab/repos")
-async def register_gitlab_repo(body: GitLabRepoRegister) -> dict:
+async def register_gitlab_repo(body: GitLabRepoRegister, request: Request) -> dict:
     """Register a GitLab project and index it in the background.
 
     GitLab has no installation webhook, so repos are added explicitly. The
     access token comes from MIRA_GITLAB_TOKEN; add a project webhook pointing
     at ``/gitlab/webhook`` to get auto-review on new MRs.
     """
+    _require_admin(request)
     return await _register_and_index_repo("gitlab", "MIRA_GITLAB_TOKEN", body)
 
 
 @router.post("/api/forgejo/sync")
-async def sync_forgejo_repos() -> dict:
+async def sync_forgejo_repos(request: Request) -> dict:
     """Discover every Forgejo repo the configured token can access and
     register them (status pending), so they appear ready-to-index without
     waiting for a webhook. Idempotent."""
+    _require_admin(request)
     from mira.platforms.forgejo.auth import ForgejoTokenAuth
     from mira.platforms.forgejo.webhook import backfill_forgejo_repos
 
@@ -128,13 +131,14 @@ async def sync_forgejo_repos() -> dict:
 
 
 @router.post("/api/forgejo/repos")
-async def register_forgejo_repo(body: ForgejoRepoRegister) -> dict:
+async def register_forgejo_repo(body: ForgejoRepoRegister, request: Request) -> dict:
     """Register a Forgejo repo and index it in the background.
 
     Forgejo has no installation webhook, so repos are added explicitly. The
     access token comes from MIRA_FORGEJO_TOKEN; add a repo webhook pointing
     at ``/forgejo/webhook`` to get auto-review on new PRs.
     """
+    _require_admin(request)
     return await _register_and_index_repo("forgejo", "MIRA_FORGEJO_TOKEN", body)
 
 
@@ -237,7 +241,8 @@ def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
 
 
 @router.put("/api/settings/models")
-def set_models(body: ModelsUpdate) -> dict:
+def set_models(body: ModelsUpdate, request: Request) -> dict:
+    _require_admin(request)
     from mira.dashboard.models_config import THINKING_MODE_VALUES
 
     if body.review_thinking_mode not in THINKING_MODE_VALUES:
@@ -386,15 +391,17 @@ def list_pending_uninstalls() -> list[PendingUninstallModel]:
 
 
 @router.post("/api/uninstalls/{installation_id}/keep")
-def keep_uninstall_data(installation_id: int) -> dict:
+def keep_uninstall_data(installation_id: int, request: Request) -> dict:
     """User chose to keep data after uninstall — just dismiss the popup."""
+    _require_admin(request)
     _api._app_db.remove_pending_uninstall(installation_id)
     return {"ok": True}
 
 
 @router.post("/api/uninstalls/{installation_id}/delete")
-def delete_uninstall_data(installation_id: int) -> dict:
+def delete_uninstall_data(installation_id: int, request: Request) -> dict:
     """User chose to delete all data for this installation."""
+    _require_admin(request)
     removed = _api._app_db.delete_repos_by_installation(installation_id)
     _api._app_db.remove_pending_uninstall(installation_id)
     return {"ok": True, "removed": removed}
@@ -442,8 +449,9 @@ async def get_setup_status() -> dict:
 
 
 @router.post("/api/setup/complete")
-async def complete_setup(body: SetupRequest) -> dict:
+async def complete_setup(body: SetupRequest, request: Request) -> dict:
     """Save setup choices and start indexing selected repos."""
+    _require_admin(request)
     enabled_count = 0
     for r in body.repos:
         owner, repo = r["owner"], r["repo"]
