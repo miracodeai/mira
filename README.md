@@ -142,6 +142,9 @@ environment, disables inherited shell environment variables and user/project
 rules, and enforces the read-only sandbox.
 Provider choice, executable/auth paths, sandbox policy, and timeout are
 deployment-only settings; repository `.mira.yaml` files cannot override them.
+For one-shot `mira review` runs, `--config` is treated as untrusted by default.
+An operator-owned config may opt in with `--trust-execution-settings`; never use
+that flag with a repository-controlled file.
 
 Codex CLI does not expose Mira's temperature or hard output-token controls, so
 Mira disables ensemble sampling for this provider. The mounted OAuth session is
