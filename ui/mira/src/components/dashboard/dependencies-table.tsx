@@ -27,6 +27,7 @@ const KIND_LABELS: Record<string, string> = {
   docker: "Docker",
   go: "Go",
   rust: "Cargo",
+  composer: "Composer",
 }
 
 function kindBadgeVariant(kind: string) {
@@ -38,6 +39,7 @@ function kindBadgeVariant(kind: string) {
     docker: "text-blue-400 border-blue-500/40",
     go: "text-cyan-400 border-cyan-500/40",
     rust: "text-orange-400 border-orange-500/40",
+    composer: "text-purple-400 border-purple-500/40",
   }
   return colors[kind] ?? "text-muted-foreground border-border"
 }
@@ -108,7 +110,7 @@ export function DependenciesTable({
         <p className="text-sm font-medium">No packages detected</p>
         <p className="mt-1 text-sm text-muted-foreground">
           Mira parses package.json, requirements.txt, pyproject.toml, go.mod,
-          and Dockerfile. Re-index this repo to populate.
+          composer.json, and Dockerfile. Re-index this repo to populate.
         </p>
       </div>
     )

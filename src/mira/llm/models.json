@@ -1,5 +1,5 @@
 {
-  "_comment": "Mira's supported-models registry. Only models listed here can be selected as the indexing or review model. Format mirrors a trimmed subset of LiteLLM's model_prices_and_context_window.json so users familiar with that file recognize the shape.",
+  "_comment": "Mira's model registry — labels, pricing, and per-purpose recommendations for the dashboard and cost estimates. Selection is not limited to this list: the dashboard merges the backend's live catalog and accepts free-form ids. Format mirrors a trimmed subset of LiteLLM's model_prices_and_context_window.json so users familiar with that file recognize the shape.",
   "_fields": {
     "label": "Display name shown in the dashboard dropdown.",
     "provider": "Underlying provider (anthropic, openai, google, etc.) — purely informational.",
@@ -34,68 +34,156 @@
     "purposes": ["review"],
     "recommended_for": ["review"]
   },
-  "anthropic/claude-opus-4-6": {
-    "label": "Claude Opus 4.6",
+  "anthropic/claude-sonnet-5": {
+    "label": "Claude Sonnet 5",
     "provider": "anthropic",
-    "max_input_tokens": 200000,
-    "max_output_tokens": 32000,
-    "input_cost_per_1m": 15.00,
-    "output_cost_per_1m": 75.00,
-    "supports_json_mode": true,
-    "purposes": ["review"],
-    "recommended_for": []
-  },
-  "openai/gpt-4o-mini": {
-    "label": "GPT-4o mini",
-    "provider": "openai",
-    "max_input_tokens": 128000,
-    "max_output_tokens": 16384,
-    "input_cost_per_1m": 0.15,
-    "output_cost_per_1m": 0.60,
-    "supports_json_mode": true,
-    "purposes": ["indexing"],
-    "recommended_for": []
-  },
-  "openai/gpt-4o": {
-    "label": "GPT-4o",
-    "provider": "openai",
-    "max_input_tokens": 128000,
-    "max_output_tokens": 16384,
-    "input_cost_per_1m": 2.50,
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 128000,
+    "input_cost_per_1m": 2.00,
     "output_cost_per_1m": 10.00,
     "supports_json_mode": true,
     "purposes": ["review"],
     "recommended_for": []
   },
-  "google/gemini-2.5-flash": {
-    "label": "Gemini 2.5 Flash",
-    "provider": "google",
+  "anthropic/claude-opus-4-8": {
+    "label": "Claude Opus 4.8",
+    "provider": "anthropic",
     "max_input_tokens": 1000000,
-    "max_output_tokens": 65535,
-    "input_cost_per_1m": 0.30,
-    "output_cost_per_1m": 2.50,
+    "max_output_tokens": 128000,
+    "input_cost_per_1m": 5.00,
+    "output_cost_per_1m": 25.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "anthropic/claude-fable-5": {
+    "label": "Claude Fable 5",
+    "provider": "anthropic",
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 128000,
+    "input_cost_per_1m": 10.00,
+    "output_cost_per_1m": 50.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "openai/gpt-5-nano": {
+    "label": "GPT-5 Nano",
+    "provider": "openai",
+    "max_input_tokens": 400000,
+    "max_output_tokens": 128000,
+    "input_cost_per_1m": 0.05,
+    "output_cost_per_1m": 0.40,
     "supports_json_mode": true,
     "purposes": ["indexing"],
     "recommended_for": []
   },
-  "google/gemini-2.5-pro": {
-    "label": "Gemini 2.5 Pro",
-    "provider": "google",
-    "max_input_tokens": 1000000,
-    "max_output_tokens": 65535,
+  "openai/gpt-5-mini": {
+    "label": "GPT-5 Mini",
+    "provider": "openai",
+    "max_input_tokens": 400000,
+    "max_output_tokens": 128000,
+    "input_cost_per_1m": 0.25,
+    "output_cost_per_1m": 2.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": []
+  },
+  "openai/gpt-5.1-codex-mini": {
+    "label": "GPT-5.1 Codex Mini",
+    "provider": "openai",
+    "max_input_tokens": 400000,
+    "max_output_tokens": 100000,
+    "input_cost_per_1m": 0.25,
+    "output_cost_per_1m": 2.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": []
+  },
+  "openai/gpt-5.1-codex": {
+    "label": "GPT-5.1 Codex",
+    "provider": "openai",
+    "max_input_tokens": 400000,
+    "max_output_tokens": 128000,
     "input_cost_per_1m": 1.25,
     "output_cost_per_1m": 10.00,
     "supports_json_mode": true,
     "purposes": ["review"],
     "recommended_for": []
   },
-  "minimax/MiniMax-M2.7": {
-    "label": "MiniMax M2.7",
+  "openai/gpt-5.2": {
+    "label": "GPT-5.2",
+    "provider": "openai",
+    "max_input_tokens": 400000,
+    "max_output_tokens": 128000,
+    "input_cost_per_1m": 1.75,
+    "output_cost_per_1m": 14.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "google/gemini-3-flash-preview": {
+    "label": "Gemini 3 Flash (Preview)",
+    "provider": "google",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65535,
+    "input_cost_per_1m": 0.50,
+    "output_cost_per_1m": 3.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": []
+  },
+  "google/gemini-3.1-flash-lite": {
+    "label": "Gemini 3.1 Flash Lite",
+    "provider": "google",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65536,
+    "input_cost_per_1m": 0.25,
+    "output_cost_per_1m": 1.50,
+    "supports_json_mode": true,
+    "purposes": ["indexing"],
+    "recommended_for": []
+  },
+  "google/gemini-3.1-pro-preview": {
+    "label": "Gemini 3.1 Pro Preview",
+    "provider": "google",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65536,
+    "input_cost_per_1m": 2.00,
+    "output_cost_per_1m": 12.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "deepseek/deepseek-v4-flash": {
+    "label": "DeepSeek V4 Flash",
+    "provider": "deepseek",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 16384,
+    "input_cost_per_1m": 0.09,
+    "output_cost_per_1m": 0.18,
+    "supports_json_mode": true,
+    "purposes": ["indexing"],
+    "recommended_for": []
+  },
+  "deepseek/deepseek-v4-pro": {
+    "label": "DeepSeek V4 Pro",
+    "provider": "deepseek",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 384000,
+    "input_cost_per_1m": 0.43,
+    "output_cost_per_1m": 0.87,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "minimax/minimax-m3": {
+    "label": "MiniMax M3",
     "provider": "minimax",
-    "max_input_tokens": 1000000,
-    "max_output_tokens": 131072,
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 512000,
     "input_cost_per_1m": 0.30,
-    "output_cost_per_1m": 2.50,
+    "output_cost_per_1m": 1.20,
     "supports_json_mode": true,
     "purposes": ["indexing", "review"],
     "recommended_for": []

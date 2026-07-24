@@ -184,6 +184,14 @@ class TestReviewEngine:
         mock_llm.review.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_audit_records_drafted_counts(self, mock_llm: LLMProvider, sample_diff_text: str):
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm)
+        result = await engine.review_diff(sample_diff_text)
+        drafted = [e for e in result.audit if e.get("stage") == "drafted"]
+        assert drafted, "expected per-chunk drafted entries in the audit trail"
+        assert any(e["chunk"] == "security" for e in drafted)
+
+    @pytest.mark.asyncio
     async def test_review_pr_without_provider_raises(self, mock_llm: LLMProvider):
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm)
         with pytest.raises(RuntimeError, match="provider is required"):
@@ -593,6 +601,30 @@ class TestReviewEngine:
         assert mock_provider.update_comment.call_count >= 1
 
     @pytest.mark.asyncio
+    async def test_placeholder_finalized_when_all_files_excluded(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """A diff whose files are all excluded still finalizes the placeholder
+        instead of leaving it stuck on 'Reviewing this PR…' (#162)."""
+        mock_provider.get_pr_diff.return_value = (
+            "diff --git a/poetry.lock b/poetry.lock\n"
+            "--- a/poetry.lock\n"
+            "+++ b/poetry.lock\n"
+            "@@ -1,1 +1,2 @@\n"
+            " line\n"
+            "+new\n"
+        )
+        mock_provider.find_bot_comment = AsyncMock(side_effect=[None, 7])
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        assert result.walkthrough is None
+        update_bodies = [c[0][2] for c in mock_provider.update_comment.call_args_list]
+        assert any("All files matched exclusion rules" in b for b in update_bodies)
+        assert not any("Reviewing this PR" in b for b in update_bodies)
+
+    @pytest.mark.asyncio
     async def test_walkthrough_upsert_failure_does_not_block_review(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
@@ -892,6 +924,36 @@ class TestThreadResolution:
         assert resolved_ids == ["T1"]
 
     @pytest.mark.asyncio
+    async def test_auto_resolve_disabled_skips_resolution(
+        self,
+        sample_llm_response_text: str,
+        provider_with_threads: AsyncMock,
+    ):
+        """With auto_resolve_conversations off, no threads are fetched or resolved."""
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        llm.complete = AsyncMock(return_value=json.dumps({"results": []}))
+        llm.walkthrough = AsyncMock(
+            return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
+        )
+        llm.review = AsyncMock(return_value=sample_llm_response_text)
+
+        config = MiraConfig()
+        config.review.auto_resolve_conversations = False
+        engine = ReviewEngine(
+            config=config, llm=llm, provider=provider_with_threads, bot_name="mira"
+        )
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # The verified-fix resolution path is short-circuited entirely.
+        provider_with_threads.get_unresolved_bot_threads.assert_not_awaited()
+        provider_with_threads.resolve_threads.assert_not_awaited()
+        assert result.thread_decisions == []
+        # Review itself still completed.
+        provider_with_threads.post_review.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_full_flow_passes_full_file_for_small_files(
         self,
         sample_llm_response_text: str,
@@ -1105,6 +1167,61 @@ class TestRoundDetectionWiring:
         assert captured["resolved_threads"][0]["path"] == "a.py"
         assert captured["resolved_threads"][0]["line"] == 10
         assert "Already-fixed concern" in captured["resolved_threads"][0]["description"]
+
+    @pytest.mark.asyncio
+    async def test_review_rest_stays_round_1_despite_threads(self, monkeypatch):
+        """review-rest reviews never-seen files, so it stays round 1 (full
+        thresholds) even though the first pass left threads behind."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mira.core.engine import ReviewEngine
+        from mira.models import BotThreadRecord, PRInfo
+
+        mock_provider = MagicMock()
+        mock_provider.get_pr_info = AsyncMock(
+            return_value=PRInfo(
+                title="t",
+                description="",
+                base_branch="main",
+                head_branch="f",
+                url="https://github.com/o/r/pull/1",
+                number=1,
+                owner="o",
+                repo="r",
+            )
+        )
+        mock_provider.get_pr_diff = AsyncMock(return_value="")
+        mock_provider.get_unresolved_bot_threads = AsyncMock(return_value=[])
+        mock_provider.get_all_bot_threads = AsyncMock(
+            return_value=[
+                BotThreadRecord(thread_id="t1", path="a.py", line=10, body="x", is_resolved=False),
+            ]
+        )
+        mock_provider.find_bot_comment = AsyncMock(return_value=None)
+        mock_provider.post_comment = AsyncMock()
+        mock_provider.update_comment = AsyncMock()
+        mock_provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["review_round"] = kwargs.get("review_round")
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        engine._review_only_paths = {"src/skipped.py"}
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["review_round"] == 1
 
     @pytest.mark.asyncio
     async def test_review_pr_round_1_when_no_prior_threads(self, monkeypatch):
@@ -1330,7 +1447,9 @@ class TestIncrementalDiff:
         )
         await engine.review_pr("https://github.com/o/r/pull/1")
 
-        mock_db.set_last_reviewed_sha.assert_called_once_with("o", "r", 1, "HEAD_SHA")
+        mock_db.set_last_reviewed_sha.assert_called_once_with(
+            "o", "r", 1, "HEAD_SHA", platform="github"
+        )
 
 
 class TestSelfCritique:
@@ -1627,3 +1746,50 @@ class TestDropOrphanKeyIssues:
     def test_empty_key_issues_returns_empty(self):
         comments = [self._comment(line=10)]
         assert _drop_orphan_key_issues([], comments) == []
+
+
+class TestGlobalRules:
+    """Global rules must come from the shared app DB (issue #123), not a
+    throwaway SQLite AppDatabase() that ignores DATABASE_URL."""
+
+    def _capture_build(self):
+        from mira.llm.prompts.review import build_review_prompt
+
+        return patch("mira.core.engine.build_review_prompt", wraps=build_review_prompt)
+
+    @pytest.mark.asyncio
+    async def test_global_rules_read_from_shared_app_db(
+        self, mock_llm, mock_provider, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
+
+        mock_db = MagicMock()
+        mock_db.get_global_rules_text.return_value = ["Security: Never log tokens"]
+        mock_db.get_last_reviewed_sha.return_value = ""
+        mock_db.get_repo.return_value = None
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        with self._capture_build() as mock_build:
+            await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        _, kwargs = mock_build.call_args_list[0]
+        assert kwargs["custom_rules"][0] == {
+            "title": "Security",
+            "content": "Never log tokens",
+        }
+        # No throwaway AppDatabase() → no stray SQLite file in the index dir.
+        assert not (tmp_path / "_app.db").exists()
+
+    @pytest.mark.asyncio
+    async def test_no_app_db_degrades_cleanly(self, mock_llm, mock_provider, monkeypatch, tmp_path):
+        monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
+        monkeypatch.setattr("mira.dashboard.api._app_db", None)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        with self._capture_build() as mock_build:
+            await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        _, kwargs = mock_build.call_args_list[0]
+        assert not kwargs["custom_rules"]
+        assert not (tmp_path / "_app.db").exists()

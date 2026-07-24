@@ -51,6 +51,15 @@ class TestShouldIndex:
     def test_unknown_extension(self):
         assert _should_index("README.md") is False
 
+    def test_user_exclude_pattern(self):
+        assert _should_index("app/generated/api.py", ["*/generated/*"]) is False
+
+    def test_user_exclude_glob_by_extension(self):
+        assert _should_index("src/schema.proto", ["*.proto"]) is False
+
+    def test_user_exclude_does_not_affect_others(self):
+        assert _should_index("src/main.py", ["*.proto"]) is True
+
 
 class TestContentHash:
     def test_deterministic(self):
@@ -92,6 +101,18 @@ class TestParseSummarizeResponse:
         raw = f"```\n{inner}\n```"
         result = _parse_summarize_response(raw)
         assert len(result) == 1
+
+    def test_unescaped_backslash_in_string(self):
+        # DeepSeek-style: PHP namespace backslashes left unescaped (issue #96).
+        raw = '{"files": [{"path": "a.php", "summary": "Model in \\App\\Models namespace"}]}'
+        result = _parse_summarize_response(raw)
+        assert len(result) == 1
+        assert result[0]["summary"] == "Model in \\App\\Models namespace"
+
+    def test_valid_escapes_preserved(self):
+        raw = json.dumps({"files": [{"path": "a.py", "summary": 'tab\there "quote"'}]})
+        result = _parse_summarize_response(raw)
+        assert result[0]["summary"] == 'tab\there "quote"'
 
 
 class TestStripCodeFences:
@@ -142,6 +163,44 @@ class TestBuildFileSummary:
         assert fs.symbols == []
         assert fs.imports == []
 
+    def test_null_symbol_fields_coerced(self):
+        # Models emit explicit nulls; columns are NOT NULL (issue #96).
+        data = {"symbols": [{"name": "foo", "kind": None, "signature": None, "description": None}]}
+        fs = _build_file_summary("a.py", "content", data)
+        assert len(fs.symbols) == 1
+        assert fs.symbols[0].kind == "function"
+        assert fs.symbols[0].signature == ""
+        assert fs.symbols[0].description == ""
+
+    def test_nameless_symbol_skipped(self):
+        data = {"symbols": [{"name": None, "signature": "x"}, {"name": "ok"}]}
+        fs = _build_file_summary("a.py", "content", data)
+        assert [s.name for s in fs.symbols] == ["ok"]
+
+
+class _FakeFetcher:
+    """In-memory RepoFetcher for indexer tests."""
+
+    def __init__(self, tree=None, contents=None, tarball=None, branch="main"):
+        self._tree = tree or []
+        self._contents = contents
+        self._tarball = tarball
+        self._branch = branch
+
+    async def default_branch(self, owner, repo):
+        return self._branch
+
+    async def repo_tree(self, owner, repo, branch):
+        return list(self._tree)
+
+    async def file_content(self, owner, repo, path, ref, semaphore=None):
+        if isinstance(self._contents, dict):
+            return self._contents.get(path)
+        return self._contents
+
+    async def repo_tarball(self, owner, repo, ref, max_file_size=1_048_576):
+        return self._tarball
+
 
 @pytest.mark.asyncio
 class TestIndexRepo:
@@ -178,34 +237,49 @@ class TestIndexRepo:
         # through the LLM path rather than the no-summary fast path.
         big_content = "# main entry point\n" + "print('hello')\n" * 100
 
-        with (
-            patch(
-                "mira.index.indexer._fetch_repo_tree",
-                return_value=["src/main.py", "README.md"],
-            ),
-            patch(
-                "mira.index.indexer._fetch_file_content",
-                return_value=big_content,
-            ),
-            patch(
-                "mira.index.indexer._fetch_repo_tarball",
-                return_value={"src/main.py": big_content, "README.md": big_content},
-            ),
-        ):
-            count = await index_repo(
-                owner="test",
-                repo="repo",
-                token="fake-token",
-                config=MiraConfig(),
-                store=store,
-                llm=mock_llm,
-                full=True,
-            )
+        fetcher = _FakeFetcher(
+            tree=["src/main.py", "README.md"],
+            tarball={"src/main.py": big_content, "README.md": big_content},
+        )
+        count = await index_repo(
+            owner="test",
+            repo="repo",
+            config=MiraConfig(),
+            store=store,
+            llm=mock_llm,
+            full=True,
+            fetcher=fetcher,
+        )
 
         assert count == 1
         summary = store.get_summary("src/main.py")
         assert summary is not None
         assert summary.summary == "Main entry point."
+        store.close()
+
+    async def test_skips_files_over_size_limit(self, tmp_path):
+        """Files above index.max_file_size are dropped before summarization."""
+        store = IndexStore(str(tmp_path / "test.db"))
+        mock_llm = AsyncMock()
+        mock_llm.complete = AsyncMock()
+
+        config = MiraConfig()
+        config.index.max_file_size = 1_000
+        big_content = "print('x')\n" * 500  # ~5 KB, over the 1 KB limit
+
+        fetcher = _FakeFetcher(tree=["src/main.py"], tarball={"src/main.py": big_content})
+        count = await index_repo(
+            owner="test",
+            repo="repo",
+            config=config,
+            store=store,
+            llm=mock_llm,
+            full=True,
+            fetcher=fetcher,
+        )
+
+        assert count == 0
+        mock_llm.complete.assert_not_called()
         store.close()
 
 
@@ -233,19 +307,101 @@ class TestIndexDiff:
             )
         )
 
-        with patch("mira.index.indexer._fetch_file_content", return_value="def helper(): pass"):
-            count = await index_diff(
-                owner="test",
-                repo="repo",
-                token="fake-token",
-                config=MiraConfig(),
-                store=store,
-                llm=mock_llm,
-                changed_paths=["src/utils.py"],
-            )
+        count = await index_diff(
+            owner="test",
+            repo="repo",
+            config=MiraConfig(),
+            store=store,
+            llm=mock_llm,
+            changed_paths=["src/utils.py"],
+            fetcher=_FakeFetcher(contents="def helper(): pass"),
+        )
 
         assert count == 1
         assert store.get_summary("src/utils.py") is not None
+        store.close()
+
+    async def test_index_diff_refreshes_changed_lockfile(self, tmp_path):
+        """A lockfile-only push must refresh the package inventory even though
+        lockfiles are excluded from code indexing (#157)."""
+        import asyncio
+
+        store = IndexStore(str(tmp_path / "test.db"))
+        store.replace_manifest_packages(
+            "package-lock.json",
+            [
+                {
+                    "name": "lodash",
+                    "kind": "npm",
+                    "version": "4.17.20",
+                    "file_path": "package-lock.json",
+                    "is_dev": False,
+                }
+            ],
+        )
+
+        lock = json.dumps(
+            {
+                "name": "app",
+                "lockfileVersion": 3,
+                "packages": {"node_modules/lodash": {"version": "4.17.21"}},
+            }
+        )
+        mock_llm = AsyncMock()
+        mock_llm.complete = AsyncMock(return_value='{"files": []}')
+
+        with patch("mira.security.poller.poll_repo", new=AsyncMock()) as poll:
+            count = await index_diff(
+                owner="test",
+                repo="repo",
+                config=MiraConfig(),
+                store=store,
+                llm=mock_llm,
+                changed_paths=["package-lock.json"],
+                fetcher=_FakeFetcher(contents=lock),
+            )
+            await asyncio.sleep(0)  # let the fire-and-forget vuln poll run
+
+        # Not code-indexed (excluded), but the inventory picked up the bump.
+        assert count == 0
+        versions = {(p.name, p.version) for p in store.list_manifest_packages()}
+        assert ("lodash", "4.17.21") in versions
+        assert ("lodash", "4.17.20") not in versions
+        mock_llm.complete.assert_not_called()
+        poll.assert_called_once_with("test", "repo")
+        store.close()
+
+    async def test_index_diff_clears_removed_manifest(self, tmp_path):
+        """Deleting a manifest in a push drops its package rows."""
+        store = IndexStore(str(tmp_path / "test.db"))
+        store.replace_manifest_packages(
+            "poetry.lock",
+            [
+                {
+                    "name": "requests",
+                    "kind": "pypi",
+                    "version": "2.31.0",
+                    "file_path": "poetry.lock",
+                    "is_dev": False,
+                }
+            ],
+        )
+
+        mock_llm = AsyncMock()
+        mock_llm.complete = AsyncMock(return_value='{"files": []}')
+
+        with patch("mira.security.poller.poll_repo", new=AsyncMock()):
+            await index_diff(
+                owner="test",
+                repo="repo",
+                config=MiraConfig(),
+                store=store,
+                llm=mock_llm,
+                removed_paths=["poetry.lock"],
+                fetcher=_FakeFetcher(),
+            )
+
+        assert store.list_manifest_packages() == []
         store.close()
 
     async def test_index_diff_removes_deleted(self, tmp_path):

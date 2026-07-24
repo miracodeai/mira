@@ -113,6 +113,7 @@ class AgenticToolExecutor:
     repo_tree: list[str]
     bytes_used: int = 0
     _content_cache: dict[str, str | None] = field(default_factory=dict)
+    call_log: list[dict] = field(default_factory=list)
 
     async def execute(self, name: str, args: dict) -> str:
         """Dispatch a tool call. Returns the tool result as a string.
@@ -122,6 +123,9 @@ class AgenticToolExecutor:
         different path). The string is what gets fed back into the next
         LLM hop as a `tool` message.
         """
+        arg = (args or {}).get("path") or (args or {}).get("pattern") or ""
+        self.call_log.append({"tool": name, "arg": arg})
+
         if self.bytes_used >= _MAX_TOTAL_OUTPUT_BYTES:
             return "[tool budget exhausted — no more tool calls accepted; submit your review now]"
 

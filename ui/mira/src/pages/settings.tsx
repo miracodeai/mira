@@ -1,6 +1,7 @@
 import { Loader2 } from "lucide-react"
 import { useEffect, useState } from "react"
 
+import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -17,20 +18,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useParams } from "react-router"
+
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { useDocumentTitle } from "@/lib/hooks"
 
 export function SettingsPage() {
+  useDocumentTitle("Settings")
   const { user: currentUser } = useAuth()
+  const { section = "models" } = useParams()
 
+  // "" = inherit from deployment config; anything else is a model id.
   const [indexingModel, setIndexingModel] = useState("")
   const [reviewModel, setReviewModel] = useState("")
-  const [indexingOptions, setIndexingOptions] = useState<
-    { value: string; label: string; recommended?: boolean }[]
-  >([])
-  const [reviewOptions, setReviewOptions] = useState<
-    { value: string; label: string; recommended?: boolean }[]
-  >([])
+  const [configIndexingModel, setConfigIndexingModel] = useState("")
+  const [configReviewModel, setConfigReviewModel] = useState("")
+  const [backend, setBackend] = useState("")
+  const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
+  const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
+  const [thinkingMode, setThinkingMode] = useState("off")
+  const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
 
@@ -57,10 +65,15 @@ export function SettingsPage() {
   useEffect(() => {
     if (!currentUser?.is_admin) return
     api.getModels().then((m) => {
-      setIndexingModel(m.indexing_model)
-      setReviewModel(m.review_model)
+      setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
+      setReviewModel(m.review_source === "config" ? "" : m.review_model)
+      setConfigIndexingModel(m.config_indexing_model)
+      setConfigReviewModel(m.config_review_model)
+      setBackend(m.backend)
       setIndexingOptions(m.indexing_options)
       setReviewOptions(m.review_options)
+      setThinkingMode(m.review_thinking_mode)
+      setThinkingOptions(m.thinking_options)
     })
     api.getGlobalSettings().then((s) => {
       setEffective(
@@ -86,7 +99,7 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels(indexingModel, reviewModel)
+    await api.saveModels(indexingModel, reviewModel, thinkingMode)
     setSavingModels(false)
     setModelsSaved(true)
     setTimeout(() => setModelsSaved(false), 2000)
@@ -300,183 +313,198 @@ export function SettingsPage() {
         </p>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Models</CardTitle>
-          <CardDescription>
-            Choose models for indexing and PR reviews
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Indexing Model</label>
-            <Select value={indexingModel} onValueChange={setIndexingModel}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {indexingOptions.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                    {opt.recommended && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        Recommended
-                      </span>
-                    )}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Used to summarize files when building the code index. A cheaper
-              model is recommended since it runs over every file.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Review Model</label>
-            <Select value={reviewModel} onValueChange={setReviewModel}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {reviewOptions.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                    {opt.recommended && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        Recommended
-                      </span>
-                    )}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Used to analyze PRs and post review comments. A more powerful
-              model gives better review quality.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button size="sm" onClick={saveModels} disabled={savingModels}>
-              {savingModels && (
-                <Loader2 className="mr-2 h-3 w-3 animate-spin" />
-              )}
-              Save
-            </Button>
-            {modelsSaved && (
-              <span className="text-xs text-muted-foreground">Saved</span>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Review behaviour overrides</CardTitle>
-          <CardDescription>
-            Tune the noise filter and review knobs without restarting the
-            server. These overrides deep-merge over{" "}
-            <code className="text-xs">mira.yaml</code> and apply to every repo
-            this Mira instance reviews. Per-repo{" "}
-            <code className="text-xs">.mira.yml</code> files still take
-            precedence for individual repos.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div>
-            <h3 className="mb-3 text-sm font-semibold">Filter</h3>
-            <div className="space-y-4">
-              {numField(
-                "filter",
-                "confidence_threshold",
-                "Confidence threshold",
-                "Drop comments the LLM rated below this confidence (0.0–1.0). Lower = more comments survive.",
-                "0.1",
-                0,
-                1
-              )}
-              {numField(
-                "filter",
-                "max_comments",
-                "Max comments per PR",
-                "Hard cap on inline comments per PR. Most severe + most confident N are kept.",
-                "1",
-                1
-              )}
-              {numField(
-                "filter",
-                "max_files",
-                "Max files",
-                "Cap on files reviewed in a single PR. PRs above this are partially reviewed.",
-                "1",
-                1
-              )}
+      {section === "models" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Models</CardTitle>
+            <CardDescription>
+              Choose models for indexing and PR reviews
+              {backend &&
+                ` — listed from ${
+                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
+                    backend
+                  ] ?? "your configured endpoint"
+                }`}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Indexing Model</label>
+              <ModelCombobox
+                value={indexingModel}
+                onChange={setIndexingModel}
+                options={indexingOptions}
+                configModel={configIndexingModel}
+              />
+              <p className="text-xs text-muted-foreground">
+                Used to summarize files when building the code index. A cheaper
+                model is recommended since it runs over every file.
+              </p>
             </div>
-          </div>
-
-          <div>
-            <h3 className="mb-3 text-sm font-semibold">Review</h3>
-            <div className="space-y-4">
-              {boolField(
-                "review",
-                "walkthrough",
-                "Post walkthrough comment",
-                "Top-level summary comment with file coverage and per-severity stats."
-              )}
-              {boolField(
-                "review",
-                "self_critique",
-                "Self-critique pass",
-                "Second-pass LLM critique on each draft comment. Drops confident-but-wrong findings at the cost of latency."
-              )}
-              {boolField(
-                "review",
-                "security_pass",
-                "Security review pass",
-                "Dedicated security pass (XSS, injection, auth, CSRF, SSRF, deserialization, crypto) merged with the main review."
-              )}
-              {boolField(
-                "review",
-                "blast_radius",
-                "Blast radius",
-                "Lists dependent repositories that import code touched by this PR in the walkthrough comment."
-              )}
-              {numField(
-                "review",
-                "max_concurrent_chunks",
-                "Max concurrent chunks",
-                "Parallelism for chunk reviews (1–20). Raise if your LLM provider can handle it.",
-                "1",
-                1,
-                20
-              )}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Review Model</label>
+              <ModelCombobox
+                value={reviewModel}
+                onChange={setReviewModel}
+                options={reviewOptions}
+                configModel={configReviewModel}
+              />
+              <p className="text-xs text-muted-foreground">
+                Used to analyze PRs and post review comments. A more powerful
+                model gives better review quality.
+              </p>
             </div>
-          </div>
-
-          <div className="space-y-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Review Thinking Mode</label>
+              <Select value={thinkingMode} onValueChange={setThinkingMode}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {thinkingOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Extended reasoning budget for reviews — improves depth on
+                capable models at the cost of latency and tokens. Works on
+                OpenRouter and Bedrock (Claude); on other endpoints it's
+                skipped automatically when unsupported.
+              </p>
+            </div>
             <div className="flex items-center gap-3">
-              <Button
-                size="sm"
-                onClick={saveOverrides}
-                disabled={savingOverrides}
-              >
-                {savingOverrides && (
+              <Button size="sm" onClick={saveModels} disabled={savingModels}>
+                {savingModels && (
                   <Loader2 className="mr-2 h-3 w-3 animate-spin" />
                 )}
-                Save overrides
+                Save
               </Button>
-              {overridesSaved && (
+              {modelsSaved && (
                 <span className="text-xs text-muted-foreground">Saved</span>
               )}
             </div>
-            {fieldErrors._global && (
-              <p className="text-xs break-words text-destructive">
-                {fieldErrors._global}
-              </p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
+
+      {section === "review" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Review behaviour overrides</CardTitle>
+            <CardDescription>
+              Tune the noise filter and review knobs without restarting the
+              server. These overrides deep-merge over{" "}
+              <code className="text-xs">mira.yaml</code> and apply to every repo
+              this Mira instance reviews. Per-repo{" "}
+              <code className="text-xs">.mira.yml</code> files still take
+              precedence for individual repos.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div>
+              <h3 className="mb-3 text-sm font-semibold">Filter</h3>
+              <div className="space-y-4">
+                {numField(
+                  "filter",
+                  "confidence_threshold",
+                  "Confidence threshold",
+                  "Drop comments the LLM rated below this confidence (0.0–1.0). Lower = more comments survive.",
+                  "0.1",
+                  0,
+                  1
+                )}
+                {numField(
+                  "filter",
+                  "max_comments",
+                  "Max comments per PR",
+                  "Hard cap on inline comments per PR. Most severe + most confident N are kept.",
+                  "1",
+                  1
+                )}
+                {numField(
+                  "filter",
+                  "max_files",
+                  "Max files",
+                  "Cap on files reviewed in a single PR. PRs above this are partially reviewed.",
+                  "1",
+                  1
+                )}
+              </div>
+            </div>
+
+            <div>
+              <h3 className="mb-3 text-sm font-semibold">Review</h3>
+              <div className="space-y-4">
+                {boolField(
+                  "review",
+                  "walkthrough",
+                  "Post walkthrough comment",
+                  "Top-level summary comment with file coverage and per-severity stats."
+                )}
+                {boolField(
+                  "review",
+                  "self_critique",
+                  "Self-critique pass",
+                  "Second-pass LLM critique on each draft comment. Drops confident-but-wrong findings at the cost of latency."
+                )}
+                {boolField(
+                  "review",
+                  "security_pass",
+                  "Security review pass",
+                  "Dedicated security pass (XSS, injection, auth, CSRF, SSRF, deserialization, crypto) merged with the main review."
+                )}
+                {boolField(
+                  "review",
+                  "blast_radius",
+                  "Blast radius",
+                  "Lists dependent repositories that import code touched by this PR in the walkthrough comment."
+                )}
+                {boolField(
+                  "review",
+                  "auto_resolve_conversations",
+                  "Auto-resolve conversations",
+                  "Automatically resolve bot review threads the LLM verifies as fixed on each review. Turn off to leave comments open until a human resolves them."
+                )}
+                {numField(
+                  "review",
+                  "max_concurrent_chunks",
+                  "Max concurrent chunks",
+                  "Parallelism for chunk reviews (1–20). Raise if your LLM provider can handle it.",
+                  "1",
+                  1,
+                  20
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <Button
+                  size="sm"
+                  onClick={saveOverrides}
+                  disabled={savingOverrides}
+                >
+                  {savingOverrides && (
+                    <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                  )}
+                  Save overrides
+                </Button>
+                {overridesSaved && (
+                  <span className="text-xs text-muted-foreground">Saved</span>
+                )}
+              </div>
+              {fieldErrors._global && (
+                <p className="text-xs break-words text-destructive">
+                  {fieldErrors._global}
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

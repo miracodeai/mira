@@ -1,24 +1,66 @@
-"""Supported-model registry — single source of truth for capabilities and pricing.
+"""Model registry — labels, capabilities, and pricing for known models.
 
 Backed by ``models.json``. Adding a new model is a one-line registry entry
-plus a release note; no other code needs to change. To deny a model entirely,
-remove its entry — the dashboard validation and dropdown derive from this file.
+plus a release note; no other code needs to change. Entries supply the
+dashboard's labels, per-purpose lists, Recommended badges, and cost-estimate
+pricing, and serve as the dropdown fallback when the backend's live catalog
+can't be fetched (see ``dashboard/model_catalog.py``). The registry does not
+restrict selection — the dashboard accepts free-form ids, like ``mira.yaml``.
+
+Operators can extend or override the bundled list at runtime by pointing
+``MIRA_MODELS_JSON_PATH`` at their own ``models.json`` (e.g. a volume mount):
+its entries are overlaid onto the bundled ones by model id, so you can add a
+custom model (``deepseek/...``, a local endpoint, …) or tweak an existing one
+without forking the package. A missing/invalid override file is ignored with a
+warning.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 
-_REGISTRY_PATH = Path(__file__).parent / "models.json"
+logger = logging.getLogger(__name__)
+
+_BUNDLED_PATH = Path(__file__).parent / "models.json"
+_OVERRIDE_ENV = "MIRA_MODELS_JSON_PATH"
+
+
+def _read(path: Path) -> dict[str, dict]:
+    """Parse a models.json file, dropping the leading ``_*`` doc keys."""
+    raw = json.loads(path.read_text())
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
 @lru_cache(maxsize=1)
 def _load() -> dict[str, dict]:
-    """Load the registry once per process, dropping the leading ``_*`` docs."""
-    raw = json.loads(_REGISTRY_PATH.read_text())
-    return {k: v for k, v in raw.items() if not k.startswith("_")}
+    """Load the registry once per process.
+
+    Starts from the bundled ``models.json``, then overlays the file at
+    ``MIRA_MODELS_JSON_PATH`` (if set) by model id — user entries add new models
+    or override bundled ones. The env var is read on first use (after process
+    startup), so a container's environment is in effect.
+    """
+    models = _read(_BUNDLED_PATH)
+    override = os.environ.get(_OVERRIDE_ENV)
+    if override:
+        path = Path(override)
+        try:
+            models = {**models, **_read(path)}
+            logger.info("Loaded model overrides from %s (%s)", _OVERRIDE_ENV, path)
+        except FileNotFoundError:
+            logger.warning("%s=%s not found; using bundled models only", _OVERRIDE_ENV, path)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "Failed to read %s=%s (%s); using bundled models only",
+                _OVERRIDE_ENV,
+                path,
+                exc,
+            )
+    return models
 
 
 def all_models() -> dict[str, dict]:
@@ -62,6 +104,13 @@ def models_for_purpose(purpose: str) -> list[dict]:
     return out
 
 
+def default_for_purpose(purpose: str) -> str | None:
+    """The recommended model id for a purpose (first recommended, else first
+    allowed). ``models_for_purpose`` is already sorted recommended-first."""
+    opts = models_for_purpose(purpose)
+    return opts[0]["value"] if opts else None
+
+
 def max_output_tokens(model_id: str, default: int = 4096) -> int:
     """Return ``max_output_tokens`` for the model, or ``default`` if unknown."""
     info = get(model_id)
@@ -73,10 +122,12 @@ def max_output_tokens(model_id: str, default: int = 4096) -> int:
 def pricing(model_id: str) -> tuple[float, float]:
     """Return ``(input_cost_per_1m, output_cost_per_1m)`` USD for the model.
 
-    Falls back to Sonnet pricing for unknown models so cost estimates aren't
-    silently zero.
+    Falls back to Sonnet pricing for unknown models — and for any cost field a
+    (possibly user-supplied) entry omits — so cost estimates aren't silently
+    zero and a partial custom entry can't crash registry load.
     """
-    info = get(model_id)
-    if info is None:
-        return (3.00, 15.00)
-    return (float(info["input_cost_per_1m"]), float(info["output_cost_per_1m"]))
+    info = get(model_id) or {}
+    return (
+        float(info.get("input_cost_per_1m", 3.00)),
+        float(info.get("output_cost_per_1m", 15.00)),
+    )

@@ -23,7 +23,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - Blast-radius SVG rendering and interactive ReactFlow graph
 - Relationship overrides and custom edges
 - External reference tracking
-- Manifest-based package extraction (`package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`, `Dockerfile`) with version constraints — zero LLM cost
+- Manifest-based package extraction (`package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`, `composer.json`, `Dockerfile`) with version constraints — zero LLM cost
 
 ## Security
 

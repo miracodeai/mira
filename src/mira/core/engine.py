@@ -15,6 +15,7 @@ from mira.config import MiraConfig
 from mira.core.chunker import chunk_files
 from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
+from mira.core.ensemble import merge_ensemble_runs
 from mira.core.file_filter import filter_files
 from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
@@ -56,6 +57,26 @@ from mira.models import (
 from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _audit_drop(c: ReviewComment, stage: str, reason: str = "") -> dict:
+    """Audit entry for a comment removed by a pipeline stage."""
+    return {
+        "stage": stage,
+        "path": c.path,
+        "line": c.line,
+        "title": c.title,
+        "severity": c.severity.name,
+        "category": c.category,
+        "confidence": c.confidence,
+        "reason": reason,
+    }
+
+
+def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> None:
+    """Record comments present before a stage but gone after it (identity-based)."""
+    kept = {id(c) for c in after}
+    audit.extend(_audit_drop(c, stage) for c in before if id(c) not in kept)
 
 
 def _clamp_confidence_to_findings(
@@ -411,7 +432,10 @@ class ReviewEngine:
         async def _resolve_threads() -> tuple[
             int, int, list[UnresolvedThread], list[ThreadDecision]
         ]:
-            if not self.bot_name:
+            # When auto-resolve is off we skip the thread-resolution path
+            # entirely — no fetch, no verify, no resolve. Round detection is
+            # unaffected; it runs off the separate get_all_bot_threads call below.
+            if not self.bot_name or not self.config.review.auto_resolve_conversations:
                 return 0, 0, [], []
             try:
                 assert self.provider is not None
@@ -453,8 +477,11 @@ class ReviewEngine:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
         # Round 2+ raises the comment threshold so we converge instead of
-        # dripping new findings on every push.
+        # dripping new findings on every push. review-rest is a continuation of
+        # round 1 onto never-reviewed files, so it stays round 1 (full
+        # thresholds, full diff) even though the first pass left threads behind.
         review_round = 1
+        is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
         try:
             if self.bot_name and self.provider is not None:
@@ -462,7 +489,7 @@ class ReviewEngine:
                     pr_info,
                     self.bot_name,
                 )
-                if all_bot_threads:
+                if all_bot_threads and not is_review_rest:
                     review_round = 2
                 resolved_thread_dicts = [
                     {
@@ -488,6 +515,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 if last_sha and last_sha != pr_info.head_sha:
                     incremental = await self.provider.get_compare_diff(
@@ -651,6 +679,16 @@ class ReviewEngine:
                         await self.provider.post_comment(pr_info, markdown)
                 except Exception as exc:
                     logger.warning("Failed to post walkthrough comment: %s", exc)
+        elif placeholder_id is not None:
+            # No walkthrough (all files excluded, empty diff, or generation
+            # failed) — finalize the placeholder so it doesn't sit on
+            # "Reviewing this PR…" forever.
+            reason = result.skipped_reason or "Walkthrough was not generated."
+            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+            try:
+                await self.provider.update_comment(pr_info, placeholder_id, markdown)
+            except Exception as exc:
+                logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",
@@ -659,6 +697,7 @@ class ReviewEngine:
             llm_resolved,
         )
 
+        posted_comment_ids: list[int] = []
         if result.comments:
             if self.dry_run:
                 logger.info(
@@ -667,13 +706,17 @@ class ReviewEngine:
                     pr_info.url,
                 )
             else:
-                await self.provider.post_review(pr_info, result, bot_name=self.bot_name)
+                posted_comment_ids = (
+                    await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
+                )
         else:
             logger.info("No code suggestions for PR %s", pr_info.url)
 
         result.thread_decisions = thread_decisions
 
         try:
+            import json as _json
+
             from mira.models import Severity
 
             store = IndexStore.open(pr_info.owner, pr_info.repo)
@@ -684,7 +727,8 @@ class ReviewEngine:
             )
             categories = ",".join(sorted({c.category for c in result.comments if c.category}))
             duration = int((_time.monotonic() - _review_start) * 1000)
-            store.record_review(
+            reviewed_paths_json = _json.dumps(result.reviewed_paths or [])
+            review_event = store.record_review(
                 pr_number=pr_info.number,
                 pr_title=pr_info.title,
                 pr_url=pr_info.url,
@@ -697,6 +741,32 @@ class ReviewEngine:
                 tokens_used=result.token_usage.get("total_tokens", 0),
                 duration_ms=duration,
                 categories=categories,
+                author=pr_info.author,
+                author_avatar_url=pr_info.author_avatar_url,
+                reviewed_paths=reviewed_paths_json,
+            )
+            # Persist each comment Mira posted so the dashboard can show the
+            # actual review conversation, not just aggregate counts.
+            store.add_review_comments(
+                review_event.id,
+                pr_info.number,
+                pr_info.url,
+                [
+                    {
+                        "path": c.path,
+                        "line": c.line,
+                        "severity": c.severity.value
+                        if hasattr(c.severity, "value")
+                        else str(c.severity),
+                        "category": c.category,
+                        "title": c.title,
+                        "body": c.body,
+                        "github_comment_id": posted_comment_ids[i]
+                        if i < len(posted_comment_ids)
+                        else 0,
+                    }
+                    for i, c in enumerate(result.comments)
+                ],
             )
             try:
                 from mira.analysis.feedback import synthesize_rules
@@ -716,6 +786,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 prior_reviewed = set(prior.reviewed_paths) if prior else set()
                 prior_skipped = set(prior.skipped_paths) if prior else set()
@@ -730,7 +801,8 @@ class ReviewEngine:
                         reviewed_paths=sorted(new_reviewed),
                         skipped_paths=sorted(new_skipped),
                         chunk_index=(prior.chunk_index + 1) if prior else 1,
-                    )
+                    ),
+                    platform=pr_info.platform,
                 )
             except Exception as progress_err:
                 logger.debug("Failed to persist review progress: %s", progress_err)
@@ -748,6 +820,7 @@ class ReviewEngine:
                     pr_info.repo,
                     pr_info.number,
                     pr_info.head_sha,
+                    platform=pr_info.platform,
                 )
             except Exception as exc:
                 logger.debug("Failed to record last reviewed SHA: %s", exc)
@@ -993,14 +1066,14 @@ class ReviewEngine:
                 _rules_store.close()
 
                 try:
-                    from mira.dashboard.db import AppDatabase
+                    from mira.dashboard.api import _app_db
 
-                    _app_db = AppDatabase()
-                    for rule_text in _app_db.get_global_rules_text():
-                        parts = rule_text.split(": ", 1)
-                        title = parts[0] if len(parts) > 1 else "Global Rule"
-                        content = parts[1] if len(parts) > 1 else rule_text
-                        custom_rules.insert(0, {"title": title, "content": content})
+                    if _app_db is not None:
+                        for rule_text in _app_db.get_global_rules_text():
+                            parts = rule_text.split(": ", 1)
+                            title = parts[0] if len(parts) > 1 else "Global Rule"
+                            content = parts[1] if len(parts) > 1 else rule_text
+                            custom_rules.insert(0, {"title": title, "content": content})
                 except Exception:
                     pass
         except Exception:
@@ -1009,6 +1082,7 @@ class ReviewEngine:
         valid_paths = {f.path for f in filtered}
         base_existing = list(existing_comments) if existing_comments else []
         semaphore = _asyncio.Semaphore(self.config.review.max_concurrent_chunks)
+        audit: list[dict] = []
 
         async def _review_chunk(
             idx: int,
@@ -1039,6 +1113,22 @@ class ReviewEngine:
                         resolved_threads=resolved_threads,
                         team_conventions=team_conventions,
                     )
+
+                    def _parse(raw: str) -> tuple[list[ReviewComment], list[KeyIssue], str]:
+                        parsed = parse_llm_response(raw)
+                        return (
+                            convert_to_review_comments(
+                                parsed,
+                                valid_paths,
+                                diff_files=chunk.files,
+                            ),
+                            [
+                                KeyIssue(issue=ki.issue, path=ki.path, line=ki.line)
+                                for ki in parsed.key_issues
+                            ],
+                            parsed.summary or "",
+                        )
+
                     raw_response = ""
                     use_agentic = (
                         self.config.review.agentic_tools
@@ -1053,19 +1143,57 @@ class ReviewEngine:
                             repo_tree=list(self._agentic_repo_tree),
                         )
                         raw_response = await agentic_review_loop(self.llm, messages, executor)
+                        audit.append({"stage": "agentic", "chunk": idx, "calls": executor.call_log})
                     if not raw_response:
                         raw_response = await self.llm.review(messages)
-                    parsed = parse_llm_response(raw_response)
-                    comments = convert_to_review_comments(
-                        parsed,
-                        valid_paths,
-                        diff_files=chunk.files,
-                    )
-                    key_issues = [
-                        KeyIssue(issue=ki.issue, path=ki.path, line=ki.line)
-                        for ki in parsed.key_issues
-                    ]
-                    return comments, key_issues, parsed.summary or ""
+                    comments, key_issues, summary_text = _parse(raw_response)
+
+                    # Ensemble: fire the extra runs in parallel and keep
+                    # majority-vote findings. The agentic loop (if any) only
+                    # runs once; extras sample the plain review path.
+                    n_runs = self.config.review.ensemble_runs
+                    if n_runs > 1:
+                        extra_raws = await _asyncio.gather(
+                            *[
+                                self.llm.review(
+                                    messages,
+                                    temperature=self.config.review.ensemble_temperature,
+                                )
+                                for _ in range(n_runs - 1)
+                            ],
+                            return_exceptions=True,
+                        )
+                        runs = [comments]
+                        for raw in extra_raws:
+                            if isinstance(raw, BaseException):
+                                logger.warning("Ensemble run failed: %s", raw)
+                                continue
+                            try:
+                                extra_comments, _, _ = _parse(raw)
+                                runs.append(extra_comments)
+                            except ResponseParseError as exc:
+                                logger.warning("Ensemble run failed to parse: %s", exc)
+                        if len(runs) > 1:
+                            before = sum(len(r) for r in runs)
+                            comments = merge_ensemble_runs(runs)
+                            audit.append(
+                                {
+                                    "stage": "ensemble_vote",
+                                    "chunk": idx,
+                                    "runs": len(runs),
+                                    "drafted": before,
+                                    "kept": len(comments),
+                                }
+                            )
+                            logger.info(
+                                "Ensemble chunk %d: %d comments across %d runs -> %d consensus",
+                                idx + 1,
+                                before,
+                                len(runs),
+                                len(comments),
+                            )
+
+                    return comments, key_issues, summary_text
                 except ResponseParseError as exc:
                     logger.warning(
                         "Chunk %d/%d failed to parse, skipping: %s",
@@ -1092,11 +1220,13 @@ class ReviewEngine:
         all_comments: list[ReviewComment] = []
         all_key_issues: list[KeyIssue] = []
         summaries: list[str] = []
-        for comments, key_issues, summary_text in chunk_results:
+        for i, (comments, key_issues, summary_text) in enumerate(chunk_results):
+            audit.append({"stage": "drafted", "chunk": i, "count": len(comments)})
             all_comments.extend(comments)
             all_key_issues.extend(key_issues)
             if summary_text:
                 summaries.append(summary_text)
+        audit.append({"stage": "drafted", "chunk": "security", "count": len(security_comments)})
         all_comments.extend(security_comments)
 
         all_comments = [classify_severity(c) for c in all_comments]
@@ -1106,16 +1236,18 @@ class ReviewEngine:
             self.config.filter,
             review_round=review_round,
         )
+        _audit_stage(audit, "noise_filter", all_comments, final_comments)
 
         # Dedupe against still-open threads before self-critique, so we don't
         # spend critique calls on comments we'd discard anyway.
         if existing_comments:
-            before = len(final_comments)
+            before_drop = final_comments
             final_comments = drop_already_posted(final_comments, existing_comments)
-            if before != len(final_comments):
+            _audit_stage(audit, "already_posted", before_drop, final_comments)
+            if len(before_drop) != len(final_comments):
                 logger.info(
                     "Dropped %d comment(s) duplicating existing open threads",
-                    before - len(final_comments),
+                    len(before_drop) - len(final_comments),
                 )
 
         # Self-critique catches confident-but-wrong claims that the noise
@@ -1130,6 +1262,8 @@ class ReviewEngine:
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
                     indexing_llm=self.indexing_llm,
+                    diff_files=filtered,
+                    audit=audit,
                 )
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
@@ -1168,4 +1302,5 @@ class ReviewEngine:
             reviewed_paths=selected_paths,
             skipped_paths=skipped_paths_only,
             total_paths=all_paths,
+            audit=audit,
         )

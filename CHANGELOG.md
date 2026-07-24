@@ -4,6 +4,153 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-07-15
+
+### Added
+
+- **Review dashboard** — a new admin-only **Review** page focused on keeping a human in the loop on PR reviews: **stale / waiting PRs** (how long open, how long idle, who they're waiting on), a **reviewer-responsiveness leaderboard** that surfaces the bottleneck (pending review queue + median time to respond once requested), **throughput trends** (median time-to-first-review and time-to-merge, this week vs last), an **approved-&-merged** count, **rubber-stamp detection** (approvals with no substantive review — empty/"LGTM" body and no real inline comments — surfaced org-wide and per reviewer), and an **open-PR status board** (approved / changes-requested / awaiting). Review timing is captured live from webhooks (`pull_request_review`, review-requested) and seeded by a light GitHub backfill of open PRs + existing reviews on repo add / admin **Refresh** / the `mira backfill-contributors` CLI.
+- **Contribution analytics (secondary)** — each contributor's detail page also shows authoring stats (commits, PRs opened/merged, lines), a GitHub-style year-long contribution heatmap, and Mira's differentiated **review-quality** signal (blockers/warnings their PRs triggered + the accept rate of Mira's feedback). Contributors are keyed provider-agnostically `(provider, login)` so non-GitHub providers can be added later.
+- A reusable **DataTable** component (column defs, header sorting, standalone pagination, loading/empty states) plus an inline 5-bar **gauge**, both used across the review pages.
+
+## [0.6.0] — 2026-07-10
+
+### Added
+
+- **GitLab support — full parity with GitHub.** Mira now auto-reviews merge requests via webhooks, posts inline review comments anchored to diff positions (with a plain-note fallback when GitLab rejects a position), and answers `@mention` commands on MRs: `review`, `review-rest`, `pause`/`resume`, inline `reject`, free-form questions, and merge-time learning. Round 2+ incremental re-review, thread auto-resolution once a finding is fixed, JIT cross-file context, file-history context, codebase indexing, incremental push indexing, and vulnerability/package search all work the same as on GitHub. Authentication is a group or project access token — set `MIRA_GITLAB_TOKEN` + `MIRA_GITLAB_WEBHOOK_SECRET` and point a project webhook at `/gitlab/webhook`; self-managed instances set `MIRA_GITLAB_API_URL`. GitHub App credentials are now optional when GitLab is configured (set either, or both). See the [GitLab setup guide](https://docs.miracode.ai/gitlab).
+- **Dynamic platform layer.** Adding a git host is now data, not code: a `platforms.json` registry (mirroring `providers.json` for LLMs) carries each platform's API URL, webhook route, signature scheme, and terminology, overridable at runtime via `MIRA_PLATFORMS_JSON_PATH`. The repo data model extends to `(platform, owner, repo)`, so same-named repos coexist across hosts; existing GitHub rows migrate automatically with `platform = github`.
+- **Mira answers to both its handles.** On either platform, a mention of the configured `MIRA_BOT_NAME` *or* the bot's real account username (GitHub App slug / GitLab token user) triggers a command — whichever a teammate types.
+
+### Changed
+
+- **Review comment headers use one severity marker instead of two emojis.** The category line is now plain bold text (`**Security issue**`) above the severity badge, rather than a second leading emoji. Cleaner, still scannable, and it renders correctly on both GitHub and GitLab (GitLab needed a Markdown hard break where GitHub tolerated a bare newline).
+
+### Fixed
+
+- **Malformed LLM JSON is recovered instead of dropped.** Responses that leak Anthropic tool-call XML (`</parameter></invoke>`) or arrive with an unbalanced brace are now repaired before parsing, so a chunk's comments are no longer lost when a model's output strays from clean JSON. Affects both the main and security passes.
+- **Stale PostgreSQL connections after idle** — `AppDatabase` and `pg_store` keep
+  long-lived psycopg handles that can go dead behind poolers or `idle_session_timeout`.
+  A new `mira.db.postgres` module adds `ReconnectingCursor`, which retries once on
+  `OperationalError` for `execute` and `executemany` (covering dashboard API routes,
+  indexing, and the vulnerability poller) without adding per-query liveness probes.
+- **`/health` reflects Postgres availability** — when `DATABASE_URL` is Postgres,
+  the endpoint runs a one-shot `SELECT 1` on a dedicated connection that is always
+  closed afterward, and returns HTTP 503 if the database is unreachable.
+- **Creating or editing a learning requires authentication** — the learned-rule
+  create and update endpoints now return 401 for unauthenticated requests instead
+  of proceeding with an anonymous author.
+- **Dashboard setup and repo sync respect a repo's platform** — completing setup
+  writes index mode and status to the correct `(platform, owner, repo)` row (GitLab
+  repos could previously not be opted out of initial indexing), and the GitHub repo
+  sync no longer targets GitLab rows when pruning stale repos.
+
+## [0.5.1] — 2026-07-09
+
+### Fixed
+
+- **One malformed walkthrough entry no longer drops the whole walkthrough** — when the LLM omits a required `path` or `label` on a single `change_groups` entry (plausible on large diffs), that entry is now skipped with a warning instead of failing the entire response, so the walkthrough comment still posts. Closes #162.
+- **The walkthrough placeholder is always finalized** — when a review produces no walkthrough (all files matched exclusion rules, empty diff, size limits, or walkthrough generation failed), the "Reviewing this PR…" placeholder comment is now updated with the reason instead of staying stuck forever. Part of #162.
+
+## [0.5.0] — 2026-07-07
+
+### Added
+
+- **Learnings approval queue** — auto-synthesized learnings now land as *pending* and must be approved by an admin before they influence reviews. Approve or reject from a queue-clearing side panel or straight from the dashboard's pending-learnings widget.
+- **Anyone can propose a learning** — non-admin submissions are created as pending; creators can edit or delete their own pending learnings while admins manage everything. Learnings track their author and show an avatar + username.
+- **Learnings page overhaul** — dedicated add/edit page (replacing the modal), sortable and paginated table (recently-updated first), repo/status/enabled filters with search, URL-driven tabs so browser Back works, and GitHub links per repo.
+- **Newest frontier models in the registry** — Claude Sonnet 5, Claude Opus 4.8, Claude Fable 5, GPT-5.2, Gemini 3.1 Pro Preview, DeepSeek V4 Flash/Pro, and MiniMax M3, with pricing and ids verified against the live OpenRouter catalog.
+
+### Changed
+
+- **Superseded registry entries removed** — GPT-4o and GPT-4o mini, GPT-4.1 Mini, Gemini 2.5 Flash/Pro, MiniMax M2.7, and the OpenRouter Claude Opus 4.6 id (the Bedrock profile remains). Deployments still configured with these keep working — the dashboard accepts any id the configured backend serves; they just lose curated pricing metadata.
+- **Recommended defaults unchanged** — Claude Sonnet 4.6 for reviews and Claude Haiku 4.5 for indexing were benchmarked on the review-quality baseline and keep the badge until a newer model measurably beats them.
+
+### Fixed
+
+- **Dark mode dropdown contrast** — popovers and select menus use an elevated surface color instead of blending invisibly into the card behind them.
+- **Pending learnings are private** — the learned-rule detail endpoint requires authentication and returns 403 when a non-admin reads someone else's pending/rejected learning.
+- The learnings panel advances to the next pending item only after the approve/reject call resolves.
+- Database inserts that fail to produce a row id now raise instead of silently returning id 0 (learned rules, feedback events).
+- The learned-rules API client URL-encodes the status query parameter.
+
+## [0.4.1] — 2026-07-06
+
+### Added
+
+- **Activity page** — an org-wide feed of PR reviews with a filterable table and a per-PR detail timeline. (#145, #146, #147 — already in the 0.4.1 betas.)
+- **Backend-aware, searchable model pickers** — the dashboard's model dropdowns are now search bars that list the configured backend's live catalog (OpenRouter's tool-capable models, your Bedrock account's inference profiles, or a generic endpoint's `/models`), cached for an hour with the bundled registry as fallback. Any free-form model id can be typed directly, matching `mira.yaml`'s flexibility, and an **Inherit from deployment config** choice clears the dashboard override so `mira.yaml` is authoritative again. The effective model and its source (`dashboard setting` vs `mira.yaml`) are logged on every review, so an override is never silent. Closes #124.
+- **Current-generation models in the registry** — GPT-5 Nano/Mini, GPT-5.1 Codex/Codex Mini, GPT-4.1 Mini, Gemini 3 Flash (Preview), and Gemini 3.1 Flash Lite, with pricing verified against the live OpenRouter catalog. Closes #125.
+
+### Changed
+
+- **`llm.base_url` is validated at config load** — non-http(s) schemes are rejected, and plain `http://` is allowed only for local endpoints (localhost, private IPs, dotless hostnames like docker-compose services); public hosts must use `https://`. A failed API-key lookup during a model-catalog fetch is now logged instead of silently sending an unauthenticated request.
+
+### Fixed
+
+- **Discord webhooks work via the Slack-compatible endpoint** — a `discord.com/api/webhooks/{id}/{token}/slack` URL is now detected as Slack format instead of falling through to generic JSON (which Discord rejects). Bare Discord URLs stay generic on purpose, so the test button surfaces the mismatch instead of silently guessing. Closes #158.
+- **Dependency-bump pushes refresh the vulnerability inventory** — push-triggered incremental indexing skipped manifests/lockfiles entirely (they're excluded from code indexing), so merging a lockfile-only PR left `package_manifests` stale and the Vulnerabilities page kept flagging already-fixed advisories until a full re-index. `index_diff` now routes changed/removed manifests through the same parse-and-store pass the full indexer uses and fires an immediate OSV poll. Closes #157.
+- **Global rules now reach reviews on Postgres deployments** — the review engine read global rules from a throwaway SQLite `AppDatabase()` instead of the configured `DATABASE_URL` backend, so dashboard-stored rules were silently ignored, a stray `_app.db` (with a default-password admin) was created in the index dir, and a DB connection leaked on every review. It now reuses the server's configured instance. Closes #123.
+
+## [0.4.0] — 2026-06-14
+
+### Added
+
+- **Provider profiles — adding an LLM provider is now data, not code.** The OpenAI-compatible client's per-provider quirks (attribution headers, whether the model id keeps its `vendor/` prefix, reasoning-effort remapping, default key env var) moved out of hardcoded `if openrouter` branches into a declarative `providers.json`, matched to the configured `base_url`. OpenRouter's quirks are now a single profile entry rather than code branches; any endpoint with no matching profile gets the portable default (bare model name, no extra headers), so most OpenAI-compatible providers work with nothing but `base_url` + `api_key_env`. Extend or override the bundled list at runtime by pointing `MIRA_PROVIDERS_JSON_PATH` at your own file — same idiom as `MIRA_MODELS_JSON_PATH` for models. No behaviour change for existing configs.
+- **`exclude_files` apply to indexing** — `filter.exclude_patterns` now governs the index as well as review, so committed vendor dirs, generated SDKs, and test data can be kept out of indexing without burning tokens on them. The same globs that exclude a file from review exclude it from indexing; the dashboard's per-repo file count reflects the exclusions too. Closes #97.
+- **Indexing file-size limit** — new `index.max_file_size` (bytes, default 1 MB) skips any file above the limit before it reaches the summarizer. Lower it to keep indexing cheap on large codebases with big fixtures or generated files; `0` disables the limit. Replaces the previous hard-coded 1 MB tarball cap and now also covers the per-file fetch path. Closes #98.
+
+### Fixed
+
+- **Indexing no longer drops a whole batch on one malformed file** — summarization responses with unescaped backslashes (e.g. DeepSeek emitting PHP namespaces like `\App\Models` or Windows paths inside JSON strings) are repaired before parsing, so a single bad string no longer fails `json.loads` and discards every file in the batch. Parsing is also lenient about raw control characters. Closes #96.
+- **Indexing no longer crashes on a null symbol field** — a model emitting an explicit `"signature": null` (or null `kind` / `description`) was inserting `NULL` into a `NOT NULL` column and aborting the file. Those fields are now coerced to their defaults, and symbols with no name are skipped. Part of #96.
+
+## [0.3.1] — 2026-06-11
+
+### Added
+
+- **Review thinking mode** — an extended-reasoning budget for reviews (`off` / `low` / `medium` / `high` / `max`), so a model spends more effort before commenting. Set it in `mira.yaml` (`llm.review_reasoning_effort`) or via the Review Model section on the Settings page; it applies to reviews only and defaults to off. Works on OpenRouter (DeepSeek, Claude, and OpenAI reasoning models) and on Bedrock for Claude; on a model or endpoint that doesn't support a reasoning effort it's dropped automatically so the review still runs. (`max` is DeepSeek's top level — sent as `xhigh` on OpenRouter.)
+- **Runtime-adjustable model registry** — point `MIRA_MODELS_JSON_PATH` at your own `models.json` to add custom models (a cost-effective DeepSeek/MiniMax entry, a local endpoint, …) or override bundled ones, without reinstalling. Entries overlay the bundled list by id; a missing or invalid file is ignored with a warning, and a partial entry falls back to default pricing rather than crashing. Closes #83.
+
+### Changed
+
+- The eval suite is now hermetic for reliable release gating — the eval engine pins its filter config so ambient dashboard/DB overrides can't change what the tests see, the planted-issue catch tests retry to absorb model variance, and the noisy comment-count metric moved to the nightly benchmark.
+
+## [0.3.0] — 2026-06-11
+
+### Added
+
+- **Outbound webhooks** — POST to Slack, Microsoft Teams, or a generic JSON endpoint when a review finishes, a review fails, a high-severity finding lands, or a repo finishes indexing. Configured on the admin Settings page (dedicated list + add/edit pages). Delivery is best-effort and SSRF-guarded (private/internal addresses are refused), so a slow or misconfigured endpoint can't delay or break a review.
+- **User management** — self-service password change and admin password reset (as proper pages, not modals), a sidebar user dropdown with account switching, DiceBear avatars, and last-sign-in tracking shown in the users table.
+- **Per-page browser tab titles** — each dashboard page now sets its own `document.title` instead of a single static title.
+
+### Fixed
+
+- **Thinking-mode models no longer fail reviews** — models that reject a forced `tool_choice` (e.g. deepseek thinking mode, which returns a 400) are detected and retried with `tool_choice: "auto"`, and the model is remembered so later calls skip the doomed attempt. Fixes #82.
+
+### Changed
+
+- **Evals gate the release build** — the LLM eval suite now runs on a release tag and the container is only built/pushed if it passes. The noisy threshold-based scorecard moved to a separate nightly `benchmark` job (and a `benchmark` pytest marker) so it's tracked without gating releases.
+- The dashboard API client was split into per-domain modules (internal refactor, no behaviour change).
+
+## [0.2.3] — 2026-06-08
+
+### Added
+
+- **MiniMax M2.7 support with think-block stripping** — `<think>…</think>` reasoning blocks (as emitted by MiniMax and some other models) are stripped before JSON parsing, so models that "think out loud" work for indexing and review. New `minimax/MiniMax-M2.7` registry entry.
+- **Dynamic bot @mention in the dashboard** — the UI now shows the App's real handle (auto-detected from its GitHub slug, default `@miracodeai`) instead of a hardcoded `@mira-bot`. Exposed via `/api/version`.
+
+### Fixed
+
+- **Blast Radius no longer leaks private repos** — a public repo's review never names a dependent repo that isn't known to be public. Repo visibility is tracked in the registry, backfilled automatically on startup/sync, and unknown visibility is treated as private (safe by default).
+- **No more duplicate review comments on re-review** — findings that already have an open bot thread are skipped, so each push stops re-posting the same suggestion.
+- **Indexing is resilient to bad files** — a duplicate symbol name no longer crashes the whole index (`symbols` upsert is conflict-safe on both Postgres and SQLite), and a single failed file/batch is skipped instead of aborting the repo (which also stops runaway token spend after a failure).
+- **Thread-resolution failures are now logged** — the real GraphQL error surfaces instead of being silently swallowed.
+- **Think-block regex** now strips the full `<think>…</think>` block (it previously matched only the opening tag).
+- **Sidebar navigation active state** — the active nav item is driven off `aria-current` (single source of truth), with a cleaner fill + bold treatment and a fixed header divider.
+
+### Changed
+
+- Dependency bumps (vite 8, tailwindcss 4.3, react-dom, eslint 10, lucide-react, @vitejs/plugin-react, @types/node, etc.).
+
 ## [0.2.2] — 2026-06-03
 
 ### Added
@@ -119,6 +266,14 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.6.0]: https://github.com/miracodeai/mira/releases/tag/v0.6.0
+[0.5.1]: https://github.com/miracodeai/mira/releases/tag/v0.5.1
+[0.5.0]: https://github.com/miracodeai/mira/releases/tag/v0.5.0
+[0.4.1]: https://github.com/miracodeai/mira/releases/tag/v0.4.1
+[0.4.0]: https://github.com/miracodeai/mira/releases/tag/v0.4.0
+[0.3.1]: https://github.com/miracodeai/mira/releases/tag/v0.3.1
+[0.3.0]: https://github.com/miracodeai/mira/releases/tag/v0.3.0
+[0.2.3]: https://github.com/miracodeai/mira/releases/tag/v0.2.3
 [0.2.2]: https://github.com/miracodeai/mira/releases/tag/v0.2.2
 [0.2.1]: https://github.com/miracodeai/mira/releases/tag/v0.2.1
 [0.2.0]: https://github.com/miracodeai/mira/releases/tag/v0.2.0

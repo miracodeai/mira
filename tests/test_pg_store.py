@@ -32,10 +32,7 @@ class _FakeCursor:
     def fetchall(self):
         return self._cur.fetchall()
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
+    def close(self):
         self._cur.close()
 
 

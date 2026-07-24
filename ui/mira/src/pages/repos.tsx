@@ -14,8 +14,10 @@ import {
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, type RepoListItem } from "@/lib/api"
+import { useDocumentTitle } from "@/lib/hooks"
 
 export function ReposPage() {
+  useDocumentTitle("Repositories")
   const [repos, setRepos] = useState<RepoListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [searchParams] = useSearchParams()
@@ -157,6 +159,12 @@ function StatusBadge({ status, error }: { status: string; error?: string }) {
       )
     case "ready":
       return null
+    case "empty":
+      return (
+        <Badge variant="outline" className="text-muted-foreground" title={error}>
+          Empty
+        </Badge>
+      )
     case "failed":
       return (
         <Badge variant="destructive" title={error}>

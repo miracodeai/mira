@@ -87,6 +87,7 @@ export function SetupModal({
       repos.map((r) => ({
         owner: r.owner,
         repo: r.repo,
+        platform: r.platform,
         enabled: true,
       })),
       "full",
@@ -100,7 +101,7 @@ export function SetupModal({
     // table after each call.
     api
       .completeSetup(
-        repos.map((r) => ({ owner: r.owner, repo: r.repo, enabled: false })),
+        repos.map((r) => ({ owner: r.owner, repo: r.repo, platform: r.platform, enabled: false })),
         "full",
       )
       .finally(() => onComplete())
@@ -109,6 +110,19 @@ export function SetupModal({
   const orgName = repos.length > 0 ? repos[0].owner : "your organization"
   const totalFiles = estimate?.file_count ?? 0
   const hasFileCounts = totalFiles > 0
+
+  const accessHelp = {
+    github:
+      "To change which repos Mira can access, update your GitHub App installation permissions.",
+    forgejo:
+      "To change which repos Mira can access, update your Forgejo access token scopes.",
+    gitlab:
+      "To change which repos Mira can access, update your GitLab access token scopes.",
+  } as const
+  const platform = repos[0]?.platform ?? "github"
+  const helpText =
+    accessHelp[platform as keyof typeof accessHelp] ??
+    "To change which repos Mira can access, update your platform token or installation permissions."
 
   return (
     <Dialog open={open}>
@@ -221,8 +235,7 @@ export function SetupModal({
             </div>
 
             <p className="text-xs text-muted-foreground">
-              To change which repos Mira can access, update your GitHub App
-              installation permissions.
+              {helpText}
             </p>
           </>
         )}

@@ -18,15 +18,26 @@ from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
     HumanReviewComment,
-    KeyIssue,
     OpenPRRef,
     PRInfo,
     ReviewComment,
     ReviewResult,
-    Severity,
     UnresolvedThread,
 )
 from mira.providers.base import BaseProvider
+
+# Shared comment-formatting helpers (re-exported for back-compat — callers and
+# tests import these names from this module).
+from mira.providers.formatting import (  # noqa: F401
+    _CATEGORY_DISPLAY,
+    parse_bot_comment_metadata,
+)
+from mira.providers.formatting import (
+    format_comment_body as _format_comment_body,
+)
+from mira.providers.formatting import (
+    format_key_issues as _format_key_issues,
+)
 
 # Transient errors worth retrying — network issues and GitHub server errors.
 _RETRYABLE = (ConnectionError, TimeoutError, httpx.TransportError, GithubException)
@@ -118,27 +129,6 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
 }
 """
 
-_CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
-    "bug": ("\U0001f41b", "Bug"),
-    "security": ("\U0001f512", "Security issue"),
-    "performance": ("\u26a1", "Performance"),
-    "error-handling": ("\u26a0\ufe0f", "Error Handling"),
-    "race-condition": ("\U0001f3c1", "Race Condition"),
-    "resource-leak": ("\U0001f4a7", "Resource Leak"),
-    "maintainability": ("\U0001f527", "Refactor suggestion"),
-    "style": ("\U0001f3a8", "Style"),
-    "clarity": ("\U0001f4dd", "Clarity"),
-    "configuration": ("\u2699\ufe0f", "Configuration"),
-    "other": ("\U0001f4cc", "Note"),
-}
-
-_SEVERITY_BADGE: dict[Severity, str] = {
-    Severity.BLOCKER: "\U0001f6d1 Blocker \u2014 must fix before merge",
-    Severity.WARNING: "\u26a0\ufe0f Warning",
-    Severity.SUGGESTION: "\U0001f4a1 Suggestion",
-    Severity.NITPICK: "\U0001f4ac Nitpick",
-}
-
 # Matches: https://github.com/owner/repo/pull/123 or owner/repo#123
 _PR_URL_PATTERN = re.compile(
     r"(?:https?://github\.com/)?(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+)(?:/pull/|#)(?P<number>\d+)"
@@ -172,6 +162,7 @@ class GitHubProvider(BaseProvider):
         def _fetch() -> PRInfo:
             gh_repo = self._github.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
+            user = pr.user
             return PRInfo(
                 title=pr.title or "",
                 description=pr.body or "",
@@ -182,6 +173,8 @@ class GitHubProvider(BaseProvider):
                 owner=owner,
                 repo=repo,
                 head_sha=pr.head.sha or "",
+                author=(user.login or "") if user else "",
+                author_avatar_url=(user.avatar_url or "") if user else "",
             )
 
         try:
@@ -323,9 +316,13 @@ class GitHubProvider(BaseProvider):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
-    ) -> None:
+    ) -> list[int]:
         if not result.comments:
-            return
+            return []
+
+        # The line GitHub anchors a comment to (the end line for multi-line).
+        def _anchor(c: ReviewComment) -> int:
+            return c.end_line if (c.end_line and c.end_line > c.line) else c.line
 
         review_comments: list[dict[str, str | int]] = []
         for comment in result.comments:
@@ -349,7 +346,7 @@ class GitHubProvider(BaseProvider):
             review_body += _format_key_issues(result.key_issues)
 
         @_retry_transient
-        def _post() -> None:
+        def _post() -> list[int]:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
 
@@ -358,14 +355,30 @@ class GitHubProvider(BaseProvider):
                 raise ProviderError("PR has no commits")
             latest_commit = commits[-1]
 
+            # GitHub comment IDs aligned to result.comments (0 = unknown).
+            ids = [0] * len(result.comments)
+
             try:
-                pr.create_review(
+                review = pr.create_review(
                     commit=latest_commit,
                     body=review_body,
                     event="COMMENT",
                     comments=review_comments,  # type: ignore[arg-type]
                 )
-                return
+                # Map the posted comments back to ours by (path, anchored line)
+                # so human replies can later link to the exact comment.
+                try:
+                    by_loc: dict[tuple[str, int], int] = {}
+                    for posted_c in review.get_comments():
+                        ln = posted_c.line
+                        if ln is None:
+                            ln = getattr(posted_c, "original_line", 0) or 0
+                        by_loc[(posted_c.path, ln)] = posted_c.id
+                    for i, c in enumerate(result.comments):
+                        ids[i] = by_loc.get((c.path, _anchor(c)), 0)
+                except Exception:
+                    logger.debug("Could not map review comment IDs", exc_info=True)
+                return ids
             except GithubException as exc:
                 if exc.status != 422:
                     raise
@@ -378,7 +391,7 @@ class GitHubProvider(BaseProvider):
             # than /reviews. Inlines aren't grouped under a review object,
             # but they still show up on the PR.
             posted = 0
-            for rc in review_comments:
+            for i, rc in enumerate(review_comments):
                 try:
                     kwargs: dict = {
                         "body": rc["body"],
@@ -396,7 +409,8 @@ class GitHubProvider(BaseProvider):
                         kwargs.get("line"),
                         len(kwargs.get("body", "")),
                     )
-                    pr.create_review_comment(**kwargs)
+                    created = pr.create_review_comment(**kwargs)
+                    ids[i] = getattr(created, "id", 0) or 0
                     posted += 1
                 except GithubException as exc:
                     if exc.status == 422:
@@ -426,9 +440,10 @@ class GitHubProvider(BaseProvider):
                     )
 
             logger.info("Individual fallback: posted %d/%d comments", posted, len(review_comments))
+            return ids
 
         try:
-            await asyncio.to_thread(_post)
+            return await asyncio.to_thread(_post)
         except ProviderError:
             raise
         except Exception as e:
@@ -500,6 +515,19 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to reply to review comment: {e}") from e
+
+    async def get_comment_body(self, pr_info: PRInfo, comment_id: int) -> str:
+        """Fetch a review (line) comment's body by id. Best-effort."""
+
+        def _fetch() -> str:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            pr = gh_repo.get_pull(pr_info.number)
+            return (pr.get_review_comment(comment_id).body or "")[:1500]
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception:
+            return ""
 
     @retry(
         stop=stop_after_attempt(3),
@@ -1000,192 +1028,22 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to fetch human review comments: {e}") from e
 
+    async def get_review_inline_comments(self, pr_info: PRInfo, review_id: int) -> list[str]:
+        """Return the bodies of the inline comments that belong to one review
+        (matched via ``pull_request_review_id``). Used to classify whether an
+        approval was a substantive review or a rubber-stamp."""
 
-_LABEL_TO_CATEGORY = {label: cat for cat, (_, label) in _CATEGORY_DISPLAY.items()}
-_CATEGORY_EMOJI_TO_NAME = {emoji: cat for cat, (emoji, _) in _CATEGORY_DISPLAY.items()}
-_SEVERITY_EMOJI_MAP: dict[str, str] = {
-    "\U0001f6d1": "blocker",
-    "⚠️": "warning",
-    "⚠": "warning",
-    "\U0001f4a1": "suggestion",
-    "\U0001f4ac": "nitpick",
-}
+        @_retry_transient
+        def _fetch() -> list[str]:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            pr = gh_repo.get_pull(pr_info.number)
+            return [
+                c.body or ""
+                for c in pr.get_review_comments()
+                if getattr(c, "pull_request_review_id", None) == review_id
+            ]
 
-_CATEGORY_LINE_RE = re.compile(r"^(\S+)\s+\*\*([^*]+)\*\*\s*$")
-_BOLD_LINE_RE = re.compile(r"^\*\*([^*\n]+)\*\*\s*$")
-
-
-def parse_bot_comment_metadata(body: str) -> dict[str, str]:
-    """Extract category, severity, and title from a bot review-comment body.
-
-    The bot formats comments as:
-        {category-emoji} **{Category Label}**
-        {severity-emoji} {severity label}
-
-        **{Title}**
-
-        {body...}
-
-    Returns a dict with keys 'category', 'severity', 'title'. Missing fields
-    default to empty string. Safe on malformed input.
-    """
-    category = ""
-    severity = ""
-    title = ""
-
-    for raw in body.split("\n"):
-        line = raw.strip()
-        if not line:
-            continue
-
-        if not category:
-            m = _CATEGORY_LINE_RE.match(line)
-            if m:
-                emoji, label = m.group(1), m.group(2).strip()
-                if label in _LABEL_TO_CATEGORY:
-                    category = _LABEL_TO_CATEGORY[label]
-                    continue
-                if emoji in _CATEGORY_EMOJI_TO_NAME:
-                    category = _CATEGORY_EMOJI_TO_NAME[emoji]
-                    continue
-
-        if not severity:
-            matched = False
-            for emoji, sev in _SEVERITY_EMOJI_MAP.items():
-                if line.startswith(emoji):
-                    severity = sev
-                    matched = True
-                    break
-            if matched:
-                continue
-
-        if not title:
-            m = _BOLD_LINE_RE.match(line)
-            if m:
-                title = m.group(1).strip()
-
-        if category and severity and title:
-            break
-
-    return {"category": category, "severity": severity, "title": title}
-
-
-def _format_key_issues(key_issues: list[KeyIssue]) -> str:
-    """Format key issues as a markdown table for the review body."""
-    lines = [
-        "",
-        "",
-        "### Key Issues",
-        "",
-        "| | Issue | Location |",
-        "|---|---|---|",
-    ]
-    for ki in key_issues:
-        lines.append(f"| :red_circle: | {ki.issue} | `{ki.path}:{ki.line}` |")
-    return "\n".join(lines)
-
-
-_FENCE_RE = re.compile(r"^(`{3,})")
-
-
-def _strip_suggestion_fences(text: str) -> str:
-    """Remove wrapping triple-backtick fences the LLM may add to suggestion code.
-
-    The suggestion content is placed inside a ```suggestion``` fence by the
-    caller, so any fences inside the content itself would break GitHub's
-    rendering.  We strip:
-    - A leading fence line (```, ```ts, ```python, etc.)
-    - A trailing fence line (```)
-    - Any remaining triple-backtick-only lines in the middle
-    """
-    lines = text.split("\n")
-    if lines and _FENCE_RE.match(lines[0].strip()):
-        lines = lines[1:]
-    if lines and _FENCE_RE.match(lines[-1].strip()):
-        lines = lines[:-1]
-    lines = [ln for ln in lines if not re.fullmatch(r"`{3,}\s*", ln.strip())]
-    return "\n".join(lines)
-
-
-def _close_open_fences(parts: list[str]) -> None:
-    """If the accumulated body has an unclosed code fence, close it.
-
-    An odd number of triple-backtick fence lines means a fence is still open.
-    Appending a closing fence prevents it from swallowing the suggestion block
-    that follows.
-    """
-    open_fence = False
-    for part in parts:
-        for line in part.split("\n"):
-            stripped = line.strip()
-            if _FENCE_RE.match(stripped):
-                open_fence = not open_fence
-    if open_fence:
-        parts.append("```")
-
-
-def _format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -> str:
-    """Format a review comment body with category badge, severity, and suggestion block."""
-    emoji, label = _CATEGORY_DISPLAY.get(comment.category, ("\U0001f4cc", "Note"))
-    badge = _SEVERITY_BADGE.get(comment.severity, "")
-
-    parts = [f"{emoji} **{label}**"]
-    if badge:
-        parts.append(badge)
-    parts.append("")
-    parts.append(f"**{comment.title}**")
-    parts.append("")
-    parts.append(comment.body)
-
-    if comment.suggestion:
-        import html
-
-        clean_suggestion = html.unescape(comment.suggestion)
-        clean_suggestion = _strip_suggestion_fences(clean_suggestion)
-
-        # Close any unbalanced fence in the body so it doesn't swallow the suggestion.
-        _close_open_fences(parts)
-
-        parts.append("")
-        parts.append("```suggestion")
-        parts.append(clean_suggestion)
-        parts.append("```")
-
-    if comment.agent_prompt:
-        import html as _html_mod
-
-        prompt_text = comment.agent_prompt
-        if comment.suggestion:
-            clean = _html_mod.unescape(comment.suggestion)
-            prompt_text += f"\n\nApply this code change:\n\n{clean}"
-
-        # GitHub returned 422 "internal error" for <pre>-wrapped agent_prompt
-        # on PR#41; use a fenced code block with surrounding blank lines instead.
-        max_run = 0
-        run = 0
-        for ch in prompt_text:
-            if ch == "`":
-                run += 1
-                if run > max_run:
-                    max_run = run
-            else:
-                run = 0
-        fence = "`" * max(3, max_run + 1)
-
-        parts.append("")
-        parts.append("---")
-        parts.append("")
-        parts.append(
-            "<details>\n"
-            "<summary>Prompt for AI Agents</summary>\n"
-            "\n"
-            f"{fence}\n{prompt_text}\n{fence}\n"
-            "\n"
-            "</details>"
-        )
-        _ = _html_mod  # imported for backward-compat with suggestion path
-
-    parts.append("")
-    parts.append(f"> Not useful? Reply `@{bot_name} reject` to dismiss this suggestion.")
-
-    return "\n".join(parts)
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch review inline comments: {e}") from e

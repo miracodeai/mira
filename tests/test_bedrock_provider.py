@@ -147,6 +147,65 @@ class TestBedrockComplete:
 
     @pytest.mark.asyncio
     @patch("boto3.Session")
+    async def test_reasoning_effort_enables_thinking(self, mock_session_cls):
+        from mira.llm.bedrock import BedrockProvider
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = _mock_converse_response("ok")
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        # High max_tokens so the budget reflects the effort level, not the
+        # `max_out - 1024` cap.
+        provider = BedrockProvider(_bedrock_config(reasoning_effort="medium", max_tokens=40000))
+        await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
+
+        call_kwargs = mock_client.converse.call_args[1]
+        # Bedrock Claude expects the `thinking` field with an explicit budget —
+        # not `reasoning_config`, which silently disables extended thinking.
+        thinking = call_kwargs["additionalModelRequestFields"]["thinking"]
+        assert thinking == {"type": "enabled", "budget_tokens": 8192}
+        # Thinking requires temperature unset.
+        assert "temperature" not in call_kwargs["inferenceConfig"]
+
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
+    async def test_max_effort_uses_largest_budget(self, mock_session_cls):
+        from mira.llm.bedrock import BedrockProvider
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = _mock_converse_response("ok")
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        provider = BedrockProvider(_bedrock_config(reasoning_effort="max", max_tokens=40000))
+        await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
+
+        thinking = mock_client.converse.call_args[1]["additionalModelRequestFields"]["thinking"]
+        assert thinking == {"type": "enabled", "budget_tokens": 32768}
+
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
+    async def test_reasoning_off_leaves_request_unchanged(self, mock_session_cls):
+        from mira.llm.bedrock import BedrockProvider
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = _mock_converse_response("ok")
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        provider = BedrockProvider(_bedrock_config(reasoning_effort="off"))
+        await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
+
+        call_kwargs = mock_client.converse.call_args[1]
+        assert "additionalModelRequestFields" not in call_kwargs
+        assert "temperature" in call_kwargs["inferenceConfig"]
+
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
     async def test_json_mode_uses_tool_forcing(self, mock_session_cls):
         from mira.llm.bedrock import BedrockProvider
 

@@ -13,13 +13,14 @@ def _make_comment(
     severity: Severity = Severity.WARNING,
     confidence: float = 0.8,
     title: str = "Issue",
+    category: str = "bug",
 ) -> ReviewComment:
     return ReviewComment(
         path=path,
         line=line,
         end_line=None,
         severity=severity,
-        category="bug",
+        category=category,
         title=title,
         body="Description",
         confidence=confidence,
@@ -136,6 +137,29 @@ class TestNoiseFilter:
         assert len(result) == 1
         assert result[0].severity == Severity.WARNING
 
+    def test_same_line_distinct_findings_both_survive(self):
+        # Regression: a speculative security blocker on the same line must not
+        # swallow a real resource-leak warning — if dedup collapses them and
+        # critique later drops the blocker, both findings are lost.
+        comments = [
+            _make_comment(
+                line=2,
+                severity=Severity.WARNING,
+                confidence=0.99,
+                title="File handle not closed on exception",
+                category="resource-leak",
+            ),
+            _make_comment(
+                line=2,
+                severity=Severity.BLOCKER,
+                confidence=0.85,
+                title="Path traversal via unsanitized user-controlled file path",
+                category="security",
+            ),
+        ]
+        result = filter_noise(comments, FilterConfig())
+        assert len(result) == 2
+
     def test_dedup_overlapping_lines_low_title_similarity(self):
         """Two comments on overlapping lines should dedup even with different titles."""
         comments = [
@@ -235,10 +259,19 @@ class TestIsDuplicate:
         b = _make_comment(path="b.py", line=1, title="Same title")
         assert _is_duplicate(a, b) is True
 
-    def test_same_line_always_duplicate(self):
+    def test_same_line_same_category_duplicate(self):
         a = _make_comment(path="a.py", line=5, title="Totally different")
         b = _make_comment(path="a.py", line=5, title="Completely unrelated")
         assert _is_duplicate(a, b) is True
+
+    def test_same_line_different_category_not_duplicate(self):
+        a = _make_comment(
+            path="a.py", line=5, title="File handle not closed", category="resource-leak"
+        )
+        b = _make_comment(
+            path="a.py", line=5, title="Path traversal via user input", category="security"
+        )
+        assert _is_duplicate(a, b) is False
 
     def test_non_overlapping_similar_titles_duplicate(self):
         a = _make_comment(path="a.py", line=5, title="Missing null check here")
@@ -313,3 +346,30 @@ class TestRoundAwareFiltering:
         result = filter_noise(comments, FilterConfig(confidence_threshold=0.7), review_round=2)
         assert len(result) == 1
         assert result[0].severity == Severity.BLOCKER
+
+
+class TestCategoryConfidenceThresholds:
+    CONFIG = FilterConfig(
+        confidence_threshold=0.7,
+        category_confidence_thresholds={"security": 0.85},
+    )
+
+    def test_category_floor_applies_to_its_category(self):
+        comments = [
+            _make_comment(category="security", confidence=0.8, line=1, title="A"),
+            _make_comment(category="security", confidence=0.9, line=20, title="B"),
+        ]
+        result = filter_noise(comments, self.CONFIG)
+        assert [c.title for c in result] == ["B"]
+
+    def test_other_categories_use_global_floor(self):
+        comments = [_make_comment(category="bug", confidence=0.75, line=1)]
+        assert len(filter_noise(comments, self.CONFIG)) == 1
+
+    def test_category_floor_cannot_lower_global(self):
+        config = FilterConfig(
+            confidence_threshold=0.7,
+            category_confidence_thresholds={"bug": 0.5},
+        )
+        comments = [_make_comment(category="bug", confidence=0.6, line=1)]
+        assert filter_noise(comments, config) == []

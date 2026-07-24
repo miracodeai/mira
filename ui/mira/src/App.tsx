@@ -3,11 +3,16 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router"
 
 import { DashboardLayout } from "@/components/dashboard/layout"
 import { SetupModal } from "@/components/dashboard/setup-modal"
+import { Toaster } from "@/components/ui/sonner"
 import { UninstallModal } from "@/components/dashboard/uninstall-modal"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { ActivityPage } from "@/pages/activity"
+import { ContributorDetailPage } from "@/pages/contributor-detail"
+import { ContributorsPage } from "@/pages/contributors"
 import { DashboardPage } from "@/pages/dashboard"
 import { LearnedRulesPage } from "@/pages/learned-rules"
+import { LearningFormPage } from "@/pages/learning-form"
 import { LoginPage } from "@/pages/login"
 import { PackagesPage } from "@/pages/packages"
 import { RepoDetailPage } from "@/pages/repo-detail"
@@ -16,8 +21,13 @@ import { ReposPage } from "@/pages/repos"
 import { SettingsPage } from "@/pages/settings"
 import { SetupPage } from "@/pages/setup"
 import { RulesPage } from "@/pages/rules"
+import { ChangePasswordPage } from "@/pages/change-password"
+import { ResetUserPasswordPage } from "@/pages/reset-user-password"
+import { UserFormPage } from "@/pages/user-form"
 import { UsersPage } from "@/pages/users"
 import { VulnerabilitiesPage } from "@/pages/vulnerabilities"
+import { WebhookFormPage } from "@/pages/webhook-form"
+import { WebhooksPage } from "@/pages/webhooks"
 
 const API_BASE = import.meta.env.VITE_API_URL || ""
 
@@ -170,6 +180,7 @@ function AppShell() {
 export function App() {
   return (
     <BrowserRouter>
+      <Toaster />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route
@@ -190,15 +201,33 @@ export function App() {
           }
         >
           <Route index element={<DashboardPage />} />
+          <Route path="activity" element={<ActivityPage />} />
           <Route path="repos" element={<ReposPage />} />
           <Route path="repos/:owner/:repo" element={<RepoDetailPage />} />
+          <Route path="contributors" element={<ContributorsPage />} />
+          <Route path="contributors/:login" element={<ContributorDetailPage />} />
           <Route path="packages" element={<PackagesPage />} />
           <Route path="relationships" element={<RelationshipsPage />} />
           <Route path="rules" element={<RulesPage />} />
           <Route path="learnings" element={<LearnedRulesPage />} />
+          <Route path="learnings/new" element={<LearningFormPage />} />
+          <Route path="learnings/edit" element={<LearningFormPage />} />
           <Route path="vulnerabilities" element={<VulnerabilitiesPage />} />
           <Route path="users" element={<UsersPage />} />
-          <Route path="settings" element={<SettingsPage />} />
+          <Route path="users/new" element={<UserFormPage />} />
+          <Route
+            path="users/:id/password"
+            element={<ResetUserPasswordPage />}
+          />
+          <Route path="account/password" element={<ChangePasswordPage />} />
+          <Route
+            path="settings"
+            element={<Navigate to="/settings/models" replace />}
+          />
+          <Route path="settings/webhooks" element={<WebhooksPage />} />
+          <Route path="settings/webhooks/new" element={<WebhookFormPage />} />
+          <Route path="settings/webhooks/:id" element={<WebhookFormPage />} />
+          <Route path="settings/:section" element={<SettingsPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

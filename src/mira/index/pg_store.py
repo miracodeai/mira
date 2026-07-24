@@ -9,6 +9,9 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from typing import Any
 
 from mira.index._store_shared import _StoreSharedMixin
 from mira.index.store import (
@@ -19,6 +22,8 @@ from mira.index.store import (
     FileSummary,
     IndexStore,
     LearnedRuleRow,
+    ReplyRow,
+    ReviewCommentRow,
     ReviewContext,
     ReviewEvent,
     SymbolInfo,
@@ -105,6 +110,42 @@ CREATE TABLE IF NOT EXISTS review_events (
     tokens_used INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     categories TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    author_avatar_url TEXT NOT NULL DEFAULT '',
+    reviewed_paths TEXT NOT NULL DEFAULT '',
+    created_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS review_comments (
+    id SERIAL PRIMARY KEY,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    review_id INTEGER NOT NULL DEFAULT 0,
+    pr_number INTEGER NOT NULL DEFAULT 0,
+    pr_url TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    line INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    github_comment_id BIGINT NOT NULL DEFAULT 0,
+    created_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS pr_replies (
+    id SERIAL PRIMARY KEY,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL DEFAULT 0,
+    pr_url TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    author_avatar_url TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    comment_path TEXT NOT NULL DEFAULT '',
+    comment_line INTEGER NOT NULL DEFAULT 0,
+    github_comment_id BIGINT NOT NULL DEFAULT 0,
+    in_reply_to_id BIGINT NOT NULL DEFAULT 0,
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
@@ -157,6 +198,8 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     path_pattern TEXT NOT NULL DEFAULT '',
     sample_count INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'approved',
+    created_by TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
@@ -206,14 +249,24 @@ _schema_initialized = False
 _lock = threading.Lock()
 
 
-def _get_conn(url: str):
+def _drop_pg_conn() -> None:
+    """Close and discard the module-level shared connection."""
+    global _pg_conn
+    with _lock:
+        if _pg_conn is not None:
+            with suppress(Exception):
+                _pg_conn.close()
+            _pg_conn = None
+
+
+def _get_conn(url: str) -> Any:
     """Get the shared Postgres connection, initializing schema on first use."""
     global _pg_conn, _schema_initialized
     with _lock:
-        if _pg_conn is None:
-            import psycopg
+        from mira.db.postgres import connect
 
-            _pg_conn = psycopg.connect(url, autocommit=True)
+        if _pg_conn is None:
+            _pg_conn = connect(url)
         if not _schema_initialized:
             with _pg_conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
@@ -221,34 +274,70 @@ def _get_conn(url: str):
                 cur.execute(
                     "ALTER TABLE files ADD COLUMN IF NOT EXISTS loc INTEGER NOT NULL DEFAULT 0"
                 )
+                for col in ("author", "author_avatar_url", "reviewed_paths"):
+                    cur.execute(
+                        f"ALTER TABLE review_events ADD COLUMN IF NOT EXISTS {col} "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
+                cur.execute(
+                    "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
+                    "TEXT NOT NULL DEFAULT 'approved'"
+                )
+                cur.execute(
+                    "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS created_by "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
             _schema_initialized = True
         return _pg_conn
 
 
-def list_learned_rules_org_wide(url: str, limit: int = 1000) -> list[dict]:
-    """List active learned rules across every repo. Used by the org-wide
-    learned-rules dashboard page so admins can see what Mira has synthesized
-    from feedback signals across the org."""
+@contextmanager
+def _pg_cursor(url: str) -> Iterator[Any]:
+    """Yield a cursor that reconnects once on stale-connection errors."""
+    from mira.db.postgres import ReconnectingCursor
+
+    def refresh() -> Any:
+        _drop_pg_conn()
+        return _get_conn(url)
+
     conn = _get_conn(url)
-    with conn.cursor() as cur:
+    with ReconnectingCursor(conn.cursor(), on_reconnect=refresh) as cur:
+        yield cur
+
+
+def list_learned_rules_org_wide(
+    url: str, limit: int = 1000, status: str | None = None
+) -> list[dict]:
+    """List learned rules across every repo, optionally filtered by status.
+    Used by the org-wide learnings dashboard so admins can review, approve, and
+    manage what Mira has synthesized across the org."""
+    where = "WHERE status = %s" if status else ""
+    params: tuple = (status, limit) if status else (limit,)
+    with _pg_cursor(url) as cur:
         cur.execute(
-            "SELECT owner, repo, rule_text, source_signal, category, "
-            "path_pattern, sample_count, updated_at "
-            "FROM learned_rules WHERE active = 1 "
-            "ORDER BY sample_count DESC, updated_at DESC LIMIT %s",
-            (limit,),
+            "SELECT id, owner, repo, rule_text, source_signal, category, "
+            "path_pattern, sample_count, active, status, created_by, "
+            "created_at, updated_at "
+            f"FROM learned_rules {where} "
+            "ORDER BY updated_at DESC LIMIT %s",
+            params,
         )
         rows = cur.fetchall()
     return [
         {
-            "owner": r[0],
-            "repo": r[1],
-            "rule_text": r[2],
-            "source_signal": r[3],
-            "category": r[4],
-            "path_pattern": r[5],
-            "sample_count": r[6],
-            "updated_at": r[7],
+            "id": r[0],
+            "owner": r[1],
+            "repo": r[2],
+            "rule_text": r[3],
+            "source_signal": r[4],
+            "category": r[5],
+            "path_pattern": r[6],
+            "sample_count": r[7],
+            "active": bool(r[8]),
+            "status": r[9],
+            "created_by": r[10],
+            "created_at": r[11],
+            "updated_at": r[12],
         }
         for r in rows
     ]
@@ -256,8 +345,7 @@ def list_learned_rules_org_wide(url: str, limit: int = 1000) -> list[dict]:
 
 def count_vulnerabilities_org_wide(url: str) -> dict[str, int]:
     """Count open vulnerabilities org-wide by severity, for the dashboard widget."""
-    conn = _get_conn(url)
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute("SELECT severity, COUNT(*) FROM vulnerabilities GROUP BY severity")
         rows = cur.fetchall()
     return {r[0]: r[1] for r in rows}
@@ -265,8 +353,7 @@ def count_vulnerabilities_org_wide(url: str) -> dict[str, int]:
 
 def list_vulnerabilities_org_wide(url: str, limit: int = 1000) -> list[dict]:
     """List every open vulnerability across the org, ordered by severity."""
-    conn = _get_conn(url)
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute(
             "SELECT owner, repo, package_name, ecosystem, package_version, "
             "cve_id, summary, severity, advisory_url, fixed_in, last_seen_at "
@@ -301,12 +388,11 @@ def list_packages_org_wide(url: str) -> list[dict]:
     """List every (owner, repo, ecosystem, name, version, file_path) tuple
     across the whole org. Used by the OSV poller to know what to query;
     file_path lets the poller prefer lockfile rows over manifest rows."""
-    conn = _get_conn(url)
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute(
             "SELECT DISTINCT owner, repo, kind, name, version, file_path "
             "FROM package_manifests "
-            "WHERE kind IN ('npm', 'pip', 'go', 'rust') AND version <> ''"
+            "WHERE kind IN ('npm', 'pip', 'go', 'rust', 'composer') AND version <> ''"
         )
         rows = cur.fetchall()
     return [
@@ -338,7 +424,6 @@ def search_packages_org_wide(
     used for incident response ("which repos use lodash@4.17.20 after this
     CVE?") and upgrade audits.
     """
-    conn = _get_conn(url)
     clauses: list[str] = []
     params: list = []
     if name:
@@ -363,7 +448,7 @@ def search_packages_org_wide(
     )
     params.append(limit)
 
-    with conn.cursor() as cur:
+    with _pg_cursor(url) as cur:
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
 
@@ -391,21 +476,43 @@ class PgIndexStore(_StoreSharedMixin):
     def __init__(self, owner: str, repo: str, url: str) -> None:
         self._owner = owner
         self._repo = repo
-        self._conn = _get_conn(url)
+        self._url = url
+        _get_conn(url)  # eager connect + schema init
+
+    def _refresh_conn(self) -> Any:
+        """Drop the shared module connection and bind a fresh handle."""
+        _drop_pg_conn()
+        return _get_conn(self._url)
+
+    @contextmanager
+    def _cursor(self) -> Iterator[Any]:
+        """Cursor on the current shared connection; reconnects once on idle drop."""
+        from mira.db.postgres import ReconnectingCursor
+
+        with ReconnectingCursor(
+            _get_conn(self._url).cursor(), on_reconnect=self._refresh_conn
+        ) as cur:
+            yield cur
+
+    def _commit(self) -> None:
+        # Always commit the current shared connection — a reconnect (from this
+        # or any other store instance) closes the old handle, so caching one
+        # per instance would commit on a dead connection.
+        _get_conn(self._url).commit()
 
     def _exec(self, sql: str, params: tuple = ()):
         """Execute a query and return the cursor."""
-        cur = self._conn.cursor()
-        cur.execute(sql, params)
-        return cur
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            return cur
 
     def _fetchone(self, sql: str, params: tuple = ()):
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchone()
 
     def _fetchall(self, sql: str, params: tuple = ()):
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()
 
@@ -442,7 +549,7 @@ class PgIndexStore(_StoreSharedMixin):
 
     def upsert_summary(self, summary: FileSummary) -> None:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO files (owner, repo, path, language, summary, content_hash, "
                 "loc, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
@@ -525,7 +632,7 @@ class PgIndexStore(_StoreSharedMixin):
                 )
 
     def remove_paths(self, paths: list[str]) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             for path in paths:
                 for table in ("files", "symbols", "imports", "symbol_refs", "external_refs"):
                     col = (
@@ -559,7 +666,7 @@ class PgIndexStore(_StoreSharedMixin):
 
     def upsert_directory(self, summary: DirectorySummary) -> None:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO directories (owner, repo, path, summary, file_count, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s, %s) "
@@ -599,7 +706,7 @@ class PgIndexStore(_StoreSharedMixin):
     def get_inbound_edge_counts(self, paths: list[str]) -> dict[str, int]:
         """Count how many other files reference each path via symbol_refs or imports."""
         counts: dict[str, int] = {}
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             for path in paths:
                 cur.execute(
                     "SELECT COUNT(*) FROM imports WHERE owner=%s AND repo=%s AND target_path=%s",
@@ -684,14 +791,18 @@ class PgIndexStore(_StoreSharedMixin):
         duration_ms: int = 0,
         categories: str = "",
         created_at: float | None = None,
+        author: str = "",
+        author_avatar_url: str = "",
+        reviewed_paths: str = "",
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO review_events (owner, repo, pr_number, pr_title, pr_url, "
                 "comments_posted, blockers, warnings, suggestions, files_reviewed, "
-                "lines_changed, tokens_used, duration_ms, categories, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "lines_changed, tokens_used, duration_ms, categories, author, "
+                "author_avatar_url, reviewed_paths, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "RETURNING id",
                 (
                     self._owner,
@@ -708,6 +819,9 @@ class PgIndexStore(_StoreSharedMixin):
                     tokens_used,
                     duration_ms,
                     categories,
+                    author,
+                    author_avatar_url,
+                    reviewed_paths,
                     now,
                 ),
             )
@@ -727,11 +841,14 @@ class PgIndexStore(_StoreSharedMixin):
             duration_ms=duration_ms,
             categories=categories,
             created_at=now,
+            author=author,
+            author_avatar_url=author_avatar_url,
+            reviewed_paths=reviewed_paths,
         )
 
     def upsert_pr_fingerprint(self, fp: PRFingerprint) -> None:
         now = fp.updated_at or time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM pr_fingerprints WHERE owner=%s AND repo=%s AND updated_at < %s",
                 (self._owner, self._repo, now - IndexStore._FINGERPRINT_TTL),
@@ -779,7 +896,7 @@ class PgIndexStore(_StoreSharedMixin):
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at "
+            "categories, created_at, author, author_avatar_url, reviewed_paths "
             "FROM review_events WHERE owner=%s AND repo=%s "
             "ORDER BY created_at DESC LIMIT %s",
             (self._owner, self._repo, limit),
@@ -800,6 +917,172 @@ class PgIndexStore(_StoreSharedMixin):
                 duration_ms=r[11],
                 categories=r[12],
                 created_at=r[13],
+                author=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
+    def list_review_events_for_pr(self, pr_number: int) -> list[ReviewEvent]:
+        rows = self._fetchall(
+            "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
+            "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
+            "categories, created_at, author, author_avatar_url, reviewed_paths "
+            "FROM review_events WHERE owner=%s AND repo=%s AND pr_number=%s "
+            "ORDER BY created_at DESC",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            ReviewEvent(
+                id=r[0],
+                pr_number=r[1],
+                pr_title=r[2],
+                pr_url=r[3],
+                comments_posted=r[4],
+                blockers=r[5],
+                warnings=r[6],
+                suggestions=r[7],
+                files_reviewed=r[8],
+                lines_changed=r[9],
+                tokens_used=r[10],
+                duration_ms=r[11],
+                categories=r[12],
+                created_at=r[13],
+                author=r[14],
+                author_avatar_url=r[15],
+                reviewed_paths=r[16],
+            )
+            for r in rows
+        ]
+
+    def add_review_comments(
+        self, review_id: int, pr_number: int, pr_url: str, comments: list[dict]
+    ) -> None:
+        if not comments:
+            return
+        now = time.time()
+        with self._conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO review_comments (owner, repo, review_id, pr_number, pr_url, "
+                "path, line, severity, category, title, body, github_comment_id, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                [
+                    (
+                        self._owner,
+                        self._repo,
+                        review_id,
+                        pr_number,
+                        pr_url,
+                        c.get("path", ""),
+                        c.get("line", 0),
+                        c.get("severity", ""),
+                        c.get("category", ""),
+                        c.get("title", ""),
+                        c.get("body", ""),
+                        c.get("github_comment_id", 0),
+                        now,
+                    )
+                    for c in comments
+                ],
+            )
+
+    def list_review_comments(self, pr_number: int) -> list[ReviewCommentRow]:
+        rows = self._fetchall(
+            "SELECT id, review_id, pr_number, pr_url, path, line, severity, category, "
+            "title, body, github_comment_id, created_at "
+            "FROM review_comments WHERE owner=%s AND repo=%s AND pr_number=%s "
+            "ORDER BY created_at",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            ReviewCommentRow(
+                id=r[0],
+                review_id=r[1],
+                pr_number=r[2],
+                pr_url=r[3],
+                path=r[4],
+                line=r[5],
+                severity=r[6],
+                category=r[7],
+                title=r[8],
+                body=r[9],
+                github_comment_id=r[10],
+                created_at=r[11],
+            )
+            for r in rows
+        ]
+
+    def record_reply(
+        self,
+        pr_number: int,
+        pr_url: str,
+        author: str,
+        body: str,
+        author_avatar_url: str = "",
+        comment_path: str = "",
+        comment_line: int = 0,
+        github_comment_id: int = 0,
+        in_reply_to_id: int = 0,
+        created_at: float | None = None,
+    ) -> ReplyRow:
+        now = created_at if created_at is not None else time.time()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO pr_replies (owner, repo, pr_number, pr_url, author, "
+                "author_avatar_url, body, comment_path, comment_line, github_comment_id, "
+                "in_reply_to_id, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (
+                    self._owner,
+                    self._repo,
+                    pr_number,
+                    pr_url,
+                    author,
+                    author_avatar_url,
+                    body,
+                    comment_path,
+                    comment_line,
+                    github_comment_id,
+                    in_reply_to_id,
+                    now,
+                ),
+            )
+            row_id = cur.fetchone()[0]
+        return ReplyRow(
+            id=row_id,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            author=author,
+            author_avatar_url=author_avatar_url,
+            body=body,
+            comment_path=comment_path,
+            comment_line=comment_line,
+            github_comment_id=github_comment_id,
+            in_reply_to_id=in_reply_to_id,
+            created_at=now,
+        )
+
+    def list_replies(self, pr_number: int) -> list[ReplyRow]:
+        rows = self._fetchall(
+            "SELECT id, pr_number, pr_url, author, author_avatar_url, body, comment_path, "
+            "comment_line, github_comment_id, in_reply_to_id, created_at "
+            "FROM pr_replies WHERE owner=%s AND repo=%s AND pr_number=%s ORDER BY created_at",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            ReplyRow(
+                id=r[0],
+                pr_number=r[1],
+                pr_url=r[2],
+                author=r[3],
+                author_avatar_url=r[4],
+                body=r[5],
+                comment_path=r[6],
+                comment_line=r[7],
+                github_comment_id=r[8],
+                in_reply_to_id=r[9],
+                created_at=r[10],
             )
             for r in rows
         ]
@@ -877,7 +1160,7 @@ class PgIndexStore(_StoreSharedMixin):
         self, title: str, content: str, context_id: int | None = None
     ) -> ReviewContext:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             if context_id is not None:
                 cur.execute(
                     "UPDATE review_context SET title=%s, content=%s, updated_at=%s "
@@ -894,7 +1177,7 @@ class PgIndexStore(_StoreSharedMixin):
         return self.get_review_context(context_id)  # type: ignore[return-value]
 
     def delete_review_context(self, context_id: int) -> None:
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM review_context WHERE owner=%s AND repo=%s AND id=%s",
                 (self._owner, self._repo, context_id),
@@ -961,7 +1244,7 @@ class PgIndexStore(_StoreSharedMixin):
         actor: str,
     ) -> FeedbackEventRow:
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
@@ -983,7 +1266,7 @@ class PgIndexStore(_StoreSharedMixin):
                 ),
             )
             row_id = cur.fetchone()[0]
-        self._conn.commit()
+        self._commit()
         return FeedbackEventRow(
             id=row_id,
             pr_number=pr_number,
@@ -1024,7 +1307,7 @@ class PgIndexStore(_StoreSharedMixin):
             )
             for e in events
         ]
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.executemany(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
@@ -1032,7 +1315,7 @@ class PgIndexStore(_StoreSharedMixin):
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 rows,
             )
-        self._conn.commit()
+        self._commit()
         return len(rows)
 
     def list_feedback(self, limit: int = 500) -> list[FeedbackEventRow]:
@@ -1083,21 +1366,23 @@ class PgIndexStore(_StoreSharedMixin):
         category: str,
         path_pattern: str,
         sample_count: int,
+        status: str = "pending",
     ) -> LearnedRuleRow:
         now = time.time()
         existing = self._fetchone(
-            "SELECT id FROM learned_rules WHERE owner=%s AND repo=%s "
+            "SELECT id, status FROM learned_rules WHERE owner=%s AND repo=%s "
             "AND category=%s AND path_pattern=%s",
             (self._owner, self._repo, category, path_pattern),
         )
         if existing:
-            with self._conn.cursor() as cur:
+            # Preserve the existing approval status across re-synthesis.
+            with self._cursor() as cur:
                 cur.execute(
                     "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
                     "sample_count=%s, updated_at=%s WHERE id=%s",
                     (rule_text, source_signal, sample_count, now, existing[0]),
                 )
-            self._conn.commit()
+            self._commit()
             return LearnedRuleRow(
                 id=existing[0],
                 rule_text=rule_text,
@@ -1105,15 +1390,16 @@ class PgIndexStore(_StoreSharedMixin):
                 category=category,
                 path_pattern=path_pattern,
                 sample_count=sample_count,
+                status=existing[1],
                 created_at=now,
                 updated_at=now,
             )
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO learned_rules "
                 "(owner, repo, rule_text, source_signal, category, path_pattern, "
-                "sample_count, active, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s) RETURNING id",
+                "sample_count, active, status, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s) RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -1122,12 +1408,13 @@ class PgIndexStore(_StoreSharedMixin):
                     category,
                     path_pattern,
                     sample_count,
+                    status,
                     now,
                     now,
                 ),
             )
             row_id = cur.fetchone()[0]
-        self._conn.commit()
+        self._commit()
         return LearnedRuleRow(
             id=row_id,
             rule_text=rule_text,
@@ -1135,32 +1422,133 @@ class PgIndexStore(_StoreSharedMixin):
             category=category,
             path_pattern=path_pattern,
             sample_count=sample_count,
+            status=status,
             created_at=now,
             updated_at=now,
         )
 
+    _LR_COLS = (
+        "id, rule_text, source_signal, category, path_pattern, "
+        "sample_count, active, status, created_by, created_at, updated_at"
+    )
+
+    def _row_to_learned_rule(self, r: tuple) -> LearnedRuleRow:
+        return LearnedRuleRow(
+            id=r[0],
+            rule_text=r[1],
+            source_signal=r[2],
+            category=r[3],
+            path_pattern=r[4],
+            sample_count=r[5],
+            active=bool(r[6]),
+            status=r[7],
+            created_by=r[8],
+            created_at=r[9],
+            updated_at=r[10],
+        )
+
     def list_active_learned_rules(self) -> list[LearnedRuleRow]:
         rows = self._fetchall(
-            "SELECT id, rule_text, source_signal, category, path_pattern, "
-            "sample_count, active, created_at, updated_at "
-            "FROM learned_rules WHERE owner=%s AND repo=%s AND active=1 "
+            f"SELECT {self._LR_COLS} FROM learned_rules "
+            "WHERE owner=%s AND repo=%s AND active=1 AND status='approved' "
             "ORDER BY sample_count DESC",
             (self._owner, self._repo),
         )
-        return [
-            LearnedRuleRow(
-                id=r[0],
-                rule_text=r[1],
-                source_signal=r[2],
-                category=r[3],
-                path_pattern=r[4],
-                sample_count=r[5],
-                active=bool(r[6]),
-                created_at=r[7],
-                updated_at=r[8],
+        return [self._row_to_learned_rule(r) for r in rows]
+
+    def list_learned_rules(self, status: str | None = None) -> list[LearnedRuleRow]:
+        if status:
+            rows = self._fetchall(
+                f"SELECT {self._LR_COLS} FROM learned_rules "
+                "WHERE owner=%s AND repo=%s AND status=%s ORDER BY updated_at DESC",
+                (self._owner, self._repo, status),
             )
-            for r in rows
-        ]
+        else:
+            rows = self._fetchall(
+                f"SELECT {self._LR_COLS} FROM learned_rules "
+                "WHERE owner=%s AND repo=%s ORDER BY updated_at DESC",
+                (self._owner, self._repo),
+            )
+        return [self._row_to_learned_rule(r) for r in rows]
+
+    def get_learned_rule(self, rule_id: int) -> LearnedRuleRow | None:
+        row = self._fetchone(
+            f"SELECT {self._LR_COLS} FROM learned_rules WHERE id=%s AND owner=%s AND repo=%s",
+            (rule_id, self._owner, self._repo),
+        )
+        return self._row_to_learned_rule(row) if row else None
+
+    def create_learned_rule(
+        self,
+        rule_text: str,
+        category: str,
+        path_pattern: str = "",
+        source_signal: str = "manual",
+        status: str = "approved",
+        active: bool = True,
+        created_by: str = "",
+    ) -> LearnedRuleRow:
+        now = time.time()
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO learned_rules "
+                "(owner, repo, rule_text, source_signal, category, path_pattern, "
+                "sample_count, active, status, created_by, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s) RETURNING id",
+                (
+                    self._owner,
+                    self._repo,
+                    rule_text,
+                    source_signal,
+                    category,
+                    path_pattern,
+                    int(active),
+                    status,
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+            row_id = cur.fetchone()[0]
+        self._commit()
+        return self.get_learned_rule(row_id)  # type: ignore[return-value]
+
+    def update_learned_rule(
+        self, rule_id: int, rule_text: str, category: str, path_pattern: str
+    ) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE learned_rules SET rule_text=%s, category=%s, path_pattern=%s, "
+                "updated_at=%s WHERE id=%s AND owner=%s AND repo=%s",
+                (rule_text, category, path_pattern, time.time(), rule_id, self._owner, self._repo),
+            )
+        self._commit()
+
+    def set_learned_rule_status(self, rule_id: int, status: str) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE learned_rules SET status=%s, updated_at=%s "
+                "WHERE id=%s AND owner=%s AND repo=%s",
+                (status, time.time(), rule_id, self._owner, self._repo),
+            )
+        self._commit()
+
+    def set_learned_rule_active(self, rule_id: int, active: bool) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE learned_rules SET active=%s, updated_at=%s "
+                "WHERE id=%s AND owner=%s AND repo=%s",
+                (int(active), time.time(), rule_id, self._owner, self._repo),
+            )
+        self._commit()
+
+    def delete_learned_rule(self, rule_id: int) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "DELETE FROM learned_rules WHERE id=%s AND owner=%s AND repo=%s",
+                (rule_id, self._owner, self._repo),
+            )
+        self._commit()
 
     def replace_manifest_packages(
         self,
@@ -1170,7 +1558,7 @@ class PgIndexStore(_StoreSharedMixin):
         from mira.index.store import PackageManifestRow  # noqa: F401
 
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",
                 (self._owner, self._repo, file_path),
@@ -1198,7 +1586,7 @@ class PgIndexStore(_StoreSharedMixin):
                     "updated_at=EXCLUDED.updated_at",
                     rows,
                 )
-        self._conn.commit()
+        self._commit()
         return len(packages)
 
     def list_manifest_packages(self):  # type: ignore[no-untyped-def]
@@ -1232,12 +1620,12 @@ class PgIndexStore(_StoreSharedMixin):
         stale = existing - live_paths
         if not stale:
             return 0
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.executemany(
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",
                 [(self._owner, self._repo, p) for p in stale],
             )
-        self._conn.commit()
+        self._commit()
         return len(stale)
 
     # ── Vulnerabilities ──
@@ -1259,7 +1647,7 @@ class PgIndexStore(_StoreSharedMixin):
                 (self._owner, self._repo, package_name, ecosystem, package_version),
             )
         }
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "DELETE FROM vulnerabilities "
                 "WHERE owner=%s AND repo=%s AND package_name=%s "
@@ -1292,7 +1680,7 @@ class PgIndexStore(_StoreSharedMixin):
                     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     rows,
                 )
-        self._conn.commit()
+        self._commit()
         return len(vulns)
 
     def prune_stale_vulnerabilities(self, active_keys: set[tuple[str, str, str]]) -> int:
@@ -1311,13 +1699,13 @@ class PgIndexStore(_StoreSharedMixin):
         stale = [(n, e, v) for n, e, v in rows if (n, e, v) not in active_keys]
         if not stale:
             return 0
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.executemany(
                 "DELETE FROM vulnerabilities WHERE owner=%s AND repo=%s "
                 "AND package_name=%s AND ecosystem=%s AND package_version=%s",
                 [(self._owner, self._repo, *k) for k in stale],
             )
-        self._conn.commit()
+        self._commit()
         return len(stale)
 
     def list_vulnerabilities(self):  # type: ignore[no-untyped-def]

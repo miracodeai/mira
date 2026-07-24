@@ -136,6 +136,9 @@ class ReviewComment:
     agent_prompt: str | None = None
     # Verbatim diff snippet used by self-critique; stripped before posting.
     existing_code: str = ""
+    # Which pipeline pass produced this ("main" or "security") — lets eval
+    # artifacts attribute FP share per pass. Not posted anywhere.
+    source_pass: str = "main"
 
 
 def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
@@ -254,8 +257,7 @@ class WalkthroughResult:
             }
             parts.append("")
             parts.append(
-                "> **⚠️ Potential overlap with other open PRs** — "
-                "these may be stepping on this one:"
+                "> **⚠️ Potential overlap with other open PRs** — these may be stepping on this one:"
             )
             parts.append(">")
             for ov in overlaps:
@@ -380,6 +382,10 @@ class ReviewResult:
     reviewed_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
     total_paths: list[str] = field(default_factory=list)
+    # Diagnostic trail: per-chunk draft counts and every comment dropped by a
+    # filter/critique stage, so a benchmark run can show whether a missed
+    # finding was never drafted or drafted-then-dropped. Not posted anywhere.
+    audit: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -396,6 +402,12 @@ class PRInfo:
     repo: str
     # Round 2+ reviews diff against last_reviewed_sha → head_sha; empty falls back to full diff.
     head_sha: str = ""
+    # Hosting platform ("github" / "gitlab") — scopes per-PR review progress.
+    platform: str = "github"
+    # Platform login of the PR author; used to attribute review-quality stats
+    # and surfaced (with avatar) in the activity dashboard.
+    author: str = ""
+    author_avatar_url: str = ""
 
 
 @dataclass

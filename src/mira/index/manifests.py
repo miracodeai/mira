@@ -291,6 +291,78 @@ def parse_dockerfile(content: str, file_path: str) -> list[ParsedPackage]:
     return out
 
 
+# ── composer.json / composer.lock (PHP) ──
+
+
+def parse_composer_json(content: str, file_path: str) -> list[ParsedPackage]:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.debug("Skipping %s (invalid JSON): %s", file_path, exc)
+        return []
+
+    out: list[ParsedPackage] = []
+    for key, is_dev in (
+        ("require", False),
+        ("require-dev", True),
+    ):
+        block = data.get(key) or {}
+        if not isinstance(block, dict):
+            continue
+        for name, version in block.items():
+            if not isinstance(name, str) or not isinstance(version, str):
+                continue
+            # Skip platform/virtual requirements: php, ext-*, lib-*, hhvm,
+            # composer-plugin-api, etc. Real Packagist packages are always
+            # namespaced as vendor/package (contain "/").
+            if "/" not in name:
+                continue
+            out.append(
+                ParsedPackage(
+                    name=name,
+                    kind="composer",
+                    version=version.strip(),
+                    file_path=file_path,
+                    is_dev=is_dev,
+                )
+            )
+    return out
+
+
+def parse_composer_lock(content: str, file_path: str) -> list[ParsedPackage]:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.debug("Skipping %s (invalid JSON): %s", file_path, exc)
+        return []
+
+    out: list[ParsedPackage] = []
+    for key, is_dev in (
+        ("packages", False),
+        ("packages-dev", True),
+    ):
+        entries = data.get(key) or []
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            version = entry.get("version")
+            if not isinstance(name, str) or not isinstance(version, str) or not name:
+                continue
+            out.append(
+                ParsedPackage(
+                    name=name,
+                    kind="composer",
+                    version=version,
+                    file_path=file_path,
+                    is_dev=is_dev,
+                )
+            )
+    return out
+
+
 # ── Lockfile parsers ──
 #
 # Lockfiles record the *resolved* version of every transitive dependency,
@@ -399,18 +471,20 @@ _PARSERS: list[tuple[re.Pattern[str], object]] = [
     # lockfile entry's resolved version is what we want for vuln matching.
     (re.compile(r"(^|/)uv\.lock$"), parse_uv_lock),
     (re.compile(r"(^|/)poetry\.lock$"), parse_poetry_lock),
+    (re.compile(r"(^|/)composer\.lock$"), parse_composer_lock),
     (re.compile(r"(^|/)package-lock\.json$"), parse_package_lock_json),
     (re.compile(r"(^|/)package\.json$"), parse_package_json),
     (re.compile(r"(^|/)requirements[^/]*\.txt$"), parse_requirements_txt),
     (re.compile(r"(^|/)pyproject\.toml$"), parse_pyproject_toml),
     (re.compile(r"(^|/)go\.mod$"), parse_go_mod),
+    (re.compile(r"(^|/)composer\.json$"), parse_composer_json),
     (re.compile(r"(^|/)(Dockerfile|[^/]+\.Dockerfile)$"), parse_dockerfile),
 ]
 
 
 def _is_lockfile_path(path: str) -> bool:
     """Heuristic — does this path look like a lockfile (resolved versions)?"""
-    return bool(re.search(r"(^|/)(uv|poetry)\.lock$|(^|/)package-lock\.json$", path))
+    return bool(re.search(r"(^|/)(uv|poetry|composer)\.lock$|(^|/)package-lock\.json$", path))
 
 
 def is_manifest(path: str) -> bool:

@@ -8,14 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mira.github_app.handlers import (
-    _REJECT_KEYWORDS,
+from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
+from mira.platforms.github.webhook import (
     handle_comment,
     handle_pause_resume,
     handle_pull_request,
     handle_thread_reject,
 )
-from mira.models import PRInfo, ReviewResult
+from mira.platforms.handlers import _REJECT_KEYWORDS
 
 
 def _make_pr_payload() -> dict[str, Any]:
@@ -50,6 +50,7 @@ def _make_comment_payload(body: str) -> dict[str, Any]:
 def mock_app_auth() -> AsyncMock:
     auth = AsyncMock()
     auth.get_installation_token = AsyncMock(return_value="ghs_test_token")
+    auth.get_bot_identity = AsyncMock(return_value="mira-bot")
     return auth
 
 
@@ -67,10 +68,10 @@ def mock_pr_info() -> PRInfo:
     )
 
 
-@patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_pr_event(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -91,10 +92,134 @@ async def test_handle_pr_event(
     mock_engine.review_pr.assert_awaited_once_with("https://github.com/testowner/testrepo/pull/42")
 
 
-@patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+# ── Outbound webhook dispatch wiring ─────────────────────────────────────────
+
+
+def _comment(severity: Severity) -> ReviewComment:
+    return ReviewComment(
+        path="a.py",
+        line=1,
+        end_line=None,
+        severity=severity,
+        category="bug",
+        title="t",
+        body="b",
+        confidence=0.9,
+    )
+
+
+async def _run_pr_handler(result: ReviewResult | Exception, mock_engine_cls, mock_app_auth):
+    """Drive handle_pull_request with a mocked engine + indexed repo, returning
+    the patched dispatch_event mock so callers can assert on fired events."""
+    mock_engine = AsyncMock()
+    if isinstance(result, Exception):
+        mock_engine.review_pr = AsyncMock(side_effect=result)
+    else:
+        mock_engine.review_pr = AsyncMock(return_value=result)
+    mock_engine_cls.return_value = mock_engine
+
+    with (
+        patch("mira.dashboard.api._app_db") as mock_db,
+        patch("mira.outbound_webhooks.dispatch_event", new_callable=AsyncMock) as mock_dispatch,
+    ):
+        mock_db.get_repo.return_value = MagicMock(status="ready")  # indexed → skip note
+        await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
+    return mock_dispatch
+
+
+def _events(mock_dispatch: AsyncMock) -> list[str]:
+    return [call.args[0] for call in mock_dispatch.await_args_list]
+
+
+def _data_for(mock_dispatch: AsyncMock, event: str) -> dict:
+    return next(c.args[1] for c in mock_dispatch.await_args_list if c.args[0] == event)
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+async def test_completed_review_fires_review_completed(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """A finished review fires review.completed with repo/PR/count data (and
+    NOT high-severity when the comments are below warning)."""
+    mock_config.return_value = MagicMock()
+    result = ReviewResult(
+        summary="ok",
+        comments=[_comment(Severity.SUGGESTION)],
+        key_issues=[],
+    )
+    mock_dispatch = await _run_pr_handler(result, mock_engine_cls, mock_app_auth)
+
+    events = _events(mock_dispatch)
+    assert "review.completed" in events
+    assert "review.high_severity" not in events
+
+    data = _data_for(mock_dispatch, "review.completed")
+    assert data["repo"] == "testowner/testrepo"
+    assert data["pr_url"] == "https://github.com/testowner/testrepo/pull/42"
+    assert data["comments"] == 1
+    assert data["key_issues"] == 0
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+async def test_blocker_comment_also_fires_high_severity(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """A review with a blocker/warning fires both completed and high_severity."""
+    mock_config.return_value = MagicMock()
+    result = ReviewResult(
+        summary="bad",
+        comments=[_comment(Severity.BLOCKER), _comment(Severity.NITPICK)],
+        key_issues=[],
+    )
+    mock_dispatch = await _run_pr_handler(result, mock_engine_cls, mock_app_auth)
+
+    events = _events(mock_dispatch)
+    assert "review.completed" in events
+    assert "review.high_severity" in events
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+async def test_failed_review_fires_review_failed(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """A review that raises fires review.failed (and not review.completed)."""
+    mock_config.return_value = MagicMock()
+    mock_dispatch = await _run_pr_handler(RuntimeError("boom"), mock_engine_cls, mock_app_auth)
+
+    events = _events(mock_dispatch)
+    assert "review.failed" in events
+    assert "review.completed" not in events
+
+    data = _data_for(mock_dispatch, "review.failed")
+    assert data["repo"] == "testowner/testrepo"
+    assert "boom" in data["error"]
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_comment_review_keyword(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -114,9 +239,9 @@ async def test_handle_comment_review_keyword(
     mock_engine.review_pr.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 @pytest.mark.parametrize("verb", ["help", "?", "commands", "HELP", "Help"])
 async def test_handle_comment_help_posts_command_list(
     mock_config: MagicMock,
@@ -150,9 +275,9 @@ async def test_handle_comment_help_posts_command_list(
     mock_llm.complete.assert_not_awaited()
 
 
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_comment_question(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -182,9 +307,9 @@ async def test_handle_comment_question(
     mock_provider.post_comment.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_comment_formats_reply_with_attribution(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -246,7 +371,7 @@ def _make_review_comment_payload(body: str, node_id: str = "MDI0Ol_abc") -> dict
 
 
 @pytest.mark.parametrize("keyword", sorted(_REJECT_KEYWORDS))
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_resolves_for_each_keyword(
     mock_provider_cls: MagicMock,
     keyword: str,
@@ -269,7 +394,7 @@ async def test_handle_thread_reject_resolves_for_each_keyword(
     assert args[0][1] == ["PRRT_123"]
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_exits_early_for_non_reject_command(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -284,7 +409,7 @@ async def test_handle_thread_reject_exits_early_for_non_reject_command(
     mock_provider.get_thread_id_for_comment.assert_not_awaited()
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_thread_not_found(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -301,7 +426,7 @@ async def test_handle_thread_reject_thread_not_found(
     mock_provider.resolve_threads.assert_not_awaited()
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_resolve_failure_posts_reply(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -359,7 +484,7 @@ def _make_pause_comment_payload() -> dict[str, Any]:
     }
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_pause_adds_label_and_posts_comment(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -379,7 +504,7 @@ async def test_handle_pause_adds_label_and_posts_comment(
     assert "@mira-bot review" in posted_body
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_resume_removes_label_and_posts_comment(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
