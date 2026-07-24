@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from mira.exceptions import WebhookError
-from mira.github_app.auth import GitHubAppAuth
+from mira.platforms.github.auth import GitHubAppAuth
 
 
 @pytest.fixture

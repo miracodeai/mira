@@ -3,9 +3,12 @@
 // re-exports the shared types, so `import { api, SomeType } from "@/lib/api"`
 // keeps working everywhere.
 
+import { activityApi } from "./api/activity"
+import { contributorsApi } from "./api/contributors"
 import { packagesApi } from "./api/packages"
 import { relationshipsApi } from "./api/relationships"
 import { reposApi } from "./api/repos"
+import { reviewInsightsApi } from "./api/review-insights"
 import { rulesApi } from "./api/rules"
 import { settingsApi } from "./api/settings"
 import { statsApi } from "./api/stats"
@@ -17,6 +20,7 @@ import { webhooksApi } from "./api/webhooks"
 export * from "./api/types"
 
 export const api = {
+  ...activityApi,
   ...systemApi,
   ...settingsApi,
   ...statsApi,
@@ -27,4 +31,6 @@ export const api = {
   ...rulesApi,
   ...usersApi,
   ...webhooksApi,
+  ...contributorsApi,
+  ...reviewInsightsApi,
 }

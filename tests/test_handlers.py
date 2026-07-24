@@ -8,14 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mira.github_app.handlers import (
-    _REJECT_KEYWORDS,
+from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
+from mira.platforms.github.webhook import (
     handle_comment,
     handle_pause_resume,
     handle_pull_request,
     handle_thread_reject,
 )
-from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
+from mira.platforms.handlers import _REJECT_KEYWORDS
 
 
 def _make_pr_payload() -> dict[str, Any]:
@@ -50,6 +50,7 @@ def _make_comment_payload(body: str) -> dict[str, Any]:
 def mock_app_auth() -> AsyncMock:
     auth = AsyncMock()
     auth.get_installation_token = AsyncMock(return_value="ghs_test_token")
+    auth.get_bot_identity = AsyncMock(return_value="mira-bot")
     return auth
 
 
@@ -67,10 +68,10 @@ def mock_pr_info() -> PRInfo:
     )
 
 
-@patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_pr_event(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -134,10 +135,10 @@ def _data_for(mock_dispatch: AsyncMock, event: str) -> dict:
     return next(c.args[1] for c in mock_dispatch.await_args_list if c.args[0] == event)
 
 
-@patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_completed_review_fires_review_completed(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -166,10 +167,10 @@ async def test_completed_review_fires_review_completed(
     assert data["key_issues"] == 0
 
 
-@patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_blocker_comment_also_fires_high_severity(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -191,10 +192,10 @@ async def test_blocker_comment_also_fires_high_severity(
     assert "review.high_severity" in events
 
 
-@patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_failed_review_fires_review_failed(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -215,10 +216,10 @@ async def test_failed_review_fires_review_failed(
     assert "boom" in data["error"]
 
 
-@patch("mira.github_app.handlers.ReviewEngine")
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_comment_review_keyword(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -238,9 +239,9 @@ async def test_handle_comment_review_keyword(
     mock_engine.review_pr.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 @pytest.mark.parametrize("verb", ["help", "?", "commands", "HELP", "Help"])
 async def test_handle_comment_help_posts_command_list(
     mock_config: MagicMock,
@@ -274,9 +275,9 @@ async def test_handle_comment_help_posts_command_list(
     mock_llm.complete.assert_not_awaited()
 
 
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_comment_question(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -306,9 +307,9 @@ async def test_handle_comment_question(
     mock_provider.post_comment.assert_awaited_once()
 
 
-@patch("mira.github_app.handlers.create_provider")
-@patch("mira.github_app.handlers.create_llm")
-@patch("mira.github_app.handlers.load_config")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_handle_comment_formats_reply_with_attribution(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
@@ -370,7 +371,7 @@ def _make_review_comment_payload(body: str, node_id: str = "MDI0Ol_abc") -> dict
 
 
 @pytest.mark.parametrize("keyword", sorted(_REJECT_KEYWORDS))
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_resolves_for_each_keyword(
     mock_provider_cls: MagicMock,
     keyword: str,
@@ -393,7 +394,7 @@ async def test_handle_thread_reject_resolves_for_each_keyword(
     assert args[0][1] == ["PRRT_123"]
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_exits_early_for_non_reject_command(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -408,7 +409,7 @@ async def test_handle_thread_reject_exits_early_for_non_reject_command(
     mock_provider.get_thread_id_for_comment.assert_not_awaited()
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_thread_not_found(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -425,7 +426,7 @@ async def test_handle_thread_reject_thread_not_found(
     mock_provider.resolve_threads.assert_not_awaited()
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_resolve_failure_posts_reply(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -483,7 +484,7 @@ def _make_pause_comment_payload() -> dict[str, Any]:
     }
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_pause_adds_label_and_posts_comment(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,
@@ -503,7 +504,7 @@ async def test_handle_pause_adds_label_and_posts_comment(
     assert "@mira-bot review" in posted_body
 
 
-@patch("mira.github_app.handlers.create_provider")
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_resume_removes_label_and_posts_comment(
     mock_provider_cls: MagicMock,
     mock_app_auth: AsyncMock,

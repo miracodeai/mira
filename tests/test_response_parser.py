@@ -21,6 +21,25 @@ class TestParseLLMResponse:
         assert result.summary != ""
         assert result.metadata.reviewed_files == 2
 
+    def test_recovers_leaked_tool_call_xml(self):
+        # Some models (Haiku via OpenRouter) leak Anthropic tool-call XML
+        # delimiters into the JSON args, breaking a strict parse. The repair
+        # should cut the junk and still recover the findings.
+        raw = (
+            '{"comments": [{"path": "p.py", "line": 5, "severity": "blocker", '
+            '"category": "security", "title": "SQL injection", "body": "x", '
+            '"confidence": 1.0}], "metadata": {"reviewed_files": 1}\n'
+            '</parameter>\n</invoke>": ""}'
+        )
+        result = parse_llm_response(raw)
+        assert len(result.comments) == 1
+        assert result.comments[0].title == "SQL injection"
+
+    def test_recovers_truncated_missing_brace(self):
+        raw = '{"comments": [{"path": "a.py", "line": 1, "title": "bug", "body": "y"}'
+        result = parse_llm_response(raw)
+        assert len(result.comments) == 1
+
     def test_parse_with_code_fences(self, sample_llm_response_text: str):
         wrapped = f"```json\n{sample_llm_response_text}\n```"
         result = parse_llm_response(wrapped)

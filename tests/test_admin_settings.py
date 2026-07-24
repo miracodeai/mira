@@ -16,13 +16,9 @@ from fastapi import HTTPException
 
 import mira.config as mira_config
 from mira.config import load_config, set_global_defaults
-from mira.dashboard.api import (
-    _ALLOWED_OVERRIDE_SECTIONS,
-    GlobalSettingsUpdate,
-    get_global_settings,
-    set_global_settings,
-)
+from mira.dashboard.api import _ALLOWED_OVERRIDE_SECTIONS, GlobalSettingsUpdate
 from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers.admin import get_global_settings, set_global_settings
 
 
 @pytest.fixture
@@ -176,6 +172,16 @@ class TestEndpointValidation:
             "review": {"dependency_overlap": False}
         }
 
+    def test_persists_auto_resolve_conversations_override(self, in_memory_db: AppDatabase):
+        result = set_global_settings(
+            GlobalSettingsUpdate(overrides={"review": {"auto_resolve_conversations": False}}),
+            _admin_request(),
+        )
+        assert result == {"ok": True}
+        assert in_memory_db.get_global_review_overrides() == {
+            "review": {"auto_resolve_conversations": False}
+        }
+
     def test_allowed_sections_constant(self):
         assert {"filter", "review"} == _ALLOWED_OVERRIDE_SECTIONS
 
@@ -184,7 +190,7 @@ class TestVersionEndpoint:
     """The /api/version endpoint reads `mira.__version__` and returns it."""
 
     def test_returns_version(self):
-        from mira.dashboard.api import get_version
+        from mira.dashboard.routers.core import get_version
 
         result = get_version()
         assert "version" in result

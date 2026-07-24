@@ -50,6 +50,8 @@ _GITHUB_SSH = re.compile(r"git@github\.com:([^/]+/[^/\s.]+)")
 _GO_IMPORT = re.compile(r"github\.com/([^/]+/[^/\s]+)")
 _DOCKER_IMAGE = re.compile(r"(?:ghcr\.io|docker\.io)/([^/]+/[^/:\s]+)")
 _TERRAFORM_SOURCE = re.compile(r"github\.com/([^/]+/[^/\s?]+)(?://|$)")
+_GITLAB_URL = re.compile(r"gitlab\.com/([^/]+/[^/\s#?]+)")
+_GITLAB_SSH = re.compile(r"git@gitlab\.com:([^/]+/[^/\s.]+)")
 
 # Words to ignore when comparing summaries for domain overlap
 _STOP_WORDS = {
@@ -653,7 +655,14 @@ class RelationshipStore:
         short_to_full: dict[str, str],
     ) -> str | None:
         """Try to match an external ref target to a known indexed repo."""
-        for pattern in (_GITHUB_URL, _GITHUB_SSH, _GO_IMPORT, _TERRAFORM_SOURCE):
+        for pattern in (
+            _GITHUB_URL,
+            _GITHUB_SSH,
+            _GO_IMPORT,
+            _TERRAFORM_SOURCE,
+            _GITLAB_URL,
+            _GITLAB_SSH,
+        ):
             match = pattern.search(target)
             if match:
                 repo_ref = match.group(1).rstrip("/").removesuffix(".git")

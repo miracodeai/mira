@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -45,6 +46,8 @@ from mira.models import (
     WALKTHROUGH_MARKER,
     FileChangeType,
     KeyIssue,
+    OverlapFinding,
+    PRFingerprint,
     PRInfo,
     ReviewChunk,
     ReviewComment,
@@ -295,6 +298,65 @@ def _drop_orphan_key_issues(
     return [ki for ki in key_issues if _matches(ki)]
 
 
+def _diff_line_map(diff_text: str) -> dict[str, set[int]]:
+    """New-side line numbers covered by each file's hunks.
+
+    These are the only lines GitHub will anchor an inline review comment to;
+    anything outside gets a 422 at posting time.
+    """
+    lines: dict[str, set[int]] = {}
+    try:
+        patch = parse_diff(diff_text)
+    except Exception:
+        return lines
+    for f in patch.files:
+        covered = lines.setdefault(f.path, set())
+        for h in f.hunks:
+            covered.update(range(h.target_start, h.target_start + h.target_length))
+    return lines
+
+
+def _drop_unanchorable_comments(
+    comments: list[ReviewComment],
+    line_map: dict[str, set[int]],
+) -> tuple[list[ReviewComment], list[ReviewComment]]:
+    """Split comments into (anchorable, dropped) against the PR's base diff.
+
+    A round-2 review of a merge commit can produce findings on mainline code
+    that isn't part of the PR's own diff — GitHub rejects those inlines.
+    """
+    kept: list[ReviewComment] = []
+    dropped: list[ReviewComment] = []
+    for c in comments:
+        covered = line_map.get(c.path, set())
+        anchor = c.end_line if (c.end_line and c.end_line > c.line) else c.line
+        if c.line in covered and anchor in covered:
+            kept.append(c)
+        else:
+            dropped.append(c)
+    return kept, dropped
+
+
+_DIFF_HEADER_RE = re.compile(r"^diff --git \"?a/.*?\"? \"?b/(.*?)\"?$")
+
+
+def _restrict_diff_to_paths(diff_text: str, paths: set[str]) -> str:
+    """Keep only the per-file sections of a unified diff whose new path is in ``paths``.
+
+    Used to trim a round-2 incremental (compare) diff down to the PR's own
+    files: a merge commit's compare diff includes everything the base branch
+    brought in, which isn't this PR's code to review.
+    """
+    sections = re.split(r"(?m)^(?=diff --git )", diff_text)
+    kept: list[str] = []
+    for section in sections:
+        header = section.split("\n", 1)[0]
+        m = _DIFF_HEADER_RE.match(header)
+        if m is None or m.group(1) in paths:
+            kept.append(section)
+    return "".join(kept)
+
+
 def filter_blast_radius_for_visibility(
     dependents: list[dict],
     reviewed_private: bool | None,
@@ -355,6 +417,84 @@ class ReviewEngine:
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
 
+    async def _detect_overlaps_safe(
+        self,
+        pr_info: PRInfo,
+        diff_text: str,
+    ) -> list[OverlapFinding]:
+        """Detect other open PRs stepping on this one. Best-effort; never raises.
+
+        Also caches this PR's change fingerprint so later reviews of *other*
+        PRs can compare against it without re-fetching its files. Runs in
+        parallel with the main review (see review_pr).
+        """
+        if not self.config.review.overlap.enabled or self.dry_run:
+            return []
+        provider = self.provider
+        if provider is None or not hasattr(provider, "list_open_prs"):
+            return []
+        try:
+            from mira.core.overlap import detect_overlaps
+
+            patch = parse_diff(diff_text)
+            filtered = filter_files(patch.files, self.config.filter)
+            current_paths = sorted({f.path for f in filtered})
+            if not current_paths:
+                return []
+
+            store = IndexStore.open(pr_info.owner, pr_info.repo)
+            try:
+                symbols: set[str] = set()
+                for path in current_paths:
+                    summary = store.get_summary(path)
+                    if summary:
+                        symbols.update(s.name for s in summary.symbols)
+                current_fp = PRFingerprint(
+                    pr_number=pr_info.number,
+                    head_sha=pr_info.head_sha,
+                    title=pr_info.title,
+                    body=pr_info.description,
+                    paths=current_paths,
+                    symbols=sorted(symbols),
+                )
+                store.upsert_pr_fingerprint(current_fp)
+                cached = {
+                    fp.pr_number: fp
+                    for fp in store.list_pr_fingerprints()
+                    if fp.pr_number != pr_info.number
+                }
+
+                cfg = self.config.review.overlap
+                candidates = await provider.list_open_prs(
+                    pr_info.owner, pr_info.repo, limit=cfg.max_candidates
+                )
+                bot = (self.bot_name or "").removesuffix("[bot]").lower()
+                candidates = [
+                    c
+                    for c in candidates
+                    if c.number != pr_info.number
+                    and not c.draft
+                    and c.author.removesuffix("[bot]").lower() != bot
+                ]
+                if not candidates:
+                    return []
+
+                return await detect_overlaps(
+                    provider=provider,
+                    llm=self.llm,
+                    config=self.config,
+                    pr_info=pr_info,
+                    current=current_fp,
+                    cached=cached,
+                    candidates=candidates,
+                    save_fp=store.upsert_pr_fingerprint,
+                )
+            finally:
+                store.close()
+        except Exception as exc:
+            logger.warning("Overlap detection failed, continuing: %s", exc)
+            return []
+
     async def review_pr(self, pr_url: str) -> ReviewResult:
         """Full pipeline: fetch PR -> review -> post results.
 
@@ -374,7 +514,10 @@ class ReviewEngine:
         async def _resolve_threads() -> tuple[
             int, int, list[UnresolvedThread], list[ThreadDecision]
         ]:
-            if not self.bot_name:
+            # When auto-resolve is off we skip the thread-resolution path
+            # entirely — no fetch, no verify, no resolve. Round detection is
+            # unaffected; it runs off the separate get_all_bot_threads call below.
+            if not self.bot_name or not self.config.review.auto_resolve_conversations:
                 return 0, 0, [], []
             try:
                 assert self.provider is not None
@@ -416,8 +559,11 @@ class ReviewEngine:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
         # Round 2+ raises the comment threshold so we converge instead of
-        # dripping new findings on every push.
+        # dripping new findings on every push. review-rest is a continuation of
+        # round 1 onto never-reviewed files, so it stays round 1 (full
+        # thresholds, full diff) even though the first pass left threads behind.
         review_round = 1
+        is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
         try:
             if self.bot_name and self.provider is not None:
@@ -425,7 +571,7 @@ class ReviewEngine:
                     pr_info,
                     self.bot_name,
                 )
-                if all_bot_threads:
+                if all_bot_threads and not is_review_rest:
                     review_round = 2
                 resolved_thread_dicts = [
                     {
@@ -440,6 +586,9 @@ class ReviewEngine:
             logger.warning("Failed to compute review round: %s", exc)
 
         # Round 2+ uses incremental diff to avoid re-flagging untouched files.
+        # Overlap detection keeps the full diff — its fingerprint must cover the
+        # whole PR, not just the latest commits.
+        full_diff_text = diff_text
         if review_round >= 2 and pr_info.head_sha:
             try:
                 from mira.dashboard.api import _app_db
@@ -448,6 +597,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 if last_sha and last_sha != pr_info.head_sha:
                     incremental = await self.provider.get_compare_diff(
@@ -455,6 +605,20 @@ class ReviewEngine:
                         last_sha,
                         pr_info.head_sha,
                     )
+                    if incremental.strip():
+                        # A merge commit's compare diff includes everything the
+                        # base branch brought in — not this PR's code. Review
+                        # only the files the PR itself changes.
+                        pr_paths = {f.path for f in parse_diff(full_diff_text).files}
+                        restricted = _restrict_diff_to_paths(incremental, pr_paths)
+                        if len(restricted) != len(incremental):
+                            logger.info(
+                                "Round %d: restricted incremental to PR files (%d -> %d chars)",
+                                review_round,
+                                len(incremental),
+                                len(restricted),
+                            )
+                        incremental = restricted
                     if incremental.strip():
                         logger.info(
                             "Round %d incremental diff %s..%s on PR %s (was %d chars, now %d)",
@@ -490,16 +654,29 @@ class ReviewEngine:
         except Exception:
             pass
 
-        result = await self._review_diff_internal(
-            diff_text,
-            pr_title=pr_info.title,
-            pr_description=pr_info.description,
-            existing_comments=unresolved_threads or None,
-            on_walkthrough_ready=_on_walkthrough_ready,
-            review_round=review_round,
-            resolved_threads=resolved_thread_dicts or None,
-            team_conventions=team_conventions,
-        )
+        # Cross-PR overlap detection runs alongside the main review — it only
+        # needs the diff + GitHub, not the review output. Skipped when the
+        # review itself is skipped (empty incremental diff): findings only
+        # surface in the walkthrough, which won't be posted.
+        overlap_task = None
+        if diff_text.strip():
+            overlap_task = _asyncio.create_task(self._detect_overlaps_safe(pr_info, full_diff_text))
+
+        try:
+            result = await self._review_diff_internal(
+                diff_text,
+                pr_title=pr_info.title,
+                pr_description=pr_info.description,
+                existing_comments=unresolved_threads or None,
+                on_walkthrough_ready=_on_walkthrough_ready,
+                review_round=review_round,
+                resolved_threads=resolved_thread_dicts or None,
+                team_conventions=team_conventions,
+            )
+        except BaseException:
+            if overlap_task is not None:
+                overlap_task.cancel()
+            raise
 
         # The final walkthrough must land after the in-progress one, or it gets
         # overwritten on fast PRs and stays stuck on "in progress".
@@ -507,6 +684,28 @@ class ReviewEngine:
         if notify_task is not None:
             with contextlib.suppress(Exception):
                 await notify_task
+
+        overlaps: list[OverlapFinding] = []
+        if overlap_task is not None:
+            with contextlib.suppress(Exception):
+                overlaps = await overlap_task
+
+        # Inline comments must anchor to lines in the PR's diff vs base, or
+        # GitHub 422s them at posting time and the key-issues table ends up
+        # naming findings with no inline attached. Drop them here and re-sync.
+        if result.comments:
+            kept, unanchorable = _drop_unanchorable_comments(
+                result.comments, _diff_line_map(full_diff_text)
+            )
+            if unanchorable:
+                logger.info(
+                    "Dropped %d comment(s) outside the PR diff: %s",
+                    len(unanchorable),
+                    ", ".join(f"{c.path}:{c.line}" for c in unanchorable),
+                )
+                result.comments = kept
+                if result.key_issues:
+                    result.key_issues = _drop_orphan_key_issues(result.key_issues, kept)
 
         if result.walkthrough:
             _clamp_confidence_to_findings(result.walkthrough, result.comments)
@@ -580,6 +779,7 @@ class ReviewEngine:
                         total_paths=result.total_paths or None,
                         index_was_empty=getattr(self, "_index_was_empty", False),
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
+                        overlaps=overlaps or None,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -592,6 +792,16 @@ class ReviewEngine:
                         await self.provider.post_comment(pr_info, markdown)
                 except Exception as exc:
                     logger.warning("Failed to post walkthrough comment: %s", exc)
+        elif placeholder_id is not None:
+            # No walkthrough (all files excluded, empty diff, or generation
+            # failed) — finalize the placeholder so it doesn't sit on
+            # "Reviewing this PR…" forever.
+            reason = result.skipped_reason or "Walkthrough was not generated."
+            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+            try:
+                await self.provider.update_comment(pr_info, placeholder_id, markdown)
+            except Exception as exc:
+                logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",
@@ -600,6 +810,7 @@ class ReviewEngine:
             llm_resolved,
         )
 
+        posted_comment_ids: list[int] = []
         if result.comments:
             if self.dry_run:
                 logger.info(
@@ -608,13 +819,17 @@ class ReviewEngine:
                     pr_info.url,
                 )
             else:
-                await self.provider.post_review(pr_info, result, bot_name=self.bot_name)
+                posted_comment_ids = (
+                    await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
+                )
         else:
             logger.info("No code suggestions for PR %s", pr_info.url)
 
         result.thread_decisions = thread_decisions
 
         try:
+            import json as _json
+
             from mira.models import Severity
 
             store = IndexStore.open(pr_info.owner, pr_info.repo)
@@ -625,7 +840,8 @@ class ReviewEngine:
             )
             categories = ",".join(sorted({c.category for c in result.comments if c.category}))
             duration = int((_time.monotonic() - _review_start) * 1000)
-            store.record_review(
+            reviewed_paths_json = _json.dumps(result.reviewed_paths or [])
+            review_event = store.record_review(
                 pr_number=pr_info.number,
                 pr_title=pr_info.title,
                 pr_url=pr_info.url,
@@ -638,6 +854,32 @@ class ReviewEngine:
                 tokens_used=result.token_usage.get("total_tokens", 0),
                 duration_ms=duration,
                 categories=categories,
+                author=pr_info.author,
+                author_avatar_url=pr_info.author_avatar_url,
+                reviewed_paths=reviewed_paths_json,
+            )
+            # Persist each comment Mira posted so the dashboard can show the
+            # actual review conversation, not just aggregate counts.
+            store.add_review_comments(
+                review_event.id,
+                pr_info.number,
+                pr_info.url,
+                [
+                    {
+                        "path": c.path,
+                        "line": c.line,
+                        "severity": c.severity.value
+                        if hasattr(c.severity, "value")
+                        else str(c.severity),
+                        "category": c.category,
+                        "title": c.title,
+                        "body": c.body,
+                        "github_comment_id": posted_comment_ids[i]
+                        if i < len(posted_comment_ids)
+                        else 0,
+                    }
+                    for i, c in enumerate(result.comments)
+                ],
             )
             try:
                 from mira.analysis.feedback import synthesize_rules
@@ -657,6 +899,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 prior_reviewed = set(prior.reviewed_paths) if prior else set()
                 prior_skipped = set(prior.skipped_paths) if prior else set()
@@ -671,7 +914,8 @@ class ReviewEngine:
                         reviewed_paths=sorted(new_reviewed),
                         skipped_paths=sorted(new_skipped),
                         chunk_index=(prior.chunk_index + 1) if prior else 1,
-                    )
+                    ),
+                    platform=pr_info.platform,
                 )
             except Exception as progress_err:
                 logger.debug("Failed to persist review progress: %s", progress_err)
@@ -689,6 +933,7 @@ class ReviewEngine:
                     pr_info.repo,
                     pr_info.number,
                     pr_info.head_sha,
+                    platform=pr_info.platform,
                 )
             except Exception as exc:
                 logger.debug("Failed to record last reviewed SHA: %s", exc)
@@ -934,14 +1179,14 @@ class ReviewEngine:
                 _rules_store.close()
 
                 try:
-                    from mira.dashboard.db import AppDatabase
+                    from mira.dashboard.api import _app_db
 
-                    _app_db = AppDatabase()
-                    for rule_text in _app_db.get_global_rules_text():
-                        parts = rule_text.split(": ", 1)
-                        title = parts[0] if len(parts) > 1 else "Global Rule"
-                        content = parts[1] if len(parts) > 1 else rule_text
-                        custom_rules.insert(0, {"title": title, "content": content})
+                    if _app_db is not None:
+                        for rule_text in _app_db.get_global_rules_text():
+                            parts = rule_text.split(": ", 1)
+                            title = parts[0] if len(parts) > 1 else "Global Rule"
+                            content = parts[1] if len(parts) > 1 else rule_text
+                            custom_rules.insert(0, {"title": title, "content": content})
                 except Exception:
                     pass
         except Exception:

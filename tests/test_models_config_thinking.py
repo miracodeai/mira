@@ -14,12 +14,13 @@ import pytest
 from fastapi import HTTPException
 
 from mira.config import LLMConfig
-from mira.dashboard.api import ModelsUpdate, set_models
+from mira.dashboard.api import ModelsUpdate
 from mira.dashboard.db import AppDatabase
 from mira.dashboard.models_config import (
     get_review_thinking_mode,
     llm_config_for,
 )
+from mira.dashboard.routers.admin import set_models
 
 
 @pytest.fixture
