@@ -176,3 +176,25 @@ class TestEnsembleEngineWiring:
         engine = ReviewEngine(config=config, llm=llm)
         await engine.review_diff(sample_diff_text)
         assert llm.review.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_provider_without_temperature_support_skips_ensemble(self, sample_diff_text: str):
+        config = MiraConfig()
+        config.review.ensemble_runs = 3
+        config.review.walkthrough = False
+        config.review.security_pass = False
+        config.review.self_critique = False
+        config.review.include_summary = False
+        config.review.code_context = False
+
+        llm = MagicMock()
+        llm.supports_temperature = False
+        llm.review = AsyncMock(return_value=_review_response([_raw(9, "A")]))
+        llm.complete = AsyncMock(return_value="")
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"total_tokens": 100}
+
+        engine = ReviewEngine(config=config, llm=llm)
+        await engine.review_diff(sample_diff_text)
+
+        assert llm.review.call_count == 1

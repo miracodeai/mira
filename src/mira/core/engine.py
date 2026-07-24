@@ -1243,6 +1243,12 @@ class ReviewEngine:
                     # majority-vote findings. The agentic loop (if any) only
                     # runs once; extras sample the plain review path.
                     n_runs = self.config.review.ensemble_runs
+                    if n_runs > 1 and not getattr(self.llm, "supports_temperature", True):
+                        logger.warning(
+                            "Provider does not support temperature controls; "
+                            "disabling ensemble runs"
+                        )
+                        n_runs = 1
                     if n_runs > 1:
                         extra_raws = await _asyncio.gather(
                             *[

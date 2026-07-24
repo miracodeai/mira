@@ -306,3 +306,61 @@ class TestCLI:
             )
 
         assert result.exit_code == 0
+
+    def test_review_config_does_not_trust_execution_settings_by_default(self):
+        review_result = _make_result()
+
+        with (
+            patch("mira.cli.ReviewEngine") as mock_engine_cls,
+            patch("mira.cli.load_config") as mock_load,
+        ):
+            mock_load.return_value = MagicMock()
+            mock_engine = MagicMock()
+            mock_engine.review_diff = AsyncMock(return_value=review_result)
+            mock_engine_cls.return_value = mock_engine
+
+            result = CliRunner().invoke(
+                main,
+                ["review", "--stdin", "--config", ".mira.yaml"],
+                input="diff\n",
+            )
+
+        assert result.exit_code == 0
+        assert mock_load.call_args.kwargs["trust_execution_settings"] is False
+
+    def test_review_requires_explicit_opt_in_to_trust_execution_settings(self):
+        review_result = _make_result()
+
+        with (
+            patch("mira.cli.ReviewEngine") as mock_engine_cls,
+            patch("mira.cli.load_config") as mock_load,
+        ):
+            mock_load.return_value = MagicMock()
+            mock_engine = MagicMock()
+            mock_engine.review_diff = AsyncMock(return_value=review_result)
+            mock_engine_cls.return_value = mock_engine
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "review",
+                    "--stdin",
+                    "--config",
+                    "/etc/mira/config.yaml",
+                    "--trust-execution-settings",
+                ],
+                input="diff\n",
+            )
+
+        assert result.exit_code == 0
+        assert mock_load.call_args.kwargs["trust_execution_settings"] is True
+
+    def test_review_trust_execution_settings_requires_explicit_config(self):
+        result = CliRunner().invoke(
+            main,
+            ["review", "--stdin", "--trust-execution-settings"],
+            input="diff\n",
+        )
+
+        assert result.exit_code != 0
+        assert "requires --config" in result.output

@@ -62,6 +62,20 @@ class TestBaseUrlValidation:
             LLMConfig(base_url=url)
 
 
+class TestCodexConfigValidation:
+    def test_rejects_non_read_only_sandbox(self):
+        from mira.config import LLMConfig
+
+        with pytest.raises(ValueError):
+            LLMConfig(provider="codex-cli", codex_sandbox="danger-full-access")
+
+    def test_rejects_non_positive_timeout(self):
+        from mira.config import LLMConfig
+
+        with pytest.raises(ValueError):
+            LLMConfig(provider="codex-cli", codex_timeout_seconds=0)
+
+
 class TestLoadConfig:
     def test_default_config(self):
         config = load_config()
@@ -86,6 +100,36 @@ class TestLoadConfig:
         assert config.llm.temperature == 0.1
         assert config.filter.confidence_threshold == 0.8
         assert config.filter.max_comments == 3
+
+    def test_repo_file_cannot_enable_or_repoint_cli_provider(self, tmp_path: Path):
+        repo_file = tmp_path / ".mira.yaml"
+        repo_file.write_text(
+            "llm:\n"
+            "  provider: codex-cli\n"
+            "  codex_command: ./repo-controlled-codex\n"
+            "  codex_home: ./repo-auth\n"
+        )
+
+        config = load_config(repo_file)
+
+        assert config.llm.provider == "openai"
+        assert config.llm.codex_command == "codex"
+        assert config.llm.codex_home is None
+
+    def test_explicitly_trusted_cli_config_can_enable_codex(self, tmp_path: Path):
+        config_file = tmp_path / "deployment.yaml"
+        config_file.write_text(
+            "llm:\n"
+            "  provider: codex-cli\n"
+            "  codex_command: /trusted/bin/codex\n"
+            "  codex_home: /trusted/codex-home\n"
+        )
+
+        config = load_config(config_file, trust_execution_settings=True)
+
+        assert config.llm.provider == "codex-cli"
+        assert config.llm.codex_command == "/trusted/bin/codex"
+        assert config.llm.codex_home == "/trusted/codex-home"
 
     def test_overrides(self, sample_config_path: Path):
         config = load_config(sample_config_path, {"llm.model": "anthropic/claude-3-haiku"})
@@ -155,6 +199,37 @@ class TestGlobalDefaults:
         assert config.llm.model == "anthropic/claude-haiku-4-5"
         assert config.filter.confidence_threshold == 0.6
         assert config.filter.max_comments == 10
+
+    def test_repo_config_cannot_override_codex_execution_settings(self, tmp_path: Path):
+        global_file = tmp_path / "mira.yaml"
+        global_file.write_text(
+            "llm:\n"
+            "  provider: codex-cli\n"
+            "  codex_command: /trusted/bin/codex\n"
+            "  codex_home: /trusted/codex-home\n"
+            "  codex_sandbox: read-only\n"
+            "  codex_timeout_seconds: 900\n"
+        )
+        set_global_defaults(global_file)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        repo_file = repo_dir / ".mira.yaml"
+        repo_file.write_text(
+            "llm:\n"
+            "  provider: openai\n"
+            "  codex_command: ./repo-controlled-codex\n"
+            "  codex_home: ./repo-auth\n"
+            "  codex_sandbox: danger-full-access\n"
+            "  codex_timeout_seconds: 1\n"
+        )
+
+        config = load_config(repo_file)
+
+        assert config.llm.provider == "codex-cli"
+        assert config.llm.codex_command == "/trusted/bin/codex"
+        assert config.llm.codex_home == "/trusted/codex-home"
+        assert config.llm.codex_sandbox == "read-only"
+        assert config.llm.codex_timeout_seconds == 900
 
     def test_per_repo_overrides_global(self, tmp_path: Path):
         # Global sets a baseline.

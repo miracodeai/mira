@@ -1,6 +1,6 @@
 """Review passes that run alongside the main chunked review.
 
-Each pass takes an `LLMProvider` and the input it needs; none touches the
+Each pass takes an `LLMProviderProtocol` and the input it needs; none touches the
 ReviewEngine instance. Most route through the configured indexing model so
 the heavyweight review model isn't paying for verification work.
 """
@@ -13,8 +13,9 @@ import logging
 from mira.config import load_config
 from mira.dashboard.models_config import llm_config_for
 from mira.exceptions import ResponseParseError
+from mira.llm import create_llm
+from mira.llm.base import LLMProviderProtocol
 from mira.llm.prompts.review import build_security_review_prompt
-from mira.llm.provider import LLMProvider
 from mira.llm.response_parser import (
     convert_to_review_comments,
     loads_lenient,
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 async def agentic_review_loop(
-    llm: LLMProvider,
+    llm: LLMProviderProtocol,
     messages: list[dict],
     executor: object,
 ) -> str:
@@ -109,20 +110,20 @@ async def agentic_review_loop(
     return ""
 
 
-def _indexing_llm(fallback: LLMProvider) -> LLMProvider:
+def _indexing_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
     """Build an indexing-tier provider, falling back to ``fallback`` on error."""
     try:
-        return LLMProvider(llm_config_for("indexing", load_config().llm))
+        return create_llm(llm_config_for("indexing", load_config().llm))
     except Exception:
         return fallback
 
 
 async def security_review_pass(
-    llm: LLMProvider,
+    llm: LLMProviderProtocol,
     files: list,
     narrowed: list,
     pr_title: str = "",
-    indexing_llm: LLMProvider | None = None,
+    indexing_llm: LLMProviderProtocol | None = None,
 ) -> list[ReviewComment]:
     """Dedicated security review on the configured indexing model.
 
@@ -228,11 +229,11 @@ def _critique_keep(verdict: dict, comment: ReviewComment) -> bool:
 
 
 async def self_critique(
-    llm: LLMProvider,
+    llm: LLMProviderProtocol,
     comments: list[ReviewComment],
     learned_rules: list[str] | None = None,
     custom_rules: list[dict[str, str]] | None = None,
-    indexing_llm: LLMProvider | None = None,
+    indexing_llm: LLMProviderProtocol | None = None,
     diff_files: list | None = None,
     audit: list[dict] | None = None,
 ) -> list[ReviewComment]:
@@ -363,13 +364,13 @@ async def self_critique(
 
 
 async def regenerate_summary(
-    llm: LLMProvider,
+    llm: LLMProviderProtocol,
     comments: list[ReviewComment],
     key_issues: list[KeyIssue],
     pr_title: str,
     pr_description: str,
     fallback: str,
-    indexing_llm: LLMProvider | None = None,
+    indexing_llm: LLMProviderProtocol | None = None,
 ) -> str:
     """Rewrite the review summary from the final filed outputs.
 
