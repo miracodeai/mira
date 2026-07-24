@@ -13,8 +13,10 @@ from unittest.mock import patch
 
 import psycopg
 
-from mira.dashboard.db import AppDatabase
+from mira.dashboard.db import AppDatabase, _hash_password
 from mira.index import pg_store
+
+_ADMIN_HASH = _hash_password("admin")
 
 
 class _FakeCursor:
@@ -31,7 +33,7 @@ class _FakeCursor:
         if self._conn.dead:
             raise psycopg.OperationalError("the connection is closed")
         if "FROM users" in sql and "password_hash" in sql:
-            self._conn.last_row = (1, "admin", True, "dark")
+            self._conn.last_row = (1, "admin", True, "dark", _ADMIN_HASH)
         elif "FROM files" in sql and "path" in sql:
             self._conn.last_row = ("warmup.py", "py", "summary", "hash", 1, 0.0)
         elif "COUNT(*)" in sql and "is_admin" in sql:

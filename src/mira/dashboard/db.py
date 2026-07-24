@@ -6,6 +6,7 @@ Supports PostgreSQL via DATABASE_URL or SQLite fallback for local dev.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -462,16 +463,30 @@ def _epoch_to_day(event_at: float) -> str:
     return datetime.fromtimestamp(event_at, tz=UTC).strftime("%Y-%m-%d")
 
 
+_PBKDF2_ITERATIONS = 600_000
+
+
 def _hash_password(password: str) -> str:
-    """Hash password with salt using SHA-256. Simple and dependency-free."""
-    salt = "mira_salt_v1"
-    return hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    """PBKDF2-HMAC-SHA256 with a per-user random salt: 'pbkdf2$iterations$salt$hash'."""
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), _PBKDF2_ITERATIONS)
+    return f"pbkdf2${_PBKDF2_ITERATIONS}${salt}${dk.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    if stored.startswith("pbkdf2$"):
+        _, iterations, salt, expected = stored.split("$")
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(iterations))
+        return hmac.compare_digest(dk.hex(), expected)
+    # Legacy static-salt SHA-256 (pre-0.7.1); upgraded on next successful login.
+    legacy = hashlib.sha256(f"mira_salt_v1:{password}".encode()).hexdigest()
+    return hmac.compare_digest(legacy, stored)
 
 
 class AppDatabase:
     """Application database for users and sessions."""
 
-    def __init__(self, url: str = "", admin_password: str = "admin") -> None:
+    def __init__(self, url: str = "", admin_password: str = "") -> None:
         self._url = url
         self._admin_password = admin_password
         self._pg_conn = None
@@ -663,22 +678,58 @@ class AppDatabase:
                 self._pg_conn.commit()
 
     def _ensure_default_admin(self) -> None:
-        """Create default admin user if none exists. Uses configured admin_password."""
+        """Create the initial admin user if none exists. Never uses a fixed default
+        password: takes the configured one, or generates a random one and writes it
+        to a 0600 file (never to logs, which may be shipped to long-lived stores)."""
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
                 "SELECT COUNT(*) FROM users WHERE is_admin = 1"
             ).fetchone()
-            if row[0] == 0:
-                self.create_user("admin", self._admin_password, is_admin=True)
-                logger.info("Created default admin user (password from config)")
+            has_admin = row[0] > 0
         else:
             with self._pg_cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM users WHERE is_admin = TRUE")
                 row = cur.fetchone()
-                if row and row[0] == 0:
-                    self.create_user("admin", self._admin_password, is_admin=True)
-                    logger.info("Created default admin user (password from config)")
+                has_admin = bool(row and row[0])
+        if has_admin:
+            self._warn_if_default_password()
+            return
+        if self._admin_password:
+            self.create_user("admin", self._admin_password, is_admin=True)
+            logger.info("Created admin user (password from ADMIN_PASSWORD)")
+        else:
+            password = secrets.token_urlsafe(16)
+            # Written before create_user: if the write fails, startup fails and
+            # no admin exists, so the next start retries cleanly.
+            secrets_dir = os.environ.get("MIRA_INDEX_DIR", "./data/indexes")
+            os.makedirs(secrets_dir, exist_ok=True)
+            path = os.path.join(secrets_dir, "initial_admin_password")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(password + "\n")
+            self.create_user("admin", password, is_admin=True)
+            logger.warning(
+                "No ADMIN_PASSWORD set — created admin user with a generated password, "
+                "written to %s (log in, change it, then delete the file)",
+                path,
+            )
+
+    def _warn_if_default_password(self) -> None:
+        """Flag deployments still carrying admin/admin (or the old .env.example value)."""
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            row = self._sqlite_conn.execute(
+                "SELECT password_hash FROM users WHERE username = 'admin'"
+            ).fetchone()
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute("SELECT password_hash FROM users WHERE username = 'admin'")
+                row = cur.fetchone()
+        if row and any(_verify_password(p, row[0]) for p in ("admin", "changeme")):
+            logger.warning(
+                "The 'admin' user has a well-known default password — change it immediately"
+            )
 
     def create_user(self, username: str, password: str, is_admin: bool = False) -> User:
         pw_hash = _hash_password(password)
@@ -701,31 +752,39 @@ class AppDatabase:
             return User(id=row[0], username=username, is_admin=is_admin, created_at=now)
 
     def authenticate(self, username: str, password: str) -> User | None:
-        pw_hash = _hash_password(password)
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
-                "SELECT id, username, is_admin, theme, created_at FROM users WHERE username = ? AND password_hash = ?",
-                (username, pw_hash),
+                "SELECT id, username, is_admin, theme, created_at, password_hash "
+                "FROM users WHERE username = ?",
+                (username,),
             ).fetchone()
-            if row:
-                return User(
-                    id=row[0],
-                    username=row[1],
-                    is_admin=bool(row[2]),
-                    theme=row[3],
-                    created_at=row[4],
-                )
-            return None
-        with self._pg_cursor() as cur:
-            cur.execute(
-                "SELECT id, username, is_admin, theme FROM users WHERE username = %s AND password_hash = %s",
-                (username, pw_hash),
+            if not row or not _verify_password(password, row[5]):
+                return None
+            user = User(
+                id=row[0],
+                username=row[1],
+                is_admin=bool(row[2]),
+                theme=row[3],
+                created_at=row[4],
             )
-            row = cur.fetchone()
-            if row:
-                return User(id=row[0], username=row[1], is_admin=bool(row[2]), theme=row[3])
-            return None
+            stored = row[5]
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "SELECT id, username, is_admin, theme, password_hash "
+                    "FROM users WHERE username = %s",
+                    (username,),
+                )
+                row = cur.fetchone()
+            if not row or not _verify_password(password, row[4]):
+                return None
+            user = User(id=row[0], username=row[1], is_admin=bool(row[2]), theme=row[3])
+            stored = row[4]
+        if not stored.startswith("pbkdf2$"):
+            # Transparent upgrade of legacy SHA-256 hashes.
+            self.update_password(user.id, password)
+        return user
 
     def create_session(self, user_id: int) -> str:
         token = secrets.token_urlsafe(32)

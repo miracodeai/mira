@@ -241,7 +241,9 @@ class ProviderConfig(BaseModel):
 
 class DatabaseConfig(BaseModel):
     url: str = ""  # empty = SQLite fallback. "postgresql://user:pass@host:5432/mira"
-    admin_password: str = "admin"  # default admin password, change in production
+    admin_password: str = (
+        ""  # initial admin password; empty = generated on first start, written to a 0600 file
+    )
 
 
 class MiraConfig(BaseModel):
