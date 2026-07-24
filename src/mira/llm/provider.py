@@ -84,6 +84,14 @@ class LLMProvider:
         # whatever model is selected); remembered so we drop it and review
         # without thinking rather than failing.
         self._no_reasoning: set[str] = set()
+        # Models that 400 on response_format=json_object (e.g. Anthropic models
+        # served via Databricks AI Gateway, which only support json_schema).
+        # Remembered so we drop response_format and rely on the prompt + the
+        # tolerant parser in utils.py instead of failing the call.
+        self._no_response_format: set[str] = set()
+        # Models that 400 on the temperature parameter (Databricks-served
+        # Anthropic/reasoning models reject it). Remembered so we omit it.
+        self._no_temperature: set[str] = set()
 
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -121,9 +129,67 @@ class LLMProvider:
         body["reasoning"] = {"effort": effort}
         body.pop("temperature", None)
 
+    async def _post_chat(
+        self,
+        client: httpx.AsyncClient,
+        body: dict,
+        api_model: str,
+        temperature: float | None,
+    ) -> httpx.Response:
+        """POST to the chat endpoint, self-healing on 400s for parameters that
+        some endpoints reject.
+
+        OpenRouter accepts all of these, so this is a no-op there. Other
+        endpoints (notably Databricks-served Anthropic models) reject a forced
+        ``tool_choice``, ``response_format=json_object``, OpenRouter-style
+        ``reasoning``, or even ``temperature``. Each rejected param is stripped
+        and remembered per-model so later calls skip it. Each 400 may reveal the
+        next unsupported param, so we heal in a short loop.
+        """
+        resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+        # One heal per rejected param; bounded by the 4 healable params above
+        # (tool_choice, response_format, reasoning, temperature). So this is up
+        # to 1 initial POST + 4 heal-retries = 5 requests in the worst case.
+        for _ in range(4):
+            if resp.status_code != 400:
+                return resp
+            text = resp.text.lower()
+            if body.get("tool_choice") not in (None, "auto") and "tool_choice" in text:
+                logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
+                self._no_forced_tool_choice.add(api_model)
+                body["tool_choice"] = "auto"
+            elif "response_format" in body and (
+                "response_format" in text or "response format" in text
+            ):
+                logger.info(
+                    "Model %s rejected response_format=json_object; retrying without it", api_model
+                )
+                self._no_response_format.add(api_model)
+                body.pop("response_format", None)
+            elif "reasoning" in body and "reasoning" in text:
+                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
+                self._no_reasoning.add(api_model)
+                body.pop("reasoning", None)
+                # reasoning had suppressed temperature; restore it unless the
+                # model also rejects temperature.
+                if (
+                    self.config.send_temperature
+                    and temperature is not None
+                    and api_model not in self._no_temperature
+                ):
+                    body["temperature"] = temperature
+            elif "temperature" in body and "temperature" in text:
+                logger.info("Model %s rejected temperature; retrying without it", api_model)
+                self._no_temperature.add(api_model)
+                body.pop("temperature", None)
+            else:
+                return resp  # 400 we don't know how to heal — let the caller raise
+            resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+        return resp
+
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_exception_type(Exception),
         reraise=True,
     )
@@ -136,22 +202,21 @@ class LLMProvider:
         max_tokens: int | None = None,
     ) -> str:
         """Make a single LLM call with retries against the configured endpoint."""
+        api_model = _strip_model_prefix(model, self.config.base_url)
+        temp = temperature if temperature is not None else self.config.temperature
         body: dict = {
-            "model": _strip_model_prefix(model, self.config.base_url),
+            "model": api_model,
             "messages": messages,
-            "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.config.max_tokens,
         }
-        if json_mode:
+        if self.config.send_temperature and api_model not in self._no_temperature:
+            body["temperature"] = temp
+        if json_mode and api_model not in self._no_response_format:
             body["response_format"] = {"type": "json_object"}
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post_chat(client, body, api_model, temp)
             if resp.status_code != 200:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
@@ -166,8 +231,8 @@ class LLMProvider:
         return content
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_exception_type(Exception),
         reraise=True,
     )
@@ -184,6 +249,7 @@ class LLMProvider:
         tool arguments as the JSON response.
         """
         api_model = _strip_model_prefix(model, self.config.base_url)
+        temp = temperature if temperature is not None else self.config.temperature
         forced_choice: dict | str = {
             "type": "function",
             "function": {"name": tools[0]["function"]["name"]},
@@ -193,39 +259,16 @@ class LLMProvider:
             "messages": messages,
             "tools": tools,
             # Force the one tool for structured args; models that reject a
-            # forced choice fall back to "auto" (handled on the 400 below).
+            # forced choice fall back to "auto" (handled by _post_chat).
             "tool_choice": "auto" if api_model in self._no_forced_tool_choice else forced_choice,
-            "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        if self.config.send_temperature and api_model not in self._no_temperature:
+            body["temperature"] = temp
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
-            if (
-                resp.status_code == 400
-                and body["tool_choice"] != "auto"
-                and "tool_choice" in resp.text.lower()
-            ):
-                # Forced choice unsupported — remember it and let the model pick.
-                logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
-                self._no_forced_tool_choice.add(api_model)
-                body["tool_choice"] = "auto"
-                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
-            if resp.status_code == 400 and "reasoning" in body and "reasoning" in resp.text.lower():
-                # Reasoning effort unsupported on this model/endpoint — drop it
-                # and review without thinking instead of failing the review.
-                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
-                self._no_reasoning.add(api_model)
-                body.pop("reasoning", None)
-                body["temperature"] = (
-                    temperature if temperature is not None else self.config.temperature
-                )
-                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            resp = await self._post_chat(client, body, api_model, temp)
             if resp.status_code != 200:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
@@ -300,8 +343,8 @@ class LLMProvider:
             ) from primary_err
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
         retry=retry_if_exception_type(Exception),
         reraise=True,
     )
@@ -319,22 +362,21 @@ class LLMProvider:
         dispatch the calls and continue the conversation. This is what
         the agentic loop needs.
         """
+        api_model = _strip_model_prefix(model, self.config.base_url)
+        temp = temperature if temperature is not None else self.config.temperature
         body: dict = {
-            "model": _strip_model_prefix(model, self.config.base_url),
+            "model": api_model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
-            "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        if self.config.send_temperature and api_model not in self._no_temperature:
+            body["temperature"] = temp
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post_chat(client, body, api_model, temp)
             if resp.status_code != 200:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()

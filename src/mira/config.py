@@ -47,6 +47,10 @@ class LLMConfig(BaseModel):
     review_reasoning_effort: str | None = None
     reasoning_effort: str | None = None
     temperature: float = 0.2
+    # Some gateways reject the temperature parameter outright (e.g. Databricks-
+    # served Anthropic/reasoning models). Set false to omit it proactively and
+    # skip the wasted 400+retry. The provider also self-heals if left true.
+    send_temperature: bool = True
     max_tokens: int = 4096
     max_context_tokens: int = 120_000
     # Provider selection. "openai" uses any OpenAI-compatible endpoint (default).
