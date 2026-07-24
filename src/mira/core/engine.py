@@ -867,7 +867,7 @@ class ReviewEngine:
                 logger.debug("Feedback synthesis failed: %s", synth_err)
             store.close()
 
-            # Merge with any prior progress for this PR so @mira-bot review-rest
+            # Merge with any prior progress for this PR so @miracodeai review-rest
             # can target only the still-unreviewed paths.
             try:
                 from mira.dashboard.api import _app_db

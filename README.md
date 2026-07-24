@@ -32,8 +32,9 @@ Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https
 - **You set the rules** — Define custom and org-wide review rules in plain language, per-repo via `.mira.yaml` or from the dashboard.
 - **Privacy first** — Self-hosted by default. Diffs, indexes, review history, and CVE data live in your SQLite or Postgres, on infra you own. No phone-home, no required telemetry, no "is this used for training?"
 - **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — and Mira is the fastest tool on the public [Code Review Bench](#benchmark).
+- **Catches PRs stepping on each other** — While reviewing, Mira checks the repo's other open PRs and flags merge-conflict risk and duplicate effort right in the walkthrough.
 - **Indexed, cross-file context** — A full-repo code index gives the model real project context, not just the diff — plus org-wide package search and hourly OSV.dev CVE scanning across every repo.
-- **GitHub and GitLab** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline, with full feature parity across both. Bitbucket and Gitea adapters are next; the engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
+- **GitHub, GitLab, and Forgejo** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline, with full feature parity across GitHub, GitLab, and Forgejo (incl. Codeberg). A Bitbucket adapter is next; the engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
 - **Self-host on day one** — Docker image with Railway / Fly.io / Render configs, SQLite or Postgres. Every feature included.
 
 ## Dashboard
@@ -51,6 +52,7 @@ Most AI reviewers are SaaS: your diffs (and often the full surrounding code) lea
   - **Dependency + blast-radius graphs**: see exactly which files and repos depend on a symbol before you change it.
   - **Per-repo review event stream**: every webhook, every chunk, every cost figure, in one place for live troubleshooting.
   - **Cost & token telemetry**: actual spend per repo and per model, not estimates, because you control the LLM key.
+  - **Review-health page**: stale/waiting PRs, a reviewer-responsiveness leaderboard, throughput trends, and rubber-stamp detection (approvals with no substantive review) — plus per-contributor analytics with a year-long heatmap and Mira's review-quality signal.
   - **Coming soon, change-frequency heatmaps**: surface the files that bug fixes keep landing on so you can target review attention.
 
 If your engineering team needs answers like *"which of our repos are exposed to this CVE?"* or *"what's the blast radius of changing this function?"*, those questions stop being multi-day investigations and start being one-click dashboard pages.
@@ -78,7 +80,7 @@ Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.6.
 
 ## Quick Start
 
-Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App) and GitLab (via a group/project access token) are both fully supported; Bitbucket and Gitea are next.
+Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), and Forgejo/Codeberg (via an access token) are all fully supported; Bitbucket is next.
 
 **1. Deploy** — one-click on Railway, or with Docker:
 
@@ -125,7 +127,7 @@ filter:
 ## Development
 
 ```bash
-git clone https://github.com/mira-reviewer/mira.git
+git clone https://github.com/miracodeai/mira.git
 cd mira
 pip install -e ".[dev,serve]"
 

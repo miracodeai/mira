@@ -378,7 +378,7 @@ class ReviewResult:
     token_usage: dict[str, int] = field(default_factory=dict)
     walkthrough: WalkthroughResult | None = None
     thread_decisions: list[ThreadDecision] = field(default_factory=list)
-    # Surfaced in the walkthrough banner so @mira-bot review-rest can target the rest.
+    # Surfaced in the walkthrough banner so @miracodeai review-rest can target the rest.
     reviewed_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
     total_paths: list[str] = field(default_factory=list)

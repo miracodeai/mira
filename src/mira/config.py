@@ -152,7 +152,7 @@ class ReviewConfig(BaseModel):
     # Total diff size cap. Above this, the diff is *not* truncated arbitrarily —
     # files are ranked by priority and the lowest-priority files are skipped
     # until the diff fits. Skipped files are listed in the walkthrough so the
-    # user can invoke `@mira-bot review-rest` to review them.
+    # user can invoke `@miracodeai review-rest` to review them.
     max_diff_size: int = 250_000
     # Per-file size cap. A single huge file (lockfile, generated SDK, etc.)
     # gets skipped before chunking even starts.

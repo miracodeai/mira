@@ -10,6 +10,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - Multi-file reasoning across a diff
 - Parallel chunk review (`asyncio.gather` with configurable concurrency)
 - Cross-chunk and cross-file deduplication (Jaccard similarity on titles + bodies)
+- Cross-PR overlap detection: flags other open PRs touching the same code (merge-conflict risk) or pursuing the same goal (duplicate effort) in the walkthrough
 - GitHub suggestion blocks with runtime fence sanitization
 - Noise filtering: confidence thresholds, severity sorting, per-PR comment caps
 - Per-language file-type support
@@ -41,7 +42,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 
 ## Learning from feedback
 
-- `@mira-bot reject` thread resolution with feedback-event recording
+- `@miracodeai reject` thread resolution with feedback-event recording
 - Deterministic rule synthesis from reject signals
 - LLM-powered synthesis of human review patterns from merged PRs (extracts recurring themes from human reviewer comments)
 - Feedback stats API for inspecting the learning loop
@@ -50,16 +51,20 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 ## Platform integrations
 
 - GitHub App with webhook support — works against github.com and GitHub Enterprise Server (set `MIRA_GITHUB_API_URL`)
-- `mira serve` command for running the GitHub App server
-- GitHub App chat: mention the bot on any PR to ask questions
+- GitLab with full feature parity — merge-request reviews, `@mention` commands, thread auto-resolution, indexing — via a group or project access token (`MIRA_GITLAB_TOKEN`); self-managed instances via `MIRA_GITLAB_API_URL`
+- Forgejo / Codeberg — pull-request reviews and `@mention` commands via an access token (`MIRA_FORGEJO_TOKEN`); self-hosted instances via `MIRA_FORGEJO_API_URL`
+- One `mira serve` deployment reviews on any combination of platforms, each on its own webhook route
+- Bot chat: mention the bot on any PR or MR to ask questions
 - Cancel-in-progress indexing from the UI
 
 ## Bring your own LLM
 
 - Any provider available through OpenRouter — Anthropic, OpenAI, Google Gemini, DeepSeek, and more — so you pay your provider directly with no Mira markup
+- Any OpenAI-compatible endpoint via `llm.base_url` — vLLM, Ollama, LiteLLM proxy, LocalAI, llama.cpp, Together, Fireworks, Groq
+- AWS Bedrock as a direct backend (Converse API, standard AWS credential chain)
 - Separate model configuration for indexing (cheap) vs review (powerful)
 - Fallback-model chain
-- Direct (non-OpenRouter) provider integration is on the roadmap for users who'd rather hold their own API keys per provider
+- Adjustable review thinking mode (`llm.review_reasoning_effort`) for models with extended reasoning
 
 ## Dashboard and analytics
 
@@ -70,15 +75,22 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - Per-repo views: files indexed, dependencies, blast radius, packages, last-indexed timestamp
 - Indexing status dashboard with cost estimates
 - Review event stream
+- Threaded PR activity timeline: each review pass with its comments and the human replies nested under them
+- Review page (admin): stale/waiting PRs, reviewer-responsiveness leaderboard, throughput trends, rubber-stamp detection, open-PR status board
+- Contributor analytics: authoring stats, year-long contribution heatmap, and Mira's review-quality signal per contributor
 - Pending-uninstall review queue
 
 ## Configuration
 
 - Repo-level `.mira.yaml` configuration file
 - Per-repo context entries (architecture docs, coding guidelines)
-- Confidence thresholds, severity thresholds, comment caps
+- Confidence thresholds (global and per-category), severity thresholds, comment caps
 - Exclude patterns and per-language overrides
-- `context_lines` and `max_concurrent_chunks` tuning knobs
+- PR author allow/deny lists (`filter.allowed_authors` / `filter.blocked_authors`) for muting bots or scoping auto-review
+- Cross-PR overlap tuning (`review.overlap`): candidate cap, confidence floor, title-similarity threshold
+- Opt-in ensemble mode (`review.ensemble_runs`): review each chunk N times and keep majority-vote findings
+- Thread auto-resolution toggle (`review.auto_resolve_conversations`)
+- `context_lines`, `max_concurrent_chunks`, and `index.max_file_size` tuning knobs
 
 ## Storage and deployment
 
