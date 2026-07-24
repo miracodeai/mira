@@ -1004,6 +1004,18 @@ class ReviewEngine:
                 len(skipped),
             )
 
+        # Dependency-overlap candidates are picked *before* the size/priority
+        # cull below. The pass is cheap and narrowly scoped, so a manifest that
+        # loses the diff-budget race — or a big dependency bump that trips
+        # max_file_size — shouldn't silently disable it. `only_paths` still
+        # applies: review-rest targets a specific subset and shouldn't re-warn
+        # about manifests the first pass already covered.
+        manifest_candidates = (
+            _manifest_files([f for f in filtered if only_paths is None or f.path in only_paths])
+            if self.config.review.dependency_overlap
+            else []
+        )
+
         filtered = selected
 
         async def _generate_walkthrough() -> WalkthroughResult | None:
@@ -1333,19 +1345,19 @@ class ReviewEngine:
         # most PRs pay nothing. When it does, fetch the repo's existing package
         # names from the index so the pass can spot a duplicate of one already
         # present (empty list on an unindexed repo — pass falls back to the diff).
-        manifest_files = (
-            _manifest_files(filtered) if self.config.review.dependency_overlap else []
-        )
+        manifest_files = manifest_candidates
         existing_packages: list[str] = []
         if manifest_files:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
                 try:
                     _pkg_store = IndexStore.open(pr_info.owner, pr_info.repo)
-                    existing_packages = sorted(
-                        {p.name for p in _pkg_store.list_manifest_packages()}
-                    )
-                    _pkg_store.close()
+                    try:
+                        existing_packages = sorted(
+                            {p.name for p in _pkg_store.list_manifest_packages()}
+                        )
+                    finally:
+                        _pkg_store.close()
                 except Exception as exc:
                     logger.debug("Manifest package lookup failed: %s", exc)
         dependency_task = _asyncio.create_task(

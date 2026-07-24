@@ -1716,6 +1716,68 @@ class TestManifestFileSelection:
         kept = {f.path for f in _manifest_files(files)}
         assert kept == {"package.json", "pyproject.toml"}
 
+    @pytest.mark.asyncio
+    async def test_culled_manifest_still_reaches_dependency_pass(self, monkeypatch):
+        """A manifest dropped by the size cull must still reach the dependency pass.
+
+        The engine picks dependency candidates from the *pre-cull* file list on
+        purpose: a big dependency bump can blow past max_file_size, and that's
+        exactly the PR where a duplicate-dep warning matters most. Regression
+        guard against selecting manifests off the post-cull `filtered` list.
+        """
+        from mira.config import MiraConfig
+        from mira.core import engine as engine_mod
+        from mira.core.engine import ReviewEngine
+
+        seen: dict = {}
+
+        async def fake_dep_pass(llm, manifest_files, existing_packages=None, pr_title="", **kw):
+            seen["paths"] = [f.path for f in manifest_files]
+            return []
+
+        async def fake_sec_pass(*a, **kw):
+            return []
+
+        monkeypatch.setattr(engine_mod, "dependency_review_pass", fake_dep_pass)
+        monkeypatch.setattr(engine_mod, "security_review_pass", fake_sec_pass)
+        # No chunks → no main-review LLM calls; we only care about pass wiring.
+        monkeypatch.setattr(engine_mod, "chunk_files", lambda *a, **kw: [])
+
+        bump = "\n".join(f'+    "pkg-{i}": "^1.0.0",' for i in range(200))
+        diff = (
+            "diff --git a/package.json b/package.json\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/package.json\n"
+            "+++ b/package.json\n"
+            "@@ -1,2 +1,202 @@\n"
+            " {\n"
+            f"{bump}\n"
+            " }\n"
+            "diff --git a/src/app.py b/src/app.py\n"
+            "index 3333333..4444444 100644\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " import os\n"
+            "+x = 1\n"
+            " y = 2\n"
+        )
+
+        config = MiraConfig()
+        config.review.walkthrough = False
+        config.review.self_critique = False
+        config.review.security_pass = False
+        config.review.dependency_overlap = True
+        # Small enough that the 200-line package.json diff is culled, but the
+        # tiny source file survives (so we don't hit the no-files early return).
+        config.review.max_file_size = 200
+
+        engine = ReviewEngine(config=config, llm=AsyncMock(), provider=None)
+        result = await engine._review_diff_internal(diff)
+
+        assert result.reviewed_paths == ["src/app.py"], "manifest should be culled"
+        assert seen.get("paths") == ["package.json"], "pass must still see the manifest"
+
 
 class TestRegenerateSummary:
     """Summary prose must describe only issues that were actually filed."""
