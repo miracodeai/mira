@@ -10,9 +10,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi import Response as FastAPIResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
@@ -50,7 +48,7 @@ def register_dashboard(app: FastAPI) -> None:
 
 # Standalone app — initialized at module load, but routes are registered at
 # the bottom of this file, *after* all @router decorators have run.
-app = FastAPI(title="Mira Dashboard API", version="0.4.0")
+app = FastAPI(title="Mira Dashboard API", version="0.7.0")
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
@@ -59,15 +57,29 @@ def _get_index_dir() -> str:
     return os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
 
 
+# Cross-platform preference order used when the same owner/repo exists on
+# more than one platform: github → gitlab → forgejo.
+_PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2}
+
+
+def _pick_platform_record(records: list) -> object:
+    """Return the highest-priority record from a cross-platform list."""
+    return min(records, key=lambda r: _PLATFORM_ORDER.get(r.platform, 99))
+
+
 @contextmanager
 def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
-    """Open an IndexStore via the factory (Postgres or SQLite)."""
-    # Check the repos registry first — raises 404 if the repo isn't known
-    repo_record = _app_db.get_repo(owner, repo)
-    if repo_record is None:
-        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    """Open an IndexStore via the factory (Postgres or SQLite).
 
-    store = IndexStore.open(owner, repo)
+    The dashboard routes are keyed by (owner, repo) only, so resolve the
+    platform from the registry with a single cross-platform lookup.
+    """
+    repo_records = _app_db.get_repo_any_platform(owner, repo)
+    if not repo_records:
+        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    repo_record = _pick_platform_record(repo_records)
+
+    store = IndexStore.open(owner, repo, platform=repo_record.platform)
     try:
         yield store
     finally:
@@ -89,6 +101,7 @@ def _open_relationships() -> Generator[RelationshipStore, None, None]:
 class RepoListItem(BaseModel):
     owner: str
     repo: str
+    platform: str = "github"
     status: str = "pending"
     index_mode: str = "full"
     file_count: int = 0
@@ -189,6 +202,61 @@ class ReviewEventModel(BaseModel):
     created_at: float
 
 
+class ActivityEventModel(ReviewEventModel):
+    owner: str
+    repo: str
+    author_username: str = ""
+    author_avatar_url: str = ""
+
+
+class ActivityResponse(BaseModel):
+    events: list[ActivityEventModel]
+    repos: list[str]
+
+
+class ReviewCommentModel(BaseModel):
+    id: int
+    review_id: int
+    path: str
+    line: int
+    severity: str
+    category: str
+    title: str
+    body: str
+    github_comment_id: int = 0
+    created_at: float
+
+
+class PRReplyModel(BaseModel):
+    id: int
+    author: str
+    author_avatar_url: str
+    body: str
+    comment_path: str
+    comment_line: int
+    in_reply_to_id: int
+    created_at: float
+
+
+class ActivityReviewModel(ReviewEventModel):
+    """One review pass plus the individual comments it posted."""
+
+    reviewed_paths: list[str] = []
+    comments: list[ReviewCommentModel] = []
+
+
+class ActivityDetailModel(BaseModel):
+    owner: str
+    repo: str
+    pr_number: int
+    pr_title: str
+    pr_url: str
+    author_username: str = ""
+    author_avatar_url: str = ""
+    reviews: list[ActivityReviewModel]
+    replies: list[PRReplyModel]
+
+
 class ReviewStatsModel(BaseModel):
     total_reviews: int
     total_comments: int
@@ -264,60 +332,12 @@ class IndexStatusModel(BaseModel):
     error: str
 
 
-@router.get("/api/version")
-def get_version() -> dict[str, str]:
-    """Return the running Mira version and the bot's @mention handle. The
-    dashboard renders the version next to the logo, and uses bot_name so help
-    text shows the real handle instead of a hardcoded placeholder. bot_name is
-    persisted by `mira serve` (env override, else the App's auto-detected slug);
-    falls back to "miracodeai" before the server has recorded it."""
-    from mira import __version__
-
-    return {
-        "version": __version__,
-        "bot_name": _app_db.get_setting("bot_name") or "miracodeai",
-    }
+class GitLabRepoRegister(BaseModel):
+    project: str  # "group/project" or "group/subgroup/project"
 
 
-@router.get("/api/indexing/status", response_model=list[IndexStatusModel])
-def get_indexing_status() -> list[IndexStatusModel]:
-    """Get current indexing status for all repos."""
-    from mira.index.status import tracker
-
-    return [
-        IndexStatusModel(
-            repo=j.repo,
-            status=j.status,
-            files_total=j.files_total,
-            files_done=j.files_done,
-            started_at=j.started_at,
-            finished_at=j.finished_at,
-            error=j.error,
-        )
-        for j in tracker.get_all()
-    ]
-
-
-@router.get("/api/repos", response_model=list[RepoListItem])
-def list_repos() -> list[RepoListItem]:
-    """List all repos from the registry."""
-    repos = _app_db.list_repos()
-    return [
-        RepoListItem(
-            owner=r.owner,
-            repo=r.repo,
-            status=r.status,
-            index_mode=r.index_mode,
-            file_count=r.files_indexed,
-            file_count_estimate=r.file_count_estimate,
-            installation_id=r.installation_id,
-            error=r.error,
-            last_indexed=datetime.fromtimestamp(r.last_indexed_at, tz=UTC).isoformat()
-            if r.last_indexed_at
-            else None,
-        )
-        for r in repos
-    ]
+class ForgejoRepoRegister(BaseModel):
+    project: str  # "owner/repo"
 
 
 class CostEstimate(BaseModel):
@@ -326,31 +346,6 @@ class CostEstimate(BaseModel):
     output_tokens: int
     model: str
     file_count: int
-
-
-@router.get("/api/indexing/estimate", response_model=CostEstimate)
-def estimate_cost() -> CostEstimate:
-    """Estimate the cost of indexing all pending repos with the current model."""
-    from mira.config import load_config
-    from mira.dashboard.models_config import (
-        estimate_indexing_cost,
-        get_indexing_model,
-    )
-
-    config = load_config()
-    model = get_indexing_model(config.llm, _app_db.get_setting("indexing_model"))
-
-    # Sum file counts across all pending repos
-    total_files = sum(r.file_count_estimate for r in _app_db.list_repos() if r.status == "pending")
-
-    est = estimate_indexing_cost(total_files, model)
-    return CostEstimate(
-        estimated_usd=est["estimated_usd"],
-        input_tokens=est["input_tokens"],
-        output_tokens=est["output_tokens"],
-        model=model,
-        file_count=total_files,
-    )
 
 
 class ModelOption(BaseModel):
@@ -362,6 +357,12 @@ class ModelOption(BaseModel):
 class ModelsResponse(BaseModel):
     indexing_model: str
     review_model: str
+    backend: str  # "openrouter" | "bedrock" | "openai-compatible"
+    indexing_source: str  # "dashboard" (DB override) | "config" (mira.yaml)
+    review_source: str
+    # What each model resolves to with no override — the "inherit" target.
+    config_indexing_model: str
+    config_review_model: str
     indexing_options: list[ModelOption]
     review_options: list[ModelOption]
     # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high").
@@ -373,33 +374,6 @@ class ModelsUpdate(BaseModel):
     indexing_model: str
     review_model: str
     review_thinking_mode: str = "off"
-
-
-@router.get("/api/settings/models", response_model=ModelsResponse)
-def get_models() -> ModelsResponse:
-    from mira.config import load_config
-    from mira.dashboard.models_config import (
-        INDEXING_MODELS,
-        REVIEW_MODELS,
-        THINKING_MODES,
-        get_indexing_model,
-        get_review_model,
-        get_review_thinking_mode,
-    )
-
-    config = load_config()
-    indexing = get_indexing_model(config.llm, _app_db.get_setting("indexing_model"))
-    review = get_review_model(config.llm, _app_db.get_setting("review_model"))
-    thinking = get_review_thinking_mode(config.llm, _app_db.get_setting("review_thinking_mode"))
-
-    return ModelsResponse(
-        indexing_model=indexing,
-        review_model=review,
-        indexing_options=[ModelOption(**m) for m in INDEXING_MODELS],
-        review_options=[ModelOption(**m) for m in REVIEW_MODELS],
-        review_thinking_mode=thinking or "off",
-        thinking_options=[ModelOption(**m) for m in THINKING_MODES],
-    )
 
 
 class GlobalSettingsResponse(BaseModel):
@@ -436,103 +410,6 @@ def _humanize_pydantic_message(err: dict) -> str:
     if err_type == "string_type":
         return "must be text"
     return err.get("msg", "invalid value")
-
-
-@router.get("/api/admin/settings", response_model=GlobalSettingsResponse)
-def get_global_settings(request: Request) -> GlobalSettingsResponse:
-    """Return the admin override blob + the effective config."""
-    user = getattr(request.state, "user", None)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    from mira.config import load_config
-
-    overrides = _app_db.get_global_review_overrides()
-    effective = load_config().model_dump()
-    return GlobalSettingsResponse(overrides=overrides, effective=effective)
-
-
-@router.put("/api/admin/settings")
-def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
-    """Replace the admin override blob. Pass `{"overrides": {}}` to clear."""
-    user = getattr(request.state, "user", None)
-    if not user or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    bad = set(body.overrides.keys()) - _ALLOWED_OVERRIDE_SECTIONS
-    if bad:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Override sections not allowed: {sorted(bad)}. "
-                f"Permitted: {sorted(_ALLOWED_OVERRIDE_SECTIONS)}."
-            ),
-        )
-
-    # Validate before persisting so a typo or wrong type fails the PUT
-    # rather than the next PR review. Return a structured error so the
-    # UI can render it inline under the offending input rather than as a
-    # raw banner.
-    from pydantic import ValidationError
-
-    from mira.config import MiraConfig, _deep_merge, _global_defaults
-
-    merged = _deep_merge(_global_defaults, body.overrides)
-    try:
-        MiraConfig.model_validate(merged)
-    except ValidationError as exc:
-        first = exc.errors()[0]
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "field": ".".join(str(p) for p in first.get("loc", ())),
-                "message": _humanize_pydantic_message(first),
-            },
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400, detail={"message": f"Invalid overrides: {exc}"}
-        ) from exc
-
-    _app_db.set_global_review_overrides(body.overrides)
-    return {"ok": True}
-
-
-@router.put("/api/settings/models")
-def set_models(body: ModelsUpdate) -> dict:
-    from mira.dashboard.models_config import THINKING_MODE_VALUES
-    from mira.llm.registry import is_supported
-
-    # Reject unsupported or wrong-purpose models. Without this, an admin can
-    # silently configure a model that's broken (no JSON mode, missing from
-    # the registry, miscategorized for the role).
-    if not is_supported(body.indexing_model, purpose="indexing"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.indexing_model!r} is not a supported indexing model.",
-        )
-    if not is_supported(body.review_model, purpose="review"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.review_model!r} is not a supported review model.",
-        )
-    if body.review_thinking_mode not in THINKING_MODE_VALUES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.review_thinking_mode!r} is not a valid thinking mode.",
-        )
-    _app_db.set_setting("indexing_model", body.indexing_model)
-    _app_db.set_setting("review_model", body.review_model)
-    # Clear "off" to "" rather than persisting the literal — "off" is the
-    # default, and a stored value would shadow a mira.yaml
-    # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
-    # reads back as unset so the config fallback chain works.
-    if body.review_thinking_mode and body.review_thinking_mode != "off":
-        _app_db.set_setting("review_thinking_mode", body.review_thinking_mode)
-    else:
-        _app_db.set_setting("review_thinking_mode", "")
-    _app_db.mark_setup_complete()
-    return {"ok": True}
 
 
 # ── Outbound webhooks (admin) ────────────────────────────────────────────────
@@ -574,317 +451,14 @@ def _webhook_public(w: dict) -> dict:
     }
 
 
-@router.get("/api/admin/webhooks")
-def list_webhooks(request: Request) -> dict:
-    _require_admin(request)
-    from mira.outbound_webhooks import AVAILABLE_EVENTS
-
-    webhooks = [_webhook_public(w) for w in _app_db.get_webhooks()]
-    return {"webhooks": webhooks, "available_events": AVAILABLE_EVENTS}
-
-
-@router.get("/api/admin/webhooks/{webhook_id}")
-def get_webhook(webhook_id: str, request: Request) -> dict:
-    """Full webhook incl. the unmasked URL — for the edit form (admin only).
-
-    The list endpoint masks URLs to avoid leaking secrets at a glance, but
-    editing a webhook needs the real value populated in the form.
-    """
-    _require_admin(request)
-    from mira.outbound_webhooks import detect_format
-
-    w = next((x for x in _app_db.get_webhooks() if x.get("id") == webhook_id), None)
-    if w is None:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-    return {
-        "id": w.get("id", ""),
-        "name": w.get("name", ""),
-        "url": w.get("url", ""),
-        "events": w.get("events", []),
-        "enabled": w.get("enabled", True),
-        "format": detect_format(w.get("url", "")),
-    }
-
-
-@router.post("/api/admin/webhooks")
-def create_webhook(body: WebhookCreate, request: Request) -> dict:
-    _require_admin(request)
-    import uuid
-
-    from pydantic import ValidationError
-
-    from mira.outbound_webhooks import WebhookConfig
-
-    try:
-        cfg = WebhookConfig(
-            id=uuid.uuid4().hex,
-            name=body.name,
-            url=body.url,
-            events=body.events,
-            enabled=body.enabled,
-        )
-    except ValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc.errors()[0].get("msg"))) from exc
-
-    webhooks = _app_db.get_webhooks()
-    webhooks.append(cfg.model_dump())
-    _app_db.set_webhooks(webhooks)
-    return _webhook_public(cfg.model_dump())
-
-
-@router.put("/api/admin/webhooks/{webhook_id}")
-def update_webhook(webhook_id: str, body: WebhookUpdate, request: Request) -> dict:
-    _require_admin(request)
-    from pydantic import ValidationError
-
-    from mira.outbound_webhooks import WebhookConfig
-
-    webhooks = _app_db.get_webhooks()
-    existing = next((w for w in webhooks if w.get("id") == webhook_id), None)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-
-    merged = dict(existing)
-    if body.name is not None:
-        merged["name"] = body.name
-    if body.url:  # blank → keep stored URL
-        merged["url"] = body.url
-    if body.events is not None:
-        merged["events"] = body.events
-    if body.enabled is not None:
-        merged["enabled"] = body.enabled
-
-    try:
-        cfg = WebhookConfig(**merged)
-    except ValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc.errors()[0].get("msg"))) from exc
-
-    webhooks = [cfg.model_dump() if w.get("id") == webhook_id else w for w in webhooks]
-    _app_db.set_webhooks(webhooks)
-    return _webhook_public(cfg.model_dump())
-
-
-@router.delete("/api/admin/webhooks/{webhook_id}")
-def delete_webhook(webhook_id: str, request: Request) -> dict:
-    _require_admin(request)
-    webhooks = _app_db.get_webhooks()
-    remaining = [w for w in webhooks if w.get("id") != webhook_id]
-    if len(remaining) == len(webhooks):
-        raise HTTPException(status_code=404, detail="Webhook not found")
-    _app_db.set_webhooks(remaining)
-    return {"ok": True}
-
-
-@router.post("/api/admin/webhooks/{webhook_id}/test")
-async def test_webhook(webhook_id: str, request: Request) -> dict:
-    _require_admin(request)
-    from mira.outbound_webhooks import REVIEW_COMPLETED, deliver_one, sample_data
-
-    webhook = next((w for w in _app_db.get_webhooks() if w.get("id") == webhook_id), None)
-    if webhook is None:
-        raise HTTPException(status_code=404, detail="Webhook not found")
-
-    ok, detail = await deliver_one(webhook, REVIEW_COMPLETED, sample_data(REVIEW_COMPLETED))
-    return {"ok": ok, "detail": detail}
-
-
-@router.get("/api/events")
-async def events_stream(request: Request) -> StreamingResponse:
-    """Server-Sent Events stream for real-time dashboard updates."""
-    from mira.dashboard.events import bus, format_sse
-
-    async def generate():
-        q = await bus.subscribe()
-        try:
-            # Send a heartbeat immediately
-            yield ": connected\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=15.0)
-                    yield format_sse(event)
-                except TimeoutError:
-                    # Heartbeat to keep connection alive
-                    yield ": heartbeat\n\n"
-        finally:
-            await bus.unsubscribe(q)
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
 class PendingUninstallModel(BaseModel):
     installation_id: int
     owner: str
 
 
-@router.get("/api/uninstalls/pending", response_model=list[PendingUninstallModel])
-def list_pending_uninstalls() -> list[PendingUninstallModel]:
-    return [
-        PendingUninstallModel(installation_id=iid, owner=owner)
-        for iid, owner in _app_db.list_pending_uninstalls()
-    ]
-
-
-@router.post("/api/uninstalls/{installation_id}/keep")
-def keep_uninstall_data(installation_id: int) -> dict:
-    """User chose to keep data after uninstall — just dismiss the popup."""
-    _app_db.remove_pending_uninstall(installation_id)
-    return {"ok": True}
-
-
-@router.post("/api/uninstalls/{installation_id}/delete")
-def delete_uninstall_data(installation_id: int) -> dict:
-    """User chose to delete all data for this installation."""
-    removed = _app_db.delete_repos_by_installation(installation_id)
-    _app_db.remove_pending_uninstall(installation_id)
-    return {"ok": True, "removed": removed}
-
-
-@router.post("/api/repos/sync")
-async def sync_repos() -> dict:
-    """Reconcile the repos table with actual GitHub App installations.
-
-    Removes repos that are no longer accessible and adds any new ones.
-    """
-    app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
-    private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-    if not app_id or not private_key:
-        raise HTTPException(status_code=400, detail="GitHub App not configured")
-
-    import asyncio as _asyncio
-
-    from mira.github_app.auth import GitHubAppAuth
-    from mira.github_app.index_handlers import _count_files_for_repos
-
-    auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-
-    # Collect repos currently accessible via GitHub App
-    actual_repos: set[tuple[str, str]] = set()
-    installations_reachable = False
-    try:
-        installations = await auth.list_installations()
-        installations_reachable = True
-        for inst in installations:
-            inst_id = int(inst.get("id", 0))
-            if not inst_id:
-                continue
-            try:
-                repos_list = await auth.list_installation_repos(inst_id)
-            except Exception as exc:
-                # One installation failing shouldn't poison the whole sync — log
-                # and skip. Without this, a stale/revoked installation would
-                # cause us to treat the DB as fully empty and wipe it below.
-                logger.warning("Skipping installation %s in sync: %s", inst_id, exc)
-                continue
-            for r in repos_list:
-                full_name = str(r.get("full_name", ""))
-                if "/" in full_name:
-                    owner, repo = full_name.split("/", 1)
-                    actual_repos.add((owner, repo))
-                    _app_db.register_repo(owner, repo, inst_id)
-                    _app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
-            # Count files in background
-            _asyncio.create_task(_count_files_for_repos(auth, inst_id, repos_list))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to list installations: {exc}") from exc
-
-    # Only delete DB repos when we successfully reached GitHub AND at least one
-    # installation returned at least one repo. Treating "App has zero visible
-    # installations" as "delete every repo in the DB" is dangerous — a single
-    # auth failure, misconfigured App ID, or transient GitHub outage would wipe
-    # user data. Require positive confirmation before pruning.
-    removed = 0
-    if installations_reachable and actual_repos:
-        for db_repo in _app_db.list_repos():
-            if (db_repo.owner, db_repo.repo) not in actual_repos:
-                _app_db.delete_repo(db_repo.owner, db_repo.repo)
-                removed += 1
-
-    return {
-        "synced": len(actual_repos),
-        "removed": removed,
-        "installations_reachable": installations_reachable,
-    }
-
-
-@router.get("/api/setup/status")
-async def get_setup_status() -> dict:
-    """Check if initial setup has been completed. Auto-syncs repos from GitHub if none registered."""
-    repo_count = len(_app_db.list_repos())
-
-    # If no repos registered, try to sync from GitHub App
-    if repo_count == 0:
-        try:
-            app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
-            private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-            if app_id and private_key:
-                import asyncio as _asyncio
-
-                from mira.github_app.auth import GitHubAppAuth
-                from mira.github_app.index_handlers import _count_files_for_repos
-
-                auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-                installations = await auth.list_installations()
-                for inst in installations:
-                    inst_id = int(inst.get("id", 0))
-                    if not inst_id:
-                        continue
-                    repos_list = await auth.list_installation_repos(inst_id)
-                    for r in repos_list:
-                        full_name = str(r.get("full_name", ""))
-                        if "/" in full_name:
-                            owner, repo = full_name.split("/", 1)
-                            _app_db.register_repo(owner, repo, inst_id)
-                            _app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
-                            repo_count += 1
-                    # Count files in background
-                    _asyncio.create_task(_count_files_for_repos(auth, inst_id, repos_list))
-                logger.info("Synced %d repos from GitHub App", repo_count)
-        except Exception as exc:
-            logger.warning("Failed to sync repos from GitHub: %s", exc)
-
-    return {"setup_complete": _app_db.setup_complete, "repo_count": repo_count}
-
-
 class SetupRequest(BaseModel):
-    repos: list[dict]  # [{"owner": "x", "repo": "y", "enabled": true}]
+    repos: list[dict]  # [{"owner": "x", "repo": "y", "platform": "github", "enabled": true}]
     index_mode: str  # "full" or "light"
-
-
-@router.post("/api/setup/complete")
-async def complete_setup(body: SetupRequest) -> dict:
-    """Save setup choices and start indexing selected repos."""
-    enabled_count = 0
-    for r in body.repos:
-        owner, repo = r["owner"], r["repo"]
-        enabled = r.get("enabled", True)
-        mode = body.index_mode if enabled else "none"
-        _app_db.set_repo_index_mode(owner, repo, mode)
-        if enabled:
-            _app_db.set_repo_status(owner, repo, "indexing")
-            enabled_count += 1
-
-    _app_db.mark_setup_complete()
-
-    # Only fire the background indexer if this request actually enabled repos.
-    # Otherwise (Skip for now / all-disabled), don't start anything — the
-    # indexer reads ALL repos from the DB and would race with sibling requests
-    # that haven't yet set their repos to mode='none'.
-    if enabled_count > 0:
-        import asyncio
-
-        asyncio.create_task(_run_initial_indexing(body.index_mode))
-
-    return {"status": "indexing" if enabled_count else "skipped", "repos": enabled_count}
 
 
 async def _run_initial_indexing(default_mode: str) -> None:
@@ -902,40 +476,55 @@ async def _run_initial_indexing(default_mode: str) -> None:
     if not to_index:
         return
 
-    # Get GitHub token
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if not token:
+    # Resolve a GitHub token once (used for github repos). GitLab repos use
+    # MIRA_GITLAB_TOKEN instead — each repo gets a fetcher for its platform.
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if not github_token and any(r.platform == "github" for r in to_index):
         try:
-            from mira.github_app.auth import GitHubAppAuth
+            from mira.platforms.github.auth import GitHubAppAuth
 
             app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
             private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
             if app_id and private_key:
                 auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-                if to_index[0].installation_id:
-                    token = await auth.get_installation_token(to_index[0].installation_id)
+                gh = next((r for r in to_index if r.platform == "github"), None)
+                if gh and gh.installation_id:
+                    github_token = await auth.get_installation_token(gh.installation_id)
         except Exception as exc:
             logger.warning("Failed to get GitHub token for indexing: %s", exc)
-            return
+    gitlab_token = os.environ.get("MIRA_GITLAB_TOKEN", "")
+    forgejo_token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
 
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
     from mira.index.indexer import index_repo
     from mira.llm import create_llm
+    from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
     config = load_config()
     llm = create_llm(llm_config_for("indexing", config.llm))
 
     for repo_record in to_index:
-        full_name = f"{repo_record.owner}/{repo_record.repo}"
+        owner, repo, platform = repo_record.owner, repo_record.repo, repo_record.platform
+        full_name = f"{owner}/{repo}"
+        token = (
+            gitlab_token
+            if platform == "gitlab"
+            else (forgejo_token if platform == "forgejo" else github_token)
+        )
+        if not token:
+            # No usable token for this platform — leave it pending instead of
+            # crashing on an empty auth header.
+            logger.warning("Skipping initial index of %s — no %s token", full_name, platform)
+            continue
         try:
-            _app_db.set_repo_status(repo_record.owner, repo_record.repo, "indexing")
+            _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
             tracker.start(full_name)
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            store = IndexStore.open(owner, repo, platform=platform)
             count = await index_repo(
-                owner=repo_record.owner,
-                repo=repo_record.repo,
-                token=token,
+                owner=owner,
+                repo=repo,
+                fetcher=make_fetcher(platform, token),
                 config=config,
                 store=store,
                 llm=llm,
@@ -943,128 +532,25 @@ async def _run_initial_indexing(default_mode: str) -> None:
             )
             store.close()
             _app_db.set_repo_status(
-                repo_record.owner,
-                repo_record.repo,
+                owner,
+                repo,
                 "ready",
                 files_indexed=count,
                 bump_last_indexed=True,
+                platform=platform,
             )
             tracker.complete(full_name, count)
             logger.info("Indexed %s: %d files", full_name, count)
             from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
 
             await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
+        except EmptyRepoError as empty:
+            _app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
+            tracker.complete(full_name, 0)
         except Exception as exc:
-            _app_db.set_repo_status(repo_record.owner, repo_record.repo, "failed", error=str(exc))
+            _app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform=platform)
             tracker.fail(full_name, str(exc))
             logger.exception("Failed to index %s", full_name)
-
-
-@router.get("/api/repos/{owner}/{repo}", response_model=RepoDetail)
-def get_repo_detail(owner: str, repo: str) -> RepoDetail:
-    """Get details for a specific repo."""
-    with _open_store(owner, repo) as store:
-        paths = sorted(store.all_paths())
-        summaries = store.get_summaries(paths)
-
-        files: list[FileModel] = []
-        total_symbols = 0
-        total_imports = 0
-        total_external_refs = 0
-        total_loc = 0
-
-        for path in paths:
-            fs = summaries.get(path)
-            if fs is None:
-                continue
-            files.append(
-                FileModel(
-                    path=fs.path,
-                    language=fs.language,
-                    summary=fs.summary,
-                    symbols=[
-                        SymbolModel(name=s.name, kind=s.kind, signature=s.signature)
-                        for s in fs.symbols
-                    ],
-                    imports=fs.imports,
-                    loc=fs.loc,
-                )
-            )
-            total_symbols += len(fs.symbols)
-            total_imports += len(fs.imports)
-            total_external_refs += len(fs.external_refs)
-            total_loc += fs.loc or 0
-
-        repo_record = _app_db.get_repo(owner, repo)
-        last_indexed = (
-            datetime.fromtimestamp(repo_record.last_indexed_at, tz=UTC).isoformat()
-            if repo_record and repo_record.last_indexed_at
-            else None
-        )
-
-        return RepoDetail(
-            owner=owner,
-            repo=repo,
-            file_count=len(paths),
-            files=files,
-            symbols_count=total_symbols,
-            imports_count=total_imports,
-            external_refs_count=total_external_refs,
-            lines_count=total_loc,
-            last_indexed=last_indexed,
-        )
-
-
-@router.get("/api/repos/{owner}/{repo}/files", response_model=list[FileModel])
-def list_files(owner: str, repo: str) -> list[FileModel]:
-    """List all indexed files with summaries."""
-    with _open_store(owner, repo) as store:
-        paths = sorted(store.all_paths())
-        summaries = store.get_summaries(paths)
-
-        result: list[FileModel] = []
-        for path in paths:
-            fs = summaries.get(path)
-            if fs is None:
-                continue
-            result.append(
-                FileModel(
-                    path=fs.path,
-                    language=fs.language,
-                    summary=fs.summary,
-                    symbols=[
-                        SymbolModel(name=s.name, kind=s.kind, signature=s.signature)
-                        for s in fs.symbols
-                    ],
-                    imports=fs.imports,
-                    loc=fs.loc,
-                )
-            )
-        return result
-
-
-@router.get("/api/repos/{owner}/{repo}/dependencies", response_model=DependencyGraph)
-def get_dependencies(owner: str, repo: str) -> DependencyGraph:
-    """Get the dependency graph for a repo."""
-    with _open_store(owner, repo) as store:
-        paths = sorted(store.all_paths())
-        summaries = store.get_summaries(paths)
-
-        imports: list[ImportEdge] = []
-        dependents: list[DependentEdge] = []
-
-        for path in paths:
-            fs = summaries.get(path)
-            if fs is None:
-                continue
-            for target in fs.imports:
-                imports.append(ImportEdge(source=fs.path, target=target))
-
-        for path in paths:
-            for dep_path in store.get_dependents(path):
-                dependents.append(DependentEdge(path=path, dependent_path=dep_path))
-
-        return DependencyGraph(imports=imports, dependents=dependents)
 
 
 class BlastRadiusModel(BaseModel):
@@ -1085,215 +571,12 @@ class BlastRadiusResponse(BaseModel):
     cross_repo: list[CrossRepoBlastEntry]  # other repos that depend on this one
 
 
-@router.get("/api/repos/{owner}/{repo}/blast-radius.svg")
-def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
-    """Render blast radius as an SVG image."""
-    from mira.dashboard.blast_svg import generate_blast_svg
-
-    # Rank files by how many other files depend on them
-    file_scores: list[tuple[str, int]] = []
-    try:
-        with _open_store(owner, repo) as store:
-            all_paths = sorted(store.all_paths())
-            for path in all_paths:
-                summary_obj = store.get_summary(path)
-                if not summary_obj:
-                    continue
-                dep_count = 0
-                for sym in summary_obj.symbols:
-                    callers = store.get_call_graph(path, sym.name)
-                    dep_count += sum(1 for cp, _ in callers if cp != path)
-                if dep_count > 0:
-                    file_scores.append((path, dep_count))
-    except Exception:
-        pass
-
-    file_scores.sort(key=lambda x: -x[1])
-
-    # Top 3 most-depended-on = "core" files (center)
-    core_files = [f for f, _ in file_scores[:3]]
-    # Next batch = internal dependents (middle ring)
-    internal_files = [f for f, _ in file_scores[3:9]]
-
-    # Get cross-repo deps
-    cross_repo: list[str] = []
-    try:
-        with _open_relationships() as rs:
-            full_name = f"{owner}/{repo}"
-            for edge in rs.resolve_edges():
-                if edge.target_repo == full_name:
-                    cross_repo.append(edge.source_repo)
-    except Exception:
-        pass
-
-    svg = generate_blast_svg(
-        changed_files=core_files,
-        internal_deps=internal_files,
-        cross_repo_deps=cross_repo,
-    )
-
-    return FastAPIResponse(
-        content=svg,
-        media_type="image/svg+xml",
-        headers={
-            "Cache-Control": "public, max-age=300",
-        },
-    )
-
-
-@router.get("/api/repos/{owner}/{repo}/blast-radius", response_model=BlastRadiusResponse)
-def get_blast_radius(owner: str, repo: str, changed_paths: str = "") -> BlastRadiusResponse:
-    """Get the blast radius for a set of changed files.
-
-    Returns both:
-    - internal: files within the same repo that depend on the changed files
-    - cross_repo: other repos that reference this one via external_refs
-
-    Query param `changed_paths` is a comma-separated list of file paths.
-    If empty, shows the most-depended-on files and all dependent repos.
-    """
-    internal: list[BlastRadiusModel] = []
-
-    with _open_store(owner, repo) as store:
-        if changed_paths:
-            paths = [p.strip() for p in changed_paths.split(",") if p.strip()]
-            entries = store.get_blast_radius(paths)
-            internal = [
-                BlastRadiusModel(
-                    path=e.path,
-                    summary=e.summary,
-                    affected_symbols=e.affected_symbols,
-                    depth=e.depth,
-                )
-                for e in entries
-            ]
-        else:
-            # No changed paths — rank files by inbound dependencies
-            all_paths = sorted(store.all_paths())
-            rankings: list[tuple[str, str, list[str], int]] = []
-
-            for path in all_paths:
-                summary_obj = store.get_summary(path)
-                if not summary_obj:
-                    continue
-                called_by: set[tuple[str, str]] = set()
-                referenced_symbols: set[str] = set()
-                for sym in summary_obj.symbols:
-                    callers = store.get_call_graph(path, sym.name)
-                    for caller_path, caller_symbol in callers:
-                        if caller_path != path:
-                            called_by.add((caller_path, caller_symbol))
-                            referenced_symbols.add(sym.name)
-                if called_by:
-                    rankings.append(
-                        (
-                            path,
-                            summary_obj.summary,
-                            sorted(referenced_symbols),
-                            len(called_by),
-                        )
-                    )
-
-            rankings.sort(key=lambda x: -x[3])
-            internal = [
-                BlastRadiusModel(
-                    path=path,
-                    summary=f"{summary} — {dependent_count} dependent{'s' if dependent_count != 1 else ''}",
-                    affected_symbols=syms,
-                    depth=1,
-                )
-                for path, summary, syms, dependent_count in rankings
-            ]
-
-    # ── Cross-repo blast radius ──
-    # Find repos whose external_refs point at this repo
-    cross_repo: list[CrossRepoBlastEntry] = []
-    try:
-        with _open_relationships() as rs:
-            full_name = f"{owner}/{repo}"
-            edges = rs.resolve_edges()
-            for edge in edges:
-                if edge.target_repo == full_name:
-                    # This dependent repo references our repo
-                    dep_files = [
-                        {
-                            "path": ref.file_path,
-                            "kind": ref.kind,
-                            "target": ref.target,
-                            "description": ref.description,
-                        }
-                        for ref in edge.refs
-                    ]
-                    cross_repo.append(
-                        CrossRepoBlastEntry(
-                            repo=edge.source_repo,
-                            files=dep_files,
-                            edge_kind=edge.kind,
-                        )
-                    )
-    except Exception as exc:
-        logger.warning("Failed to compute cross-repo blast radius: %s", exc)
-
-    return BlastRadiusResponse(internal=internal, cross_repo=cross_repo)
-
-
-@router.get("/api/repos/{owner}/{repo}/external-refs", response_model=list[ExternalRefModel])
-def get_external_refs(owner: str, repo: str) -> list[ExternalRefModel]:
-    """Get all external references for a repo."""
-    with _open_store(owner, repo) as store:
-        paths = sorted(store.all_paths())
-        refs = store.get_external_refs_for_paths(paths)
-
-        return [
-            ExternalRefModel(
-                file_path=ref.file_path,
-                kind=ref.kind,
-                target=ref.target,
-                description=ref.description,
-            )
-            for ref in refs
-        ]
-
-
 class PackageModel(BaseModel):
     name: str
     kind: str  # "npm" | "pip" | "docker" | "go" | "rust" | "composer"
     version: str
     file_path: str
     is_dev: bool = False
-
-
-@router.get("/api/repos/{owner}/{repo}/packages", response_model=list[PackageModel])
-def get_packages(owner: str, repo: str) -> list[PackageModel]:
-    """List dependencies parsed from manifest and lockfile files.
-
-    When the same package appears in both a manifest (e.g. `pyproject.toml`
-    declaring `>=1.30`) and a lockfile (e.g. `uv.lock` resolving to
-    `1.99.5`), the lockfile entry wins — its concrete version is what's
-    actually installed.
-    """
-    from mira.index.manifests import _is_lockfile_path
-
-    with _open_store(owner, repo) as store:
-        rows = store.list_manifest_packages()
-
-    # Dedupe by (kind, name), preferring lockfile rows.
-    by_key: dict[tuple[str, str], PackageModel] = {}
-    for r in rows:
-        model = PackageModel(
-            name=r.name,
-            kind=r.kind,
-            version=r.version,
-            file_path=r.file_path,
-            is_dev=r.is_dev,
-        )
-        key = (r.kind, r.name.lower())
-        existing = by_key.get(key)
-        if existing is None or (
-            _is_lockfile_path(r.file_path) and not _is_lockfile_path(existing.file_path)
-        ):
-            by_key[key] = model
-    return sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
 
 
 class PackageSearchHit(BaseModel):
@@ -1318,30 +601,6 @@ class VulnerabilityModel(BaseModel):
     last_seen_at: float = 0.0
 
 
-@router.get(
-    "/api/repos/{owner}/{repo}/vulnerabilities",
-    response_model=list[VulnerabilityModel],
-)
-def get_repo_vulnerabilities(owner: str, repo: str) -> list[VulnerabilityModel]:
-    """All open vulnerabilities for a single repo (across all of its packages)."""
-    with _open_store(owner, repo) as store:
-        rows = store.list_vulnerabilities()
-        return [
-            VulnerabilityModel(
-                package_name=r.package_name,
-                ecosystem=r.ecosystem,
-                package_version=r.package_version,
-                cve_id=r.cve_id,
-                summary=r.summary,
-                severity=r.severity,
-                advisory_url=r.advisory_url,
-                fixed_in=r.fixed_in,
-                last_seen_at=r.last_seen_at,
-            )
-            for r in rows
-        ]
-
-
 class VulnerabilitySummary(BaseModel):
     total: int = 0
     critical: int = 0
@@ -1351,224 +610,12 @@ class VulnerabilitySummary(BaseModel):
     unknown: int = 0
 
 
-@router.get("/api/vulnerabilities/summary", response_model=VulnerabilitySummary)
-def get_vulnerabilities_summary() -> VulnerabilitySummary:
-    """Org-wide vulnerability count by severity, for the dashboard widget."""
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not (db_url.startswith("postgresql://") or db_url.startswith("postgres://")):
-        # SQLite single-repo deployments don't support org-wide aggregation.
-        return VulnerabilitySummary()
-    from mira.index.pg_store import count_vulnerabilities_org_wide
-
-    counts = count_vulnerabilities_org_wide(db_url)
-    return VulnerabilitySummary(
-        total=sum(counts.values()),
-        critical=counts.get("critical", 0),
-        high=counts.get("high", 0),
-        moderate=counts.get("moderate", 0),
-        low=counts.get("low", 0),
-        unknown=counts.get("unknown", 0),
-    )
-
-
 class OrgVulnerabilityModel(VulnerabilityModel):
     owner: str
     repo: str
 
 
-@router.get("/api/vulnerabilities", response_model=list[OrgVulnerabilityModel])
-def list_org_vulnerabilities(limit: int = 1000) -> list[OrgVulnerabilityModel]:
-    """List every open vulnerability across the org."""
-    db_url = os.environ.get("DATABASE_URL", "")
-    capped = max(1, min(limit, 5000))
-    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
-        from mira.index.pg_store import list_vulnerabilities_org_wide
-
-        rows = list_vulnerabilities_org_wide(db_url, limit=capped)
-    else:
-        from mira.index.store import list_vulnerabilities_org_wide_sqlite
-
-        rows = list_vulnerabilities_org_wide_sqlite(limit=capped)
-    return [
-        OrgVulnerabilityModel(
-            owner=r["owner"],
-            repo=r["repo"],
-            package_name=r["package_name"],
-            ecosystem=r["ecosystem"],
-            package_version=r["package_version"],
-            cve_id=r["cve_id"],
-            summary=r["summary"],
-            severity=r["severity"],
-            advisory_url=r["advisory_url"],
-            fixed_in=r["fixed_in"],
-            last_seen_at=r.get("last_seen_at") or 0.0,
-        )
-        for r in rows
-    ]
-
-
-@router.get("/api/packages/search", response_model=list[PackageSearchHit])
-def search_packages(
-    name: str | None = None,
-    version: str | None = None,
-    kind: str | None = None,
-    is_dev: bool | None = None,
-    limit: int = 500,
-) -> list[PackageSearchHit]:
-    """Find every occurrence of a package/version across the org. Most
-    valuable for security incident response ("which repos use lodash@4.17.20
-    after this CVE?") and upgrade audits.
-
-    Dedupes by ``(owner, repo, kind, name)`` preferring lockfile rows over
-    manifest rows so the same package isn't shown twice (e.g. ``click 8.3.1``
-    from ``uv.lock`` plus ``click >=8.1`` from ``pyproject.toml``).
-    """
-    from mira.index.manifests import _is_lockfile_path
-
-    db_url = os.environ.get("DATABASE_URL", "")
-    capped_limit = max(1, min(limit, 2000))
-    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
-        from mira.index.pg_store import search_packages_org_wide
-
-        rows = search_packages_org_wide(
-            db_url,
-            name=name,
-            version=version,
-            kind=kind,
-            is_dev=is_dev,
-            limit=capped_limit,
-        )
-    else:
-        from mira.index.store import search_packages_org_wide_sqlite
-
-        rows = search_packages_org_wide_sqlite(
-            name=name,
-            version=version,
-            kind=kind,
-            is_dev=is_dev,
-            limit=capped_limit,
-        )
-
-    deduped: dict[tuple[str, str, str, str], dict] = {}
-    for r in rows:
-        # Case-insensitive on name — PyPI normalises `PyJWT`/`pyjwt` to the
-        # same package; without this the dropdown shows both spellings.
-        key = (r["owner"], r["repo"], r["kind"], r["name"].lower())
-        existing = deduped.get(key)
-        if existing is None or (
-            _is_lockfile_path(r.get("file_path", ""))
-            and not _is_lockfile_path(existing.get("file_path", ""))
-        ):
-            deduped[key] = r
-    return [PackageSearchHit(**r) for r in deduped.values()]
-
-
-@router.get("/api/relationships", response_model=RelationshipsResponse)
-def get_relationships() -> RelationshipsResponse:
-    """Get all cross-repo edges and groups."""
-    with _open_relationships() as rs:
-        edges = rs.resolve_edges()
-        groups = rs.group_repos(rs.repos)
-
-        return RelationshipsResponse(
-            edges=[
-                RepoEdgeModel(
-                    source_repo=e.source_repo,
-                    target_repo=e.target_repo,
-                    kind=e.kind,
-                    ref_count=len(e.refs),
-                )
-                for e in edges
-            ],
-            groups=[
-                RepoGroupModel(
-                    name=g.name,
-                    repos=g.repos,
-                    confidence=g.confidence,
-                    evidence=g.evidence,
-                )
-                for g in groups
-            ],
-        )
-
-
-@router.get("/api/relationships/{owner}/{repo}", response_model=list[RelatedRepoModel])
-def get_related_repos(owner: str, repo: str) -> list[RelatedRepoModel]:
-    """Get repos related to a specific repo."""
-    with _open_relationships() as rs:
-        full_name = f"{owner}/{repo}"
-        if full_name not in rs.repos:
-            raise HTTPException(status_code=404, detail=f"Repo {full_name} not found in index")
-
-        related = rs.get_related_repos(owner, repo)
-
-        return [
-            RelatedRepoModel(
-                repo=repo_name,
-                relationship_type=rel_type,
-                edge_count=len(edges),
-            )
-            for repo_name, rel_type, edges in related
-        ]
-
-
 # ── Review context endpoints ──
-
-
-@router.get("/api/repos/{owner}/{repo}/context", response_model=list[ReviewContextModel])
-def list_context(owner: str, repo: str) -> list[ReviewContextModel]:
-    with _open_store(owner, repo) as store:
-        entries = store.list_review_context()
-        return [
-            ReviewContextModel(
-                id=e.id,
-                title=e.title,
-                content=e.content,
-                created_at=e.created_at,
-                updated_at=e.updated_at,
-            )
-            for e in entries
-        ]
-
-
-@router.post("/api/repos/{owner}/{repo}/context", response_model=ReviewContextModel)
-def create_context(owner: str, repo: str, body: ReviewContextCreate) -> ReviewContextModel:
-    with _open_store(owner, repo) as store:
-        e = store.upsert_review_context(title=body.title, content=body.content)
-        return ReviewContextModel(
-            id=e.id,
-            title=e.title,
-            content=e.content,
-            created_at=e.created_at,
-            updated_at=e.updated_at,
-        )
-
-
-@router.put("/api/repos/{owner}/{repo}/context/{context_id}", response_model=ReviewContextModel)
-def update_context(
-    owner: str, repo: str, context_id: int, body: ReviewContextCreate
-) -> ReviewContextModel:
-    with _open_store(owner, repo) as store:
-        existing = store.get_review_context(context_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail="Context not found")
-        e = store.upsert_review_context(
-            title=body.title, content=body.content, context_id=context_id
-        )
-        return ReviewContextModel(
-            id=e.id,
-            title=e.title,
-            content=e.content,
-            created_at=e.created_at,
-            updated_at=e.updated_at,
-        )
-
-
-@router.delete("/api/repos/{owner}/{repo}/context/{context_id}")
-def delete_context(owner: str, repo: str, context_id: int) -> dict:
-    with _open_store(owner, repo) as store:
-        store.delete_review_context(context_id)
-        return {"ok": True}
 
 
 # ── Per-repo rules endpoints ──
@@ -1589,11 +636,15 @@ class RuleCreate(BaseModel):
 
 
 class LearnedRuleModel(BaseModel):
+    id: int = 0
     rule_text: str
-    source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern"
+    source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern" | "manual"
     category: str
     path_pattern: str = ""
     sample_count: int = 0
+    active: bool = True
+    status: str = "approved"  # 'pending' | 'approved' | 'rejected'
+    created_by: str = ""  # admin username for manual rules; '' for synthesized
     updated_at: float = 0.0
 
 
@@ -1602,253 +653,23 @@ class OrgLearnedRuleModel(LearnedRuleModel):
     repo: str
 
 
-@router.get(
-    "/api/repos/{owner}/{repo}/learned-rules",
-    response_model=list[LearnedRuleModel],
-)
-def list_repo_learned_rules(owner: str, repo: str) -> list[LearnedRuleModel]:
-    """Active learned rules synthesized from feedback signals on this repo."""
-    with _open_store(owner, repo) as store:
-        rules = store.list_active_learned_rules()
-        return [
-            LearnedRuleModel(
-                rule_text=r.rule_text,
-                source_signal=r.source_signal,
-                category=r.category,
-                path_pattern=r.path_pattern,
-                sample_count=r.sample_count,
-                updated_at=r.updated_at,
-            )
-            for r in rules
-        ]
+class LearnedRuleInput(BaseModel):
+    rule_text: str
+    category: str = "other"
+    path_pattern: str = ""
 
 
-@router.get("/api/learned-rules", response_model=list[OrgLearnedRuleModel])
-def list_org_learned_rules(limit: int = 500) -> list[OrgLearnedRuleModel]:
-    """Active learned rules across every repo in the org."""
-    db_url = os.environ.get("DATABASE_URL", "")
-    capped = max(1, min(limit, 2000))
-    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
-        from mira.index.pg_store import list_learned_rules_org_wide
-
-        rows = list_learned_rules_org_wide(db_url, limit=capped)
-    else:
-        from mira.index.store import list_learned_rules_org_wide_sqlite
-
-        rows = list_learned_rules_org_wide_sqlite(limit=capped)
-    return [
-        OrgLearnedRuleModel(
-            owner=r["owner"],
-            repo=r["repo"],
-            rule_text=r["rule_text"],
-            source_signal=r["source_signal"],
-            category=r["category"],
-            path_pattern=r["path_pattern"],
-            sample_count=r["sample_count"],
-            updated_at=r["updated_at"] or 0.0,
-        )
-        for r in rows
-    ]
-
-
-@router.get("/api/repos/{owner}/{repo}/rules", response_model=list[RuleModel])
-def list_repo_rules(owner: str, repo: str) -> list[RuleModel]:
-    with _open_store(owner, repo) as store:
-        entries = store.list_review_context()
-        return [
-            RuleModel(
-                id=e.id,
-                title=e.title,
-                content=e.content,
-                enabled=True,
-                created_at=e.created_at,
-                updated_at=e.updated_at,
-            )
-            for e in entries
-        ]
-
-
-@router.post("/api/repos/{owner}/{repo}/rules", response_model=RuleModel)
-def create_repo_rule(owner: str, repo: str, body: RuleCreate) -> RuleModel:
-    with _open_store(owner, repo) as store:
-        e = store.upsert_review_context(title=body.title, content=body.content)
-        return RuleModel(
-            id=e.id,
-            title=e.title,
-            content=e.content,
-            enabled=True,
-            created_at=e.created_at,
-            updated_at=e.updated_at,
-        )
-
-
-@router.put("/api/repos/{owner}/{repo}/rules/{rule_id}", response_model=RuleModel)
-def update_repo_rule(owner: str, repo: str, rule_id: int, body: RuleCreate) -> RuleModel:
-    with _open_store(owner, repo) as store:
-        existing = store.get_review_context(rule_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail="Rule not found")
-        e = store.upsert_review_context(title=body.title, content=body.content, context_id=rule_id)
-        return RuleModel(
-            id=e.id,
-            title=e.title,
-            content=e.content,
-            enabled=True,
-            created_at=e.created_at,
-            updated_at=e.updated_at,
-        )
-
-
-@router.delete("/api/repos/{owner}/{repo}/rules/{rule_id}")
-def delete_repo_rule(owner: str, repo: str, rule_id: int) -> dict:
-    with _open_store(owner, repo) as store:
-        store.delete_review_context(rule_id)
-        return {"ok": True}
+class LearnedRuleActiveInput(BaseModel):
+    active: bool
 
 
 # ── Global rules endpoints ──
 
 
-@router.get("/api/rules/global", response_model=list[RuleModel])
-def list_global_rules() -> list[RuleModel]:
-    rules = _app_db.list_global_rules()
-    return [
-        RuleModel(
-            id=r.id,
-            title=r.title,
-            content=r.content,
-            enabled=r.enabled,
-            created_at=r.created_at,
-            updated_at=r.updated_at,
-        )
-        for r in rules
-    ]
-
-
-@router.post("/api/rules/global", response_model=RuleModel)
-def create_global_rule(body: RuleCreate) -> RuleModel:
-    r = _app_db.upsert_global_rule(title=body.title, content=body.content)
-    return RuleModel(
-        id=r.id,
-        title=r.title,
-        content=r.content,
-        enabled=r.enabled,
-        created_at=r.created_at,
-        updated_at=r.updated_at,
-    )
-
-
-@router.put("/api/rules/global/{rule_id}", response_model=RuleModel)
-def update_global_rule(rule_id: int, body: RuleCreate) -> RuleModel:
-    existing = _app_db.get_global_rule(rule_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    r = _app_db.upsert_global_rule(title=body.title, content=body.content, rule_id=rule_id)
-    return RuleModel(
-        id=r.id,
-        title=r.title,
-        content=r.content,
-        enabled=r.enabled,
-        created_at=r.created_at,
-        updated_at=r.updated_at,
-    )
-
-
-@router.delete("/api/rules/global/{rule_id}")
-def delete_global_rule(rule_id: int) -> dict:
-    _app_db.delete_global_rule(rule_id)
-    return {"ok": True}
-
-
-@router.patch("/api/rules/global/{rule_id}/toggle", response_model=RuleModel)
-def toggle_global_rule(rule_id: int) -> RuleModel:
-    r = _app_db.toggle_global_rule(rule_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    return RuleModel(
-        id=r.id,
-        title=r.title,
-        content=r.content,
-        enabled=r.enabled,
-        created_at=r.created_at,
-        updated_at=r.updated_at,
-    )
-
-
 # ── Relationship override endpoints ──
 
 
-@router.get("/api/relationships/overrides", response_model=list[OverrideModel])
-def list_overrides() -> list[OverrideModel]:
-    with _open_relationships() as rs:
-        return [
-            OverrideModel(
-                source_repo=o.source_repo,
-                target_repo=o.target_repo,
-                status=o.status,
-                created_at=o.created_at,
-            )
-            for o in rs.list_overrides()
-        ]
-
-
-@router.post("/api/relationships/overrides", response_model=OverrideModel)
-def set_override(body: OverrideRequest) -> OverrideModel:
-    if body.status not in ("confirmed", "denied"):
-        raise HTTPException(status_code=400, detail="Status must be 'confirmed' or 'denied'")
-    with _open_relationships() as rs:
-        o = rs.set_override(body.source_repo, body.target_repo, body.status)
-        return OverrideModel(
-            source_repo=o.source_repo,
-            target_repo=o.target_repo,
-            status=o.status,
-            created_at=o.created_at,
-        )
-
-
-@router.delete("/api/relationships/overrides")
-def delete_override(source_repo: str, target_repo: str) -> dict:
-    with _open_relationships() as rs:
-        rs.delete_override(source_repo, target_repo)
-        return {"ok": True}
-
-
 # ── Custom edge endpoints ──
-
-
-@router.get("/api/relationships/custom", response_model=list[CustomEdgeModel])
-def list_custom_edges() -> list[CustomEdgeModel]:
-    with _open_relationships() as rs:
-        return [
-            CustomEdgeModel(
-                id=e.id,
-                source_repo=e.source_repo,
-                target_repo=e.target_repo,
-                reason=e.reason,
-                created_at=e.created_at,
-            )
-            for e in rs.list_custom_edges()
-        ]
-
-
-@router.post("/api/relationships/custom", response_model=CustomEdgeModel)
-def add_custom_edge(body: CustomEdgeRequest) -> CustomEdgeModel:
-    with _open_relationships() as rs:
-        e = rs.add_custom_edge(body.source_repo, body.target_repo, body.reason)
-        return CustomEdgeModel(
-            id=e.id,
-            source_repo=e.source_repo,
-            target_repo=e.target_repo,
-            reason=e.reason,
-            created_at=e.created_at,
-        )
-
-
-@router.delete("/api/relationships/custom/{edge_id}")
-def delete_custom_edge(edge_id: int) -> dict:
-    with _open_relationships() as rs:
-        rs.delete_custom_edge(edge_id)
-        return {"ok": True}
 
 
 # ── Metrics endpoints ──
@@ -1866,76 +687,570 @@ def _period_to_since(period: str) -> float | None:
     return None
 
 
-@router.get("/api/stats", response_model=OrgStatsModel)
-def get_org_stats(period: str = "") -> OrgStatsModel:
-    """Aggregate stats across all repos, optionally filtered by period."""
+# ── Contributors ───────────────────────────────────────────────────
+
+
+class ContributorListItem(BaseModel):
+    id: int
+    provider: str
+    login: str
+    display_name: str = ""
+    avatar_url: str = ""
+    is_bot: bool = False
+    prs_opened: int = 0
+    prs_merged: int = 0
+    commits: int = 0
+    reviews: int = 0
+    additions: int = 0
+    deletions: int = 0
+    last_active: float | None = None
+    repos_touched: int = 0
+
+
+class HeatmapDay(BaseModel):
+    day: str
+    total: int = 0
+    commits: int = 0
+    prs_opened: int = 0
+    prs_merged: int = 0
+    reviews: int = 0
+
+
+class ContributorRepoBreakdown(BaseModel):
+    owner: str
+    repo: str
+    commits: int = 0
+    prs_opened: int = 0
+    prs_merged: int = 0
+    reviews: int = 0
+
+
+class ReviewQuality(BaseModel):
+    """Mira's differentiated signal: how much review attention a person's PRs
+    drew, plus how often Mira's feedback on them was accepted."""
+
+    reviews: int = 0
+    blockers: int = 0
+    warnings: int = 0
+    suggestions: int = 0
+    feedback_accepted: int = 0
+    feedback_rejected: int = 0
+    accept_rate: float = 0.0
+
+
+class ContributorDetailModel(BaseModel):
+    contributor: ContributorListItem
+    heatmap: list[HeatmapDay]
+    repos: list[ContributorRepoBreakdown]
+    quality: ReviewQuality
+
+
+class ContributionWindow(BaseModel):
+    commits: int = 0
+    prs_opened: int = 0
+    prs_merged: int = 0
+    reviews: int = 0
+    additions: int = 0
+    contributors: int = 0
+
+
+class ContributorSummary(BaseModel):
+    """Org-wide totals for the trailing window plus the window before it, so the
+    UI can show up/down deltas."""
+
+    days: int
+    current: ContributionWindow
+    previous: ContributionWindow
+
+
+def _build_app_auth():  # type: ignore[no-untyped-def]
+    """Construct GitHubAppAuth from env, or 400 if the App isn't configured."""
+    app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
+    private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
+    if not app_id or not private_key:
+        raise HTTPException(status_code=400, detail="GitHub App not configured")
+    from mira.platforms.github.auth import GitHubAppAuth
+
+    return GitHubAppAuth(app_id=app_id, private_key=private_key)
+
+
+@router.get("/api/contributors", response_model=list[ContributorListItem])
+def list_contributors(
+    request: Request, sort: str = "commits", period: str = "", include_bots: bool = False
+) -> list[ContributorListItem]:
+    """Cross-repo contributor leaderboard (admin only). sort: commits|prs|reviews|recent|additions."""
+    _require_admin(request)
+    since = _period_to_since(period) if period else None
+    rows = _app_db.list_contributors(sort=sort, since=since, include_bots=include_bots)
+    return [ContributorListItem(**r) for r in rows]
+
+
+@router.get("/api/contributors/summary", response_model=ContributorSummary)
+def contributors_summary(request: Request, days: int = 7) -> ContributorSummary:
+    """Org-wide totals for the trailing `days` window and the window before it,
+    so the UI can show up/down trends. Admin only."""
+    _require_admin(request)
+    days = max(1, min(days, 365))
+    now = datetime.now(tz=UTC).timestamp()
+    window = days * 86400
+    current = _app_db.aggregate_contributions(now - window, now)
+    previous = _app_db.aggregate_contributions(now - 2 * window, now - window)
+    return ContributorSummary(
+        days=days,
+        current=ContributionWindow(**current),
+        previous=ContributionWindow(**previous),
+    )
+
+
+@router.get("/api/contributors/backfill/status")
+def contributors_backfill_status(request: Request) -> list[dict]:
+    """Per-repo backfill progress blobs (status/prs_done/total/error). Admin only."""
+    _require_admin(request)
+    from mira.platforms.github.contributor_backfill import get_backfill_status
+
+    out: list[dict] = []
+    for rec in _app_db.list_repos():
+        status = get_backfill_status(_app_db, rec.owner, rec.repo)
+        if status:
+            out.append({"owner": rec.owner, "repo": rec.repo, **status})
+    return out
+
+
+@router.post("/api/contributors/refresh")
+async def refresh_contributors(request: Request, include_commits: bool = True) -> dict:
+    """Kick off a background backfill of every repo (admin only)."""
+    _require_admin(request)
+    auth = _build_app_auth()
+    from mira.platforms.github.contributor_backfill import backfill_all_repos
+
+    asyncio.create_task(backfill_all_repos(auth, include_commits=include_commits))
+    return {"status": "refreshing"}
+
+
+@router.post("/api/contributors/{owner}/{repo}/refresh")
+async def refresh_contributors_repo(
+    owner: str, repo: str, request: Request, include_commits: bool = True
+) -> dict:
+    """Kick off a background backfill of one repo (admin only)."""
+    _require_admin(request)
+    rec = _app_db.get_repo(owner, repo)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    auth = _build_app_auth()
+    from mira.platforms.github.contributor_backfill import backfill_repo_contributions
+
+    asyncio.create_task(
+        backfill_repo_contributions(
+            owner, repo, auth, installation_id=rec.installation_id, include_commits=include_commits
+        )
+    )
+    return {"status": "refreshing"}
+
+
+@router.get("/api/contributors/{login}", response_model=ContributorDetailModel)
+def get_contributor(login: str, request: Request, period: str = "") -> ContributorDetailModel:
+    """One contributor's aggregated stats, 365-day heatmap, per-repo breakdown,
+    and Mira review-quality signal (the quality fan-out mirrors /api/stats). Admin only."""
+    _require_admin(request)
+    contributor = _app_db.get_contributor_by_login("github", login)
+    if contributor is None:
+        raise HTTPException(status_code=404, detail=f"Contributor {login} not found")
     since = _period_to_since(period) if period else None
 
-    repos = _app_db.list_repos()
-    total_repos = len(repos)
-    total_files = 0
-    agg_stats: dict = {
-        "total_reviews": 0,
-        "total_comments": 0,
-        "total_blockers": 0,
-        "total_warnings": 0,
-        "total_suggestions": 0,
-        "total_files_reviewed": 0,
-        "total_lines_changed": 0,
-        "total_tokens": 0,
-        "avg_duration_ms": 0,
-        "categories": {},
-        "avg_comments_per_pr": 0.0,
-    }
-    duration_sum = 0
-    review_count = 0
+    totals = _app_db.get_contributor_totals(contributor.id, since=since)
+    item = ContributorListItem(
+        id=contributor.id,
+        provider=contributor.provider,
+        login=contributor.external_login,
+        display_name=contributor.display_name,
+        avatar_url=contributor.avatar_url,
+        is_bot=contributor.is_bot,
+        last_active=totals["last_active"],
+        repos_touched=totals["repos_touched"],
+        prs_opened=totals["prs_opened"],
+        prs_merged=totals["prs_merged"],
+        commits=totals["commits"],
+        reviews=totals["reviews"],
+        additions=totals["additions"],
+        deletions=totals["deletions"],
+    )
 
-    for repo_record in repos:
+    # 365-day heatmap window ending today (UTC).
+    today = datetime.now(tz=UTC).date()
+    start_day = (today - timedelta(days=364)).strftime("%Y-%m-%d")
+    end_day = today.strftime("%Y-%m-%d")
+    heatmap = [
+        HeatmapDay(
+            day=d.day,
+            total=d.total,
+            commits=d.commits,
+            prs_opened=d.prs_opened,
+            prs_merged=d.prs_merged,
+            reviews=d.reviews,
+        )
+        for d in _app_db.get_contributor_days(contributor.id, start_day, end_day)
+    ]
+
+    repos = [
+        ContributorRepoBreakdown(**b)
+        for b in _app_db.get_contributor_repo_breakdown(contributor.id, since=since)
+    ]
+
+    # Review-quality lives per-repo in IndexStore; fan out like /api/stats.
+    q = {"reviews": 0, "blockers": 0, "warnings": 0, "suggestions": 0}
+    accepted = rejected = 0
+    for repo_record in _app_db.list_repos():
         try:
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
-            total_files += len(store.all_paths())
-            stats = store.get_review_stats(since=since)
-            agg_stats["total_reviews"] += stats["total_reviews"]
-            agg_stats["total_comments"] += stats["total_comments"]
-            agg_stats["total_blockers"] += stats["total_blockers"]
-            agg_stats["total_warnings"] += stats["total_warnings"]
-            agg_stats["total_suggestions"] += stats["total_suggestions"]
-            agg_stats["total_files_reviewed"] += stats["total_files_reviewed"]
-            agg_stats["total_lines_changed"] += stats["total_lines_changed"]
-            agg_stats["total_tokens"] += stats["total_tokens"]
-            for cat, cnt in stats.get("categories", {}).items():
-                agg_stats["categories"][cat] = agg_stats["categories"].get(cat, 0) + cnt
-            if stats["total_reviews"] > 0:
-                duration_sum += stats["avg_duration_ms"] * stats["total_reviews"]
-                review_count += stats["total_reviews"]
-            store.close()
+            store = IndexStore.open(
+                repo_record.owner, repo_record.repo, platform=repo_record.platform
+            )
+            try:
+                rq = store.get_review_quality_by_author(contributor.external_login, since=since)
+                fq = store.get_feedback_quality_by_author(contributor.external_login)
+            finally:
+                store.close()
+            for key in q:
+                q[key] += rq[key]
+            accepted += fq["accepted"]
+            rejected += fq["rejected"]
         except Exception:
             logger.warning(
-                "Failed to read stats for %s/%s", repo_record.owner, repo_record.repo, exc_info=True
+                "Failed to read contributor quality for %s/%s",
+                repo_record.owner,
+                repo_record.repo,
+                exc_info=True,
             )
-
-    agg_stats["avg_duration_ms"] = int(duration_sum / review_count) if review_count > 0 else 0
-    agg_stats["avg_comments_per_pr"] = (
-        round(agg_stats["total_comments"] / review_count, 1) if review_count > 0 else 0.0
+    total_fb = accepted + rejected
+    quality = ReviewQuality(
+        reviews=q["reviews"],
+        blockers=q["blockers"],
+        warnings=q["warnings"],
+        suggestions=q["suggestions"],
+        feedback_accepted=accepted,
+        feedback_rejected=rejected,
+        accept_rate=round(accepted / total_fb, 3) if total_fb else 0.0,
     )
 
-    # Get relationship counts
-    total_edges = 0
-    total_groups = 0
-    try:
-        with _open_relationships() as rs:
-            total_edges = len(rs.resolve_edges())
-            total_groups = len(rs.group_repos(rs.repos))
-    except Exception:
-        pass
+    return ContributorDetailModel(contributor=item, heatmap=heatmap, repos=repos, quality=quality)
 
-    return OrgStatsModel(
-        total_repos=total_repos,
-        total_files=total_files,
-        total_edges=total_edges,
-        total_groups=total_groups,
-        review_stats=ReviewStatsModel(**agg_stats),
+
+# ── Review insights ────────────────────────────────────────────────
+
+
+class ThroughputWindow(BaseModel):
+    time_to_first_review_secs: float | None = None
+    time_to_first_review_count: int = 0
+    time_to_merge_secs: float | None = None
+    time_to_merge_count: int = 0
+
+
+class HealthComponent(BaseModel):
+    key: str
+    label: str
+    score: float  # 0–1
+    detail: str
+
+
+class ReviewSummary(BaseModel):
+    days: int
+    open_prs: int
+    stale_prs: int
+    awaiting_review: int
+    merged: int = 0
+    approved_merged: int = 0
+    approvals: int = 0  # approvals submitted in the window (org-wide)
+    rubber_stamps: int = 0  # of those, approvals with no substantive review
+    health_score: int | None = None  # 0–100
+    health: list[HealthComponent] = []
+    current: ThroughputWindow
+    previous: ThroughputWindow
+
+
+class ReviewerStat(BaseModel):
+    reviewer: str
+    avatar_url: str = ""
+    pending: int = 0  # PRs currently waiting on this person's review
+    reviews: int = 0  # reviews submitted in the window
+    median_response_secs: float | None = None  # requested → first review
+    approvals: int = 0  # approvals submitted in the window
+    rubber_stamps: int = 0  # approvals with no substantive review
+    rubber_stamp_rate: float = 0.0  # rubber_stamps / approvals × 100
+
+
+class OpenPrReviewer(BaseModel):
+    reviewer: str
+    state: str = ""
+    requested: bool = False
+    responded: bool = False
+
+
+class OpenPr(BaseModel):
+    owner: str
+    repo: str
+    number: int
+    author: str
+    title: str
+    url: str
+    draft: bool
+    created_at: float
+    updated_at: float
+    age_secs: float
+    idle_secs: float
+    reviewed: bool
+    stale: bool
+    status: str  # awaiting_review | commented | changes_requested | approved
+    waiting_on: list[str]
+    reviewers: list[OpenPrReviewer]
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _now() -> float:
+    return datetime.now(tz=UTC).timestamp()
+
+
+def _fmt_secs(secs: float) -> str:
+    """Compact human duration for health-component detail text."""
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h"
+    return f"{int(secs // 86400)}d"
+
+
+@router.get("/api/review-insights/summary", response_model=ReviewSummary)
+def review_summary(request: Request, days: int = 7, stale_days: int = 3) -> ReviewSummary:
+    """Throughput medians (this window vs previous) + open/stale/awaiting counts. Admin."""
+    _require_admin(request)
+    days = max(1, min(days, 365))
+    now = _now()
+    window = days * 86400
+
+    rows = _app_db.get_throughput_rows()
+
+    def window_throughput(start: float, end: float) -> ThroughputWindow:
+        ttfr = [
+            r["first_review_at"] - r["created_at"]
+            for r in rows
+            if r["first_review_at"] > 0
+            and start <= r["first_review_at"] < end
+            and r["created_at"] > 0
+            and r["first_review_at"] >= r["created_at"]
+        ]
+        ttm = [
+            r["merged_at"] - r["created_at"]
+            for r in rows
+            if r["merged_at"] > 0
+            and start <= r["merged_at"] < end
+            and r["created_at"] > 0
+            and r["merged_at"] >= r["created_at"]
+        ]
+        return ThroughputWindow(
+            time_to_first_review_secs=_median(ttfr),
+            time_to_first_review_count=len(ttfr),
+            time_to_merge_secs=_median(ttm),
+            time_to_merge_count=len(ttm),
+        )
+
+    open_prs = _app_db.get_open_pull_requests()
+    stale_cutoff = stale_days * 86400
+    active = [p for p in open_prs if not p["draft"]]
+    stale = sum(1 for p in active if now - p["updated_at"] > stale_cutoff)
+    awaiting = sum(1 for p in active if p["first_review_at"] == 0)
+
+    current = window_throughput(now - window, now)
+    previous = window_throughput(now - 2 * window, now - window)
+
+    # ── Health score ── proof that humans review, approve, and merge.
+    merged_rows = _app_db.get_merged_pr_quality(now - window, now)
+    merged_n = len(merged_rows)
+    approved_n = sum(1 for m in merged_rows if m["approved"])
+
+    components: list[HealthComponent] = []
+    weights: list[float] = []
+    # 40% — share of merges that a human approved.
+    if merged_n:
+        rate = approved_n / merged_n
+        components.append(
+            HealthComponent(
+                key="approvals",
+                label="Merges approved by a human",
+                score=rate,
+                detail=f"{approved_n} of {merged_n} merged PRs had an approval",
+            )
+        )
+        weights.append(0.4)
+    # 30% — reviews start promptly (24h target).
+    ttfr = current.time_to_first_review_secs
+    if ttfr:
+        resp = max(0.0, min(1.0, 86400 / ttfr))
+        components.append(
+            HealthComponent(
+                key="responsiveness",
+                label="Reviews start promptly",
+                score=resp,
+                detail=f"median first review in {_fmt_secs(ttfr)} (target 24h)",
+            )
+        )
+        weights.append(0.3)
+    # 30% — open PRs aren't going stale.
+    backlog = 1.0 - (stale / len(active)) if active else 1.0
+    components.append(
+        HealthComponent(
+            key="backlog",
+            label="Open PRs aren't going stale",
+            score=backlog,
+            detail=(f"{stale} of {len(active)} open PRs are stale" if active else "no open PRs"),
+        )
     )
+    weights.append(0.3)
+
+    total_w = sum(weights)
+    health_score = (
+        round(100 * sum(c.score * w for c, w in zip(components, weights, strict=True)) / total_w)
+        if total_w
+        else None
+    )
+
+    # ── Org-wide rubber-stamps ── approvals (in window) with no substantive review.
+    org_approvals = 0
+    org_rubber_stamps = 0
+    for r in _app_db.get_reviewer_activity_rows():
+        if r["responded_at"] >= now - window and r["review_state"] == "approved":
+            org_approvals += 1
+            if r["bare_approval"]:
+                org_rubber_stamps += 1
+
+    return ReviewSummary(
+        days=days,
+        open_prs=len(active),
+        stale_prs=stale,
+        awaiting_review=awaiting,
+        merged=merged_n,
+        approved_merged=approved_n,
+        approvals=org_approvals,
+        rubber_stamps=org_rubber_stamps,
+        health_score=health_score,
+        health=components,
+        current=current,
+        previous=previous,
+    )
+
+
+@router.get("/api/review-insights/open-prs", response_model=list[OpenPr])
+def review_open_prs(request: Request, stale_days: int = 3) -> list[OpenPr]:
+    """Open PRs as a status board: age, idle time, who they're waiting on,
+    reviewer states, and a stale flag. Sorted oldest-first. Admin."""
+    _require_admin(request)
+    now = _now()
+    stale_cutoff = stale_days * 86400
+
+    by_pr: dict[tuple[str, str, int], list[dict]] = {}
+    for r in _app_db.get_open_pr_reviewers():
+        by_pr.setdefault((r["owner"], r["repo"], r["number"]), []).append(r)
+
+    out: list[OpenPr] = []
+    for p in _app_db.get_open_pull_requests():
+        revs = by_pr.get((p["owner"], p["repo"], p["number"]), [])
+        reviewers = [
+            OpenPrReviewer(
+                reviewer=r["reviewer"],
+                state=r["state"],
+                requested=r["requested_at"] > 0,
+                responded=r["responded_at"] > 0,
+            )
+            for r in revs
+        ]
+        waiting_on = [r.reviewer for r in reviewers if r.requested and not r.responded]
+        responded_states = [r.state for r in reviewers if r.responded]
+        if "changes_requested" in responded_states:
+            status = "changes_requested"
+        elif "approved" in responded_states:
+            status = "approved"
+        elif p["first_review_at"] > 0 or responded_states:
+            status = "commented"
+        else:
+            status = "awaiting_review"
+        idle = now - p["updated_at"]
+        out.append(
+            OpenPr(
+                owner=p["owner"],
+                repo=p["repo"],
+                number=p["number"],
+                author=p["author"],
+                title=p["title"],
+                url=p["url"],
+                draft=p["draft"],
+                created_at=p["created_at"],
+                updated_at=p["updated_at"],
+                age_secs=now - p["created_at"],
+                idle_secs=idle,
+                reviewed=p["first_review_at"] > 0,
+                stale=(not p["draft"]) and idle > stale_cutoff,
+                status=status,
+                waiting_on=waiting_on,
+                reviewers=reviewers,
+            )
+        )
+    out.sort(key=lambda o: o.age_secs, reverse=True)
+    return out
+
+
+@router.get("/api/review-insights/reviewers", response_model=list[ReviewerStat])
+def review_reviewers(request: Request, days: int = 30) -> list[ReviewerStat]:
+    """Per-reviewer responsiveness: current pending queue + median response time
+    + reviews in the window. The bottleneck floats to the top. Admin."""
+    _require_admin(request)
+    since = _now() - max(1, days) * 86400
+
+    pending: dict[str, int] = {}
+    latencies: dict[str, list[float]] = {}
+    reviews: dict[str, int] = {}
+    approvals: dict[str, int] = {}
+    rubber_stamps: dict[str, int] = {}
+    for r in _app_db.get_reviewer_activity_rows():
+        who = r["reviewer"]
+        req, resp = r["requested_at"], r["responded_at"]
+        if req > 0 and resp == 0 and r["pr_state"] == "open":
+            pending[who] = pending.get(who, 0) + 1
+        if resp > 0 and resp >= since:
+            reviews[who] = reviews.get(who, 0) + 1
+            if req > 0 and resp >= req:
+                latencies.setdefault(who, []).append(resp - req)
+            if r["review_state"] == "approved":
+                approvals[who] = approvals.get(who, 0) + 1
+                if r["bare_approval"]:
+                    rubber_stamps[who] = rubber_stamps.get(who, 0) + 1
+
+    avatars = {c["login"]: c["avatar_url"] for c in _app_db.list_contributors(include_bots=True)}
+    everyone = set(pending) | set(reviews)
+    stats = [
+        ReviewerStat(
+            reviewer=who,
+            avatar_url=avatars.get(who, ""),
+            pending=pending.get(who, 0),
+            reviews=reviews.get(who, 0),
+            median_response_secs=_median(latencies.get(who, [])),
+            approvals=approvals.get(who, 0),
+            rubber_stamps=rubber_stamps.get(who, 0),
+            rubber_stamp_rate=(
+                round(rubber_stamps.get(who, 0) / approvals[who] * 100, 1)
+                if approvals.get(who)
+                else 0.0
+            ),
+        )
+        for who in everyone
+    ]
+    # Bottleneck first: biggest pending queue, then slowest median response.
+    stats.sort(key=lambda s: (s.pending, s.median_response_secs or 0), reverse=True)
+    return stats
 
 
 class TimeSeriesPoint(BaseModel):
@@ -1950,204 +1265,58 @@ class TimeSeriesPoint(BaseModel):
     categories: dict[str, int] = {}
 
 
-@router.get("/api/stats/timeseries", response_model=list[TimeSeriesPoint])
-def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
-    """Aggregate review metrics over time. Period: day, week, month."""
-    all_events: list[dict] = []
-
-    for repo_record in _app_db.list_repos():
-        try:
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
-            for e in store.list_review_events(limit=500):
-                all_events.append(
-                    {
-                        "created_at": e.created_at,
-                        "comments": e.comments_posted,
-                        "blockers": e.blockers,
-                        "warnings": e.warnings,
-                        "suggestions": e.suggestions,
-                        "lines": e.lines_changed,
-                        "tokens": e.tokens_used,
-                        "categories": e.categories,
-                    }
-                )
-            store.close()
-        except Exception:
-            pass
-
-    if not all_events:
-        return []
-
-    # Bucket by period
-    from collections import defaultdict
-
-    buckets: dict[str, dict] = defaultdict(
-        lambda: {
-            "reviews": 0,
-            "comments": 0,
-            "blockers": 0,
-            "warnings": 0,
-            "suggestions": 0,
-            "lines_changed": 0,
-            "tokens_used": 0,
-            "categories": {},
-        }
-    )
-
-    for ev in all_events:
-        dt = datetime.fromtimestamp(ev["created_at"], tz=UTC)
-        if period == "month":
-            key = dt.strftime("%Y-%m")
-        elif period == "week":
-            key = dt.strftime("%Y-W%W")
-        else:
-            key = dt.strftime("%Y-%m-%d")
-
-        b = buckets[key]
-        b["reviews"] += 1
-        b["comments"] += ev["comments"]
-        b["blockers"] += ev["blockers"]
-        b["warnings"] += ev["warnings"]
-        b["suggestions"] += ev["suggestions"]
-        b["lines_changed"] += ev["lines"]
-        b["tokens_used"] += ev["tokens"]
-        for c in (ev["categories"] or "").split(","):
-            c = c.strip()
-            if c:
-                b["categories"][c] = b["categories"].get(c, 0) + 1
-
-    return [TimeSeriesPoint(date=k, **v) for k, v in sorted(buckets.items())]
+# Importing the router modules runs their @router decorators, populating
+# `router` before it's wired onto the app below. Side-effect imports (the
+# submodule form avoids binding names that collide with locals here).
+import mira.dashboard.routers.admin  # noqa: E402,F401
+import mira.dashboard.routers.core  # noqa: E402,F401
+import mira.dashboard.routers.relationships  # noqa: E402,F401
+import mira.dashboard.routers.repos  # noqa: E402,F401
+import mira.dashboard.routers.rules  # noqa: E402,F401
+import mira.dashboard.routers.vulnerabilities  # noqa: E402,F401
 
 
-@router.post("/api/repos/{owner}/{repo}/index")
-async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
-    """Trigger indexing for a repo. full=true wipes and re-indexes everything."""
-    from mira.index.status import tracker
+@router.get("/api/activity/{owner}/{repo}/{pr_number}", response_model=ActivityDetailModel)
+def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetailModel:
+    """Full detail for a single PR: every review pass (with the comments it
+    posted and the files it reviewed) plus human replies — i.e. the data the
+    activity timeline renders."""
+    import json as _json
 
-    full_name = f"{owner}/{repo}"
-
-    # Check if already indexing
-    for j in tracker.get_active():
-        if j.repo == full_name:
-            return {"status": "already_indexing"}
-
-    # Get GitHub token from app auth if available
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if not token:
-        try:
-            from mira.github_app.auth import GitHubAppAuth
-
-            app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
-            private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-            if app_id and private_key:
-                auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-                installations = await auth.list_installations()
-                for inst in installations:
-                    inst_id = int(inst.get("id", 0))
-                    if inst_id:
-                        repos = await auth.list_installation_repos(inst_id)
-                        if any(r.get("full_name") == full_name for r in repos):
-                            token = await auth.get_installation_token(inst_id)
-                            break
-        except Exception as exc:
-            logger.warning("Failed to get GitHub token: %s", exc)
-
-    if not token:
-        raise HTTPException(
-            status_code=400,
-            detail="No GitHub token available. Set GITHUB_TOKEN or configure GitHub App.",
-        )
-
-    # Run indexing in background
-    import asyncio
-
-    from mira.config import load_config
-    from mira.index.indexer import IndexingCancelled, index_repo
-    from mira.llm import create_llm
-
-    async def _do_index() -> None:
-        count = 0
-        store = None
-        try:
-            from mira.dashboard.models_config import llm_config_for
-
-            tracker.start(full_name)
-            config = load_config()
-            # Use the configured indexing model — without this swap we'd
-            # silently fall back to the review model, which is slower and
-            # more expensive per token.
-            llm = create_llm(llm_config_for("indexing", config.llm))
-            store = IndexStore.open(owner, repo)
-            if full:
-                # Wipe existing index
-                for path in list(store.all_paths()):
-                    store.remove_paths([path])
-            count = await index_repo(
-                owner=owner,
-                repo=repo,
-                token=token,
-                config=config,
-                store=store,
-                llm=llm,
-                full=full,
-                cancel_check=lambda: tracker.is_cancel_requested(full_name),
-            )
-            # Real indexing run finished — bump last_indexed_at so the
-            # dashboard's "Indexed N ago" reflects this completion.
-            _app_db.set_repo_status(
-                owner,
-                repo,
-                "ready",
-                files_indexed=count,
-                bump_last_indexed=True,
-            )
-            tracker.complete(full_name, count)
-            logger.info(
-                "Index %s for %s: %d files", "rebuild" if full else "update", full_name, count
-            )
-            from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
-
-            await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
-        except IndexingCancelled as cancelled:
-            tracker.cancel(full_name, cancelled.files_indexed)
-            logger.info(
-                "Indexing cancelled for %s after %d files", full_name, cancelled.files_indexed
-            )
-        except Exception as exc:
-            tracker.fail(full_name, str(exc))
-            logger.exception("Indexing failed for %s", full_name)
-        finally:
-            if store is not None:
-                store.close()
-
-    asyncio.create_task(_do_index())
-    return {"status": "indexing", "full": full}
-
-
-@router.delete("/api/repos/{owner}/{repo}/index")
-async def cancel_index(owner: str, repo: str) -> dict:
-    """Request cancellation of an in-progress indexing job.
-
-    Returns ``{"status": "cancelling"}`` if a job was active,
-    ``{"status": "not_indexing"}`` otherwise. The job transitions to
-    ``cancelled`` once the indexer notices the flag (at the next batch
-    boundary).
-    """
-    from mira.index.status import tracker
-
-    full_name = f"{owner}/{repo}"
-    if tracker.request_cancel(full_name):
-        return {"status": "cancelling"}
-    return {"status": "not_indexing"}
-
-
-@router.get("/api/repos/{owner}/{repo}/reviews", response_model=list[ReviewEventModel])
-def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventModel]:
-    """List recent review events for a repo."""
     with _open_store(owner, repo) as store:
-        events = store.list_review_events(limit=limit)
-        return [
-            ReviewEventModel(
+        all_events = store.list_review_events_for_pr(pr_number)
+        # Guard against a mis-scoped store: per-repo SQLite DBs have no
+        # owner/repo columns, so validate via the pr_url each event recorded.
+        marker = f"/{owner}/{repo}/"
+        all_events = [e for e in all_events if not e.pr_url or marker in e.pr_url]
+        if not all_events:
+            raise HTTPException(status_code=404, detail="No reviews for this PR")
+
+        comments_by_review: dict[int, list[ReviewCommentModel]] = {}
+        for c in store.list_review_comments(pr_number):
+            comments_by_review.setdefault(c.review_id, []).append(
+                ReviewCommentModel(
+                    id=c.id,
+                    review_id=c.review_id,
+                    path=c.path,
+                    line=c.line,
+                    severity=c.severity,
+                    category=c.category,
+                    title=c.title,
+                    body=c.body,
+                    github_comment_id=c.github_comment_id,
+                    created_at=c.created_at,
+                )
+            )
+
+        def _paths(raw: str) -> list[str]:
+            try:
+                return _json.loads(raw) if raw else []
+            except Exception:
+                return []
+
+        reviews = [
+            ActivityReviewModel(
                 id=e.id,
                 pr_number=e.pr_number,
                 pr_title=e.pr_title,
@@ -2162,9 +1331,38 @@ def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventMode
                 duration_ms=e.duration_ms,
                 categories=e.categories,
                 created_at=e.created_at,
+                reviewed_paths=_paths(e.reviewed_paths),
+                comments=comments_by_review.get(e.id, []),
             )
-            for e in events
+            for e in all_events
         ]
+
+        replies = [
+            PRReplyModel(
+                id=r.id,
+                author=r.author,
+                author_avatar_url=r.author_avatar_url,
+                body=r.body,
+                comment_path=r.comment_path,
+                comment_line=r.comment_line,
+                in_reply_to_id=r.in_reply_to_id,
+                created_at=r.created_at,
+            )
+            for r in store.list_replies(pr_number)
+        ]
+
+        latest = all_events[0]
+        return ActivityDetailModel(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_title=latest.pr_title,
+            pr_url=latest.pr_url,
+            author_username=latest.author,
+            author_avatar_url=latest.author_avatar_url,
+            reviews=reviews,
+            replies=replies,
+        )
 
 
 # Wire dashboard routes + middleware onto the standalone app, after all

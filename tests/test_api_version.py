@@ -9,6 +9,7 @@ import pytest
 
 from mira.dashboard import api
 from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers import core
 
 
 @pytest.fixture
@@ -20,11 +21,11 @@ def patched_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppDatabase:
 
 
 def test_bot_name_defaults_to_miracodeai(patched_db: AppDatabase):
-    out = api.get_version()
+    out = core.get_version()
     assert out["bot_name"] == "miracodeai"
     assert out["version"]
 
 
 def test_bot_name_reflects_persisted_setting(patched_db: AppDatabase):
     patched_db.set_setting("bot_name", "acme-reviewer")
-    assert api.get_version()["bot_name"] == "acme-reviewer"
+    assert core.get_version()["bot_name"] == "acme-reviewer"

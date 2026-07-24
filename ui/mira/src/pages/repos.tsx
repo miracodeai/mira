@@ -159,6 +159,12 @@ function StatusBadge({ status, error }: { status: string; error?: string }) {
       )
     case "ready":
       return null
+    case "empty":
+      return (
+        <Badge variant="outline" className="text-muted-foreground" title={error}>
+          Empty
+        </Badge>
+      )
     case "failed":
       return (
         <Badge variant="destructive" title={error}>

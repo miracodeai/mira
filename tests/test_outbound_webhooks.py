@@ -16,17 +16,16 @@ import pytest
 from fastapi import HTTPException
 
 from mira import outbound_webhooks as nf
-from mira.dashboard.api import (
-    WebhookCreate,
-    WebhookUpdate,
+from mira.dashboard.api import WebhookCreate, WebhookUpdate
+from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers.admin import (
     create_webhook,
     delete_webhook,
     get_webhook,
     list_webhooks,
     update_webhook,
 )
-from mira.dashboard.api import test_webhook as run_webhook_test
-from mira.dashboard.db import AppDatabase
+from mira.dashboard.routers.admin import test_webhook as run_webhook_test
 
 
 @pytest.fixture
@@ -77,6 +76,17 @@ class TestFormatDetection:
     def test_teams_lookalike_host_is_not_teams(self):
         # Subdomain-confusion guard: must not match without the leading dot.
         assert nf.detect_format("https://evilwebhook.office.com/x") == "generic"
+
+    def test_discord_slack_variant(self):
+        assert nf.detect_format("https://discord.com/api/webhooks/123/tok/slack") == "slack"
+        assert nf.detect_format("https://discordapp.com/api/webhooks/123/tok/slack/") == "slack"
+
+    def test_bare_discord_url_stays_generic(self):
+        # Discord's own schema isn't emitted — generic makes the 400 visible.
+        assert nf.detect_format("https://discord.com/api/webhooks/123/tok") == "generic"
+
+    def test_discord_lookalike_host_is_not_slack(self):
+        assert nf.detect_format("https://evildiscord.com/api/webhooks/1/t/slack") == "generic"
 
     def test_mask_hides_middle(self):
         masked = nf.mask_url("https://hooks.slack.com/services/T0/B0/abcd1234")

@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import { toast } from "@/components/ui/sonner"
 import { api, type RepoListItem, type RuleModel } from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
@@ -62,8 +63,10 @@ export function RulesPage() {
         setGlobalRules((prev) => [created, ...prev])
       }
       setEditingGlobal(null)
-    } catch {
-      // TODO: toast
+    } catch (e) {
+      toast.error("Couldn't save rule", {
+        description: e instanceof Error ? e.message : String(e),
+      })
     }
   }
 
@@ -119,8 +122,10 @@ export function RulesPage() {
         setRepoRules((prev) => [created, ...prev])
       }
       setEditingRepo(null)
-    } catch {
-      // TODO: toast
+    } catch (e) {
+      toast.error("Couldn't save rule", {
+        description: e instanceof Error ? e.message : String(e),
+      })
     }
   }
 

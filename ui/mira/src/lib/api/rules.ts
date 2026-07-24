@@ -3,12 +3,57 @@ import type { LearnedRuleModel, OrgLearnedRuleModel, RuleModel } from "./types"
 
 // Custom rules (global + per-repo) and learned rules.
 export const rulesApi = {
-  // Learned rules
-  listLearnedRules: () =>
-    fetchJson<OrgLearnedRuleModel[]>(`/api/learned-rules`),
+  // Learned rules. status: "approved" | "pending" | "rejected" | "" (all)
+  listLearnedRules: (status = "") =>
+    fetchJson<OrgLearnedRuleModel[]>(
+      status ? `/api/learned-rules?status=${encodeURIComponent(status)}` : `/api/learned-rules`
+    ),
 
   listRepoLearnedRules: (owner: string, repo: string) =>
     fetchJson<LearnedRuleModel[]>(`/api/repos/${owner}/${repo}/learned-rules`),
+
+  getLearnedRule: (owner: string, repo: string, id: number) =>
+    fetchJson<OrgLearnedRuleModel>(`/api/learned-rules/${owner}/${repo}/${id}`),
+
+  approveLearnedRule: (owner: string, repo: string, id: number) =>
+    postJson<{ ok: boolean }>(
+      `/api/learned-rules/${owner}/${repo}/${id}/approve`,
+      {}
+    ),
+
+  rejectLearnedRule: (owner: string, repo: string, id: number) =>
+    postJson<{ ok: boolean }>(
+      `/api/learned-rules/${owner}/${repo}/${id}/reject`,
+      {}
+    ),
+
+  setLearnedRuleActive: (
+    owner: string,
+    repo: string,
+    id: number,
+    active: boolean
+  ) =>
+    patchJson<{ ok: boolean }>(
+      `/api/learned-rules/${owner}/${repo}/${id}/active`,
+      { active }
+    ),
+
+  createLearnedRule: (
+    owner: string,
+    repo: string,
+    body: { rule_text: string; category: string; path_pattern?: string }
+  ) => postJson<LearnedRuleModel>(`/api/learned-rules/${owner}/${repo}`, body),
+
+  updateLearnedRule: (
+    owner: string,
+    repo: string,
+    id: number,
+    body: { rule_text: string; category: string; path_pattern?: string }
+  ) =>
+    putJson<{ ok: boolean }>(`/api/learned-rules/${owner}/${repo}/${id}`, body),
+
+  deleteLearnedRule: (owner: string, repo: string, id: number) =>
+    deleteJson(`/api/learned-rules/${owner}/${repo}/${id}`),
 
   // Global rules
   listGlobalRules: () => fetchJson<RuleModel[]>("/api/rules/global"),

@@ -1,0 +1,50 @@
+name: Release (beta)
+
+# Same gated flow as Release, but for prerelease tags (v1.2.3-beta1, -beta2, …).
+# Evals run first; the beta container ships only if they pass. Beta images are
+# tagged with the full prerelease version and never get the `latest` tag.
+on:
+  push:
+    tags: ["v*-beta*"]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  evals:
+    uses: ./.github/workflows/evals.yml
+    secrets: inherit
+
+  build-and-push:
+    needs: evals # ← only builds/pushes if the eval gate is green
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

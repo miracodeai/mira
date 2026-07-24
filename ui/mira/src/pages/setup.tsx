@@ -2,6 +2,7 @@ import { Loader2 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useNavigate } from "react-router"
 
+import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -10,36 +11,29 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { api } from "@/lib/api"
 import { useDocumentTitle } from "@/lib/hooks"
-
-type ModelOption = {
-  value: string
-  label: string
-  recommended?: boolean
-}
 
 export function SetupPage() {
   useDocumentTitle("Setup")
   const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  // "" = inherit from deployment config — an untouched save must not
+  // convert mira.yaml-sourced models into dashboard overrides.
   const [indexingModel, setIndexingModel] = useState("")
   const [reviewModel, setReviewModel] = useState("")
+  const [configIndexingModel, setConfigIndexingModel] = useState("")
+  const [configReviewModel, setConfigReviewModel] = useState("")
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
 
   useEffect(() => {
     api.getModels().then((data) => {
-      setIndexingModel(data.indexing_model)
-      setReviewModel(data.review_model)
+      setIndexingModel(data.indexing_source === "config" ? "" : data.indexing_model)
+      setReviewModel(data.review_source === "config" ? "" : data.review_model)
+      setConfigIndexingModel(data.config_indexing_model)
+      setConfigReviewModel(data.config_review_model)
       setIndexingOptions(data.indexing_options)
       setReviewOptions(data.review_options)
       setLoading(false)
@@ -82,23 +76,12 @@ export function SetupPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Select value={indexingModel} onValueChange={setIndexingModel}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {indexingOptions.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                  {opt.recommended && (
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      Recommended
-                    </span>
-                  )}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <ModelCombobox
+            value={indexingModel}
+            onChange={setIndexingModel}
+            options={indexingOptions}
+            configModel={configIndexingModel}
+          />
         </CardContent>
       </Card>
 
@@ -111,23 +94,12 @@ export function SetupPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Select value={reviewModel} onValueChange={setReviewModel}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {reviewOptions.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                  {opt.recommended && (
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      Recommended
-                    </span>
-                  )}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <ModelCombobox
+            value={reviewModel}
+            onChange={setReviewModel}
+            options={reviewOptions}
+            configModel={configReviewModel}
+          />
         </CardContent>
       </Card>
 

@@ -46,6 +46,16 @@ class TestParseBotCommentMetadata:
         assert meta["severity"] == "warning"
         assert meta["title"] == "Raw SQL query"
 
+    def test_no_category_emoji(self):
+        # Current format drops the leading category emoji.
+        body = (
+            "**Security issue**  \n🛑 Blocker — must fix before merge\n\n**Raw SQL query**\n\nbody"
+        )
+        meta = parse_bot_comment_metadata(body)
+        assert meta["category"] == "security"
+        assert meta["severity"] == "blocker"
+        assert meta["title"] == "Raw SQL query"
+
     def test_missing_severity_still_extracts_category_and_title(self):
         body = "⚡ **Performance**\n\n**Slow loop**\n\nbody"
         meta = parse_bot_comment_metadata(body)
@@ -136,7 +146,7 @@ class TestSynthesizeRules:
             _fb(store, signal="rejected", category="style", pr=i)
         n = synthesize_rules(store)
         assert n >= 1
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert any(r.source_signal == "reject_pattern" for r in rules)
 
     def test_positive_rule_on_high_accept_rate(self, store):
@@ -145,7 +155,7 @@ class TestSynthesizeRules:
             _fb(store, signal="accepted", category="bug", pr=i)
         n = synthesize_rules(store)
         assert n >= 1
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert any(r.source_signal == "accept_pattern" and r.category == "bug" for r in rules)
 
     def test_low_accept_rate_no_positive_rule(self, store):
@@ -155,7 +165,7 @@ class TestSynthesizeRules:
         for i in range(3, 6):
             _fb(store, signal="rejected", category="clarity", pr=i)
         synthesize_rules(store)
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         assert not any(r.source_signal == "accept_pattern" for r in rules)
 
     def test_reject_pattern_suppresses_accept_rule(self, store):
@@ -166,7 +176,7 @@ class TestSynthesizeRules:
         for i in range(5, 15):
             _fb(store, signal="accepted", category="style", pr=i)
         synthesize_rules(store)
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         # Only the reject_pattern rule should exist for this category.
         style_rules = [r for r in rules if r.category == "style"]
         assert all(r.source_signal == "reject_pattern" for r in style_rules)
@@ -227,7 +237,7 @@ class TestSynthesizeFromHumanReviews:
         assert n == 2
         llm.complete.assert_called_once()
         # Verify stored as human_pattern source
-        rules = store.list_active_learned_rules()
+        rules = store.list_learned_rules()
         human_rules = [r for r in rules if r.source_signal == "human_pattern"]
         assert len(human_rules) == 2
 
@@ -274,7 +284,7 @@ class TestSynthesizeFromHumanReviews:
 def test_webhook_routes_merged_pr(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from mira.github_app import webhooks as wh
+    from mira.platforms import server as wh
 
     called_with: dict = {}
 
@@ -282,7 +292,7 @@ def test_webhook_routes_merged_pr(monkeypatch):
         called_with["payload"] = payload
         called_with["bot_name"] = bot_name
 
-    monkeypatch.setattr(wh, "handle_pr_merged", fake_handler)
+    monkeypatch.setattr("mira.platforms.github.webhook.handle_pr_merged", fake_handler)
 
     app_auth = object()
     app = wh.create_app(app_auth, webhook_secret="secret", bot_name="mira")
@@ -327,14 +337,14 @@ def test_webhook_routes_merged_pr(monkeypatch):
 def test_webhook_ignores_closed_but_not_merged(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from mira.github_app import webhooks as wh
+    from mira.platforms import server as wh
 
     called = []
 
     async def fake_handler(*args, **kwargs):
         called.append(True)
 
-    monkeypatch.setattr(wh, "handle_pr_merged", fake_handler)
+    monkeypatch.setattr("mira.platforms.github.webhook.handle_pr_merged", fake_handler)
 
     app_auth = object()
     app = wh.create_app(app_auth, webhook_secret="secret", bot_name="mira")
@@ -396,7 +406,7 @@ class _StoreProxy:
 @pytest.mark.asyncio
 async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
     """Exercise the whole handler: provider → parser → store → synthesis chain."""
-    from mira.github_app import handlers
+    from mira.platforms.github import webhook as handlers
 
     store = IndexStore(str(tmp_path / "test.db"))
 
@@ -414,7 +424,10 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
         actor="alice",
     )
 
-    monkeypatch.setattr(handlers, "_open_store", lambda owner, repo: _StoreProxy(store))
+    monkeypatch.setattr(
+        "mira.platforms.handlers._open_store",
+        lambda owner, repo, platform="github": _StoreProxy(store),
+    )
 
     mock_provider = MagicMock()
     mock_provider.get_all_bot_threads = AsyncMock(
@@ -484,7 +497,7 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
 
     fake_config = MagicMock()
     fake_config.llm = MagicMock()
-    monkeypatch.setattr(handlers, "load_config", lambda: fake_config)
+    monkeypatch.setattr("mira.platforms.handlers.load_config", lambda: fake_config)
 
     # Bypass the dashboard DB lookup in llm_config_for.
     import mira.dashboard.models_config as mc
@@ -505,7 +518,7 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
             }
         )
     )
-    monkeypatch.setattr(handlers, "create_llm", lambda *a, **kw: fake_llm)
+    monkeypatch.setattr("mira.platforms.handlers.create_llm", lambda *a, **kw: fake_llm)
 
     payload = {
         "action": "closed",
@@ -556,7 +569,7 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
     fake_llm.complete.assert_called_once()
 
     # One human_pattern rule stored.
-    rules = store.list_active_learned_rules()
+    rules = store.list_learned_rules()
     human_rules = [r for r in rules if r.source_signal == "human_pattern"]
     assert len(human_rules) == 1
     assert "raw sql" in human_rules[0].rule_text.lower()

@@ -1,4 +1,5 @@
 import {
+  Activity,
   BookOpen,
   Brain,
   ChevronRight,
@@ -14,6 +15,7 @@ import {
   ShieldAlert,
   Sun,
   Users,
+  Users2,
 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router"
@@ -68,7 +70,9 @@ import { UserAvatar } from "@/components/ui/user-avatar"
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/activity", icon: Activity, label: "Activity" },
   { to: "/repos", icon: Database, label: "Repositories" },
+  { to: "/contributors", icon: Users2, label: "Reviewers", adminOnly: true },
   { to: "/packages", icon: Package, label: "Packages" },
   { to: "/vulnerabilities", icon: ShieldAlert, label: "Vulnerabilities" },
   { to: "/relationships", icon: GitFork, label: "Relationships" },
@@ -86,7 +90,9 @@ const settingsSubItems = [
 ]
 
 const PAGE_LABELS: Record<string, string> = {
+  activity: "Activity",
   repos: "Repositories",
+  contributors: "Reviewers",
   packages: "Packages",
   vulnerabilities: "Vulnerabilities",
   relationships: "Relationships",
@@ -95,6 +101,7 @@ const PAGE_LABELS: Record<string, string> = {
   settings: "Settings",
   users: "Users",
   new: "New",
+  edit: "Edit",
   account: "Account",
   password: "Password",
   models: "Models",
@@ -222,6 +229,11 @@ export function DashboardLayout() {
                   </div>
                   <div className="flex flex-col leading-tight">
                     <span className="text-sm font-semibold">Mira</span>
+                    {version && (
+                      <span className="text-[10px] text-muted-foreground tabular-nums">
+                        v{version}
+                      </span>
+                    )}
                   </div>
                 </a>
               </SidebarMenuButton>
@@ -296,11 +308,6 @@ export function DashboardLayout() {
           <SidebarMenu>
             <UserMenu />
           </SidebarMenu>
-          {version && (
-            <span className="px-2 pb-1 text-[10px] text-muted-foreground tabular-nums group-data-[collapsible=icon]:hidden">
-              v{version}
-            </span>
-          )}
         </SidebarFooter>
 
         <SidebarRail />
