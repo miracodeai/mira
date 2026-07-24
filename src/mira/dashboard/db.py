@@ -679,7 +679,8 @@ class AppDatabase:
 
     def _ensure_default_admin(self) -> None:
         """Create the initial admin user if none exists. Never uses a fixed default
-        password: takes the configured one, or generates a random one and logs it."""
+        password: takes the configured one, or generates a random one and writes it
+        to a 0600 file (never to logs, which may be shipped to long-lived stores)."""
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
@@ -699,11 +700,19 @@ class AppDatabase:
             logger.info("Created admin user (password from ADMIN_PASSWORD)")
         else:
             password = secrets.token_urlsafe(16)
+            # Written before create_user: if the write fails, startup fails and
+            # no admin exists, so the next start retries cleanly.
+            secrets_dir = os.environ.get("MIRA_INDEX_DIR", "./data/indexes")
+            os.makedirs(secrets_dir, exist_ok=True)
+            path = os.path.join(secrets_dir, "initial_admin_password")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(password + "\n")
             self.create_user("admin", password, is_admin=True)
             logger.warning(
-                "No ADMIN_PASSWORD set — created admin user with generated password: %s "
-                "(set ADMIN_PASSWORD or change it after first login)",
-                password,
+                "No ADMIN_PASSWORD set — created admin user with a generated password, "
+                "written to %s (log in, change it, then delete the file)",
+                path,
             )
 
     def _warn_if_default_password(self) -> None:

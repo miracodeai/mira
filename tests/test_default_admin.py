@@ -14,17 +14,22 @@ def _index_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
 
 
-def test_no_password_generates_random_admin(caplog: pytest.LogCaptureFixture) -> None:
+def test_no_password_generates_random_admin(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     with caplog.at_level("WARNING"):
         db = AppDatabase(url="")
 
     # admin/admin must not work.
     assert db.authenticate("admin", "admin") is None
 
-    # The generated password is logged once and does work.
-    msg = next(r.getMessage() for r in caplog.records if "generated password" in r.getMessage())
-    password = msg.split("generated password: ")[1].split(" ")[0]
+    # The generated password lands in a 0600 file, not in the logs.
+    pw_file = tmp_path / "initial_admin_password"
+    password = pw_file.read_text().strip()
     assert db.authenticate("admin", password) is not None
+    assert pw_file.stat().st_mode & 0o777 == 0o600
+    assert password not in caplog.text
+    assert str(pw_file) in caplog.text
 
 
 def test_configured_password_is_used(caplog: pytest.LogCaptureFixture) -> None:

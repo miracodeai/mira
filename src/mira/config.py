@@ -242,7 +242,7 @@ class ProviderConfig(BaseModel):
 class DatabaseConfig(BaseModel):
     url: str = ""  # empty = SQLite fallback. "postgresql://user:pass@host:5432/mira"
     admin_password: str = (
-        ""  # initial admin password; empty = random generated + logged on first start
+        ""  # initial admin password; empty = generated on first start, written to a 0600 file
     )
 
 
