@@ -130,6 +130,34 @@ def build_security_review_prompt(
     ]
 
 
+def build_dependency_review_prompt(
+    files: list[FileDiff],
+    existing_packages: list[str] | None = None,
+    pr_title: str = "",
+) -> list[dict[str, str]]:
+    """Build the dependency-overlap review prompt messages for the LLM.
+
+    Runs in parallel with the main review pass over only the changed manifest
+    files. ``existing_packages`` is the set of dependency names already declared
+    in the repo (from the index) so the model can spot a newly-added package
+    that duplicates the functionality of one already present. Output is merged
+    into the main review's comments list and goes through the same noise filter.
+    """
+    env = _get_template_env()
+    template = env.get_template("dependency_review.jinja2")
+    file_contexts = [build_file_context_string(f) for f in files]
+    file_paths = [f.path for f in files]
+    system_content = template.render(
+        pr_title=pr_title,
+        file_paths=file_paths,
+        existing_packages=existing_packages or [],
+    )
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": "\n\n".join(file_contexts)},
+    ]
+
+
 _HUNK_HEADER_RE = re.compile(r"^@@\s.*@@", re.MULTILINE)
 
 

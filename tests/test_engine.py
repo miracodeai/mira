@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1617,6 +1618,165 @@ class TestSecurityReviewPass:
 
         out = await security_review_pass(llm, files, files, "title")
         assert out == []
+
+
+class TestDependencyReviewPass:
+    """Dependency pass flags duplicate deps and tags them category=dependency."""
+
+    _MANIFEST_DIFF = """diff --git a/package.json b/package.json
+index 1111111..2222222 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,7 @@
+ {
+   "dependencies": {
+     "react-table": "^7.8.0",
++    "@tanstack/react-table": "^8.10.0",
+     "react": "^18.0.0"
+   }
+ }
+"""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_manifest_files(self):
+        """No manifest changed → short-circuit before any LLM call."""
+        from mira.core.passes import dependency_review_pass
+
+        llm = MagicMock(spec=LLMProvider)
+        llm.complete_with_tools = AsyncMock()
+
+        out = await dependency_review_pass(llm, [], ["react-table"], "title")
+        assert out == []
+        llm.complete_with_tools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_runs_llm_and_tags_dependency(self):
+        """Happy path: LLM flags the new table lib; category forced to dependency."""
+        from mira.core.diff_parser import parse_diff
+        from mira.core.passes import dependency_review_pass
+
+        files = parse_diff(self._MANIFEST_DIFF).files
+        canned = json.dumps(
+            {
+                "comments": [
+                    {
+                        "path": "package.json",
+                        "line": 4,
+                        "severity": "suggestion",
+                        "category": "maintainability",  # LLM forgot — forced to dependency
+                        "title": "Duplicate table library",
+                        "body": "react-table already covers this; consolidate.",
+                        "confidence": 0.85,
+                        "existing_code": '    "@tanstack/react-table": "^8.10.0",',
+                    }
+                ],
+                "summary": "",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+        llm = MagicMock(spec=LLMProvider)
+        llm.complete_with_tools = AsyncMock(return_value=canned)
+
+        out = await dependency_review_pass(llm, files, ["react-table", "react"], "title")
+        assert len(out) == 1
+        assert out[0].category == "dependency"
+        assert out[0].title == "Duplicate table library"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_llm_failure(self):
+        """LLM error must not crash — return empty so main review proceeds."""
+        from mira.core.diff_parser import parse_diff
+        from mira.core.passes import dependency_review_pass
+
+        files = parse_diff(self._MANIFEST_DIFF).files
+        llm = MagicMock(spec=LLMProvider)
+        llm.complete_with_tools = AsyncMock(side_effect=RuntimeError("LLM down"))
+
+        out = await dependency_review_pass(llm, files, ["react-table"], "title")
+        assert out == []
+
+
+class TestManifestFileSelection:
+    """`_manifest_files` keeps changed manifests, drops lockfiles and deletions."""
+
+    def _file(self, path, change_type):
+        return SimpleNamespace(path=path, change_type=change_type)
+
+    def test_selects_manifests_excludes_lockfiles_and_deletes(self):
+        from mira.core.engine import _manifest_files
+        from mira.models import FileChangeType
+
+        files = [
+            self._file("package.json", FileChangeType.MODIFIED),
+            self._file("pyproject.toml", FileChangeType.ADDED),
+            self._file("package-lock.json", FileChangeType.MODIFIED),  # lockfile → drop
+            self._file("go.mod", FileChangeType.DELETED),  # deleted → drop
+            self._file("src/app.py", FileChangeType.MODIFIED),  # not a manifest → drop
+        ]
+        kept = {f.path for f in _manifest_files(files)}
+        assert kept == {"package.json", "pyproject.toml"}
+
+    @pytest.mark.asyncio
+    async def test_culled_manifest_still_reaches_dependency_pass(self, monkeypatch):
+        """A manifest dropped by the size cull must still reach the dependency pass.
+
+        The engine picks dependency candidates from the *pre-cull* file list on
+        purpose: a big dependency bump can blow past max_file_size, and that's
+        exactly the PR where a duplicate-dep warning matters most. Regression
+        guard against selecting manifests off the post-cull `filtered` list.
+        """
+        from mira.config import MiraConfig
+        from mira.core import engine as engine_mod
+        from mira.core.engine import ReviewEngine
+
+        seen: dict = {}
+
+        async def fake_dep_pass(llm, manifest_files, existing_packages=None, pr_title="", **kw):
+            seen["paths"] = [f.path for f in manifest_files]
+            return []
+
+        async def fake_sec_pass(*a, **kw):
+            return []
+
+        monkeypatch.setattr(engine_mod, "dependency_review_pass", fake_dep_pass)
+        monkeypatch.setattr(engine_mod, "security_review_pass", fake_sec_pass)
+        # No chunks → no main-review LLM calls; we only care about pass wiring.
+        monkeypatch.setattr(engine_mod, "chunk_files", lambda *a, **kw: [])
+
+        bump = "\n".join(f'+    "pkg-{i}": "^1.0.0",' for i in range(200))
+        diff = (
+            "diff --git a/package.json b/package.json\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/package.json\n"
+            "+++ b/package.json\n"
+            "@@ -1,2 +1,202 @@\n"
+            " {\n"
+            f"{bump}\n"
+            " }\n"
+            "diff --git a/src/app.py b/src/app.py\n"
+            "index 3333333..4444444 100644\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " import os\n"
+            "+x = 1\n"
+            " y = 2\n"
+        )
+
+        config = MiraConfig()
+        config.review.walkthrough = False
+        config.review.self_critique = False
+        config.review.security_pass = False
+        config.review.dependency_overlap = True
+        # Small enough that the 200-line package.json diff is culled, but the
+        # tiny source file survives (so we don't hit the no-files early return).
+        config.review.max_file_size = 200
+
+        engine = ReviewEngine(config=config, llm=AsyncMock(), provider=None)
+        result = await engine._review_diff_internal(diff)
+
+        assert result.reviewed_paths == ["src/app.py"], "manifest should be culled"
+        assert seen.get("paths") == ["package.json"], "pass must still see the manifest"
 
 
 class TestRegenerateSummary:

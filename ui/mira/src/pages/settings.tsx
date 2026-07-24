@@ -464,6 +464,12 @@ export function SettingsPage() {
                 )}
                 {boolField(
                   "review",
+                  "dependency_overlap",
+                  "Duplicate dependency check",
+                  "Warns when a PR adds a dependency that duplicates an existing one (e.g. a second table or HTTP-client library)."
+                )}
+                {boolField(
+                  "review",
                   "auto_resolve_conversations",
                   "Auto-resolve conversations",
                   "Automatically resolve bot review threads the LLM verifies as fixed on each review. Turn off to leave comments open until a human resolves them."

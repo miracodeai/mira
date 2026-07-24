@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from mira.config import MiraConfig
-from mira.llm.prompts.review import build_review_prompt
+from mira.llm.prompts.review import (
+    build_dependency_review_prompt,
+    build_review_prompt,
+)
 from mira.models import FileChangeType, FileDiff, HunkInfo
 
 
@@ -170,3 +173,50 @@ class TestBuildReviewPrompt:
         messages = build_review_prompt(files, config)
         system = messages[0]["content"]
         assert "existing_code" in system
+
+
+class TestBuildDependencyReviewPrompt:
+    def _manifest(self):
+        return [
+            FileDiff(
+                path="package.json",
+                change_type=FileChangeType.MODIFIED,
+                hunks=[
+                    HunkInfo(
+                        1,
+                        6,
+                        1,
+                        7,
+                        '@@ -1,6 +1,7 @@\n {\n+    "@tanstack/react-table": "^8.10.0",\n }',
+                    )
+                ],
+                added_lines=1,
+                deleted_lines=0,
+            )
+        ]
+
+    def test_returns_two_messages_with_paths(self):
+        messages = build_dependency_review_prompt(
+            self._manifest(), existing_packages=["react-table"]
+        )
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert messages[1]["role"] == "user"
+        assert "package.json" in messages[0]["content"]
+        assert "submit_review" in messages[0]["content"]
+
+    def test_injects_existing_package_names(self):
+        messages = build_dependency_review_prompt(
+            self._manifest(), existing_packages=["react-table", "lodash"]
+        )
+        system = messages[0]["content"]
+        assert "react-table" in system
+        assert "lodash" in system
+        # The pass must tag its findings so they're recognised downstream.
+        assert "dependency" in system
+
+    def test_handles_no_existing_packages(self):
+        """Unindexed repo (empty list) must still render without error."""
+        messages = build_dependency_review_prompt(self._manifest(), existing_packages=[])
+        system = messages[0]["content"]
+        assert "isn't indexed" in system

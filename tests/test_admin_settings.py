@@ -162,6 +162,16 @@ class TestEndpointValidation:
             "filter": {"confidence_threshold": 0.4, "max_comments": 7}
         }
 
+    def test_persists_dependency_overlap_override(self, in_memory_db: AppDatabase):
+        result = set_global_settings(
+            GlobalSettingsUpdate(overrides={"review": {"dependency_overlap": False}}),
+            _admin_request(),
+        )
+        assert result == {"ok": True}
+        assert in_memory_db.get_global_review_overrides() == {
+            "review": {"dependency_overlap": False}
+        }
+
     def test_persists_auto_resolve_conversations_override(self, in_memory_db: AppDatabase):
         result = set_global_settings(
             GlobalSettingsUpdate(overrides={"review": {"auto_resolve_conversations": False}}),

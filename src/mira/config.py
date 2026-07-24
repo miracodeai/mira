@@ -208,6 +208,12 @@ class ReviewConfig(BaseModel):
     # skip the relationship-store lookup and trim the walkthrough.
     blast_radius: bool = True
 
+    # Warn when a PR adds a dependency that duplicates the functionality of one
+    # already in the repo (e.g. a second table or HTTP-client library). Runs a
+    # dedicated indexing-tier pass, but only when the PR changes a manifest file
+    # (package.json, pyproject.toml, go.mod, …) — no LLM call otherwise.
+    dependency_overlap: bool = True
+
     # Cross-PR overlap detection — flag other open PRs that step on this one
     # (same files = merge-conflict risk, or same goal = duplicate effort).
     overlap: OverlapConfig = Field(default_factory=OverlapConfig)
