@@ -6,7 +6,7 @@ import ipaddress
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -66,9 +66,8 @@ class LLMConfig(BaseModel):
     # CODEX_HOME/auth.json from `codex login`; Mira does not need an OpenAI API key.
     codex_command: str = "codex"
     codex_home: str | None = None
-    codex_workdir: str | None = None
-    codex_sandbox: str = "read-only"
-    codex_timeout_seconds: int = 900
+    codex_sandbox: Literal["read-only"] = "read-only"
+    codex_timeout_seconds: int = Field(default=900, gt=0)
 
     @field_validator("base_url")
     @classmethod
@@ -252,6 +251,29 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 _global_defaults: dict[str, Any] = {}
 
+_DEPLOYMENT_ONLY_LLM_KEYS = frozenset(
+    {
+        "provider",
+        "codex_command",
+        "codex_home",
+        "codex_sandbox",
+        "codex_timeout_seconds",
+    }
+)
+
+
+def _strip_deployment_only_llm_settings(overlay: dict[str, Any]) -> dict[str, Any]:
+    """Remove process-execution settings from an untrusted per-repo overlay."""
+    cleaned = dict(overlay)
+    llm = cleaned.get("llm")
+    if not isinstance(llm, dict):
+        return cleaned
+    cleaned_llm = dict(llm)
+    for key in _DEPLOYMENT_ONLY_LLM_KEYS:
+        cleaned_llm.pop(key, None)
+    cleaned["llm"] = cleaned_llm
+    return cleaned
+
 
 def set_global_defaults(config_path: Path | str) -> MiraConfig:
     """Load a deployment-wide config file once at server startup.
@@ -282,6 +304,8 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
 def load_config(
     config_path: Path | str | None = None,
     overrides: dict[str, Any] | None = None,
+    *,
+    trust_execution_settings: bool = False,
 ) -> MiraConfig:
     """Load config, layering global defaults → per-repo `.mira.yaml` → overrides.
 
@@ -314,11 +338,17 @@ def load_config(
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"Config file not found: {path}")
-        data = _deep_merge(data, _load_yaml(path))
+        overlay = _load_yaml(path)
+        if not trust_execution_settings:
+            overlay = _strip_deployment_only_llm_settings(overlay)
+        data = _deep_merge(data, overlay)
     else:
         found = find_config_file()
         if found:
-            data = _deep_merge(data, _load_yaml(found))
+            overlay = _load_yaml(found)
+            if not trust_execution_settings:
+                overlay = _strip_deployment_only_llm_settings(overlay)
+            data = _deep_merge(data, overlay)
 
     if overrides:
         for key, value in overrides.items():

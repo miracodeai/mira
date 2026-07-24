@@ -14,7 +14,9 @@ import json
 import logging
 import os
 import shlex
+import signal
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -23,6 +25,22 @@ from mira.config import LLMConfig
 from mira.exceptions import LLMError
 
 logger = logging.getLogger(__name__)
+
+_SAFE_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+    }
+)
 
 
 class CodexCLIProvider:
@@ -34,6 +52,8 @@ class CodexCLIProvider:
 
     supports_json_mode: bool = True
     supports_tool_calling: bool = False
+    supports_temperature: bool = False
+    supports_max_tokens: bool = False
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
@@ -51,12 +71,26 @@ class CodexCLIProvider:
     def count_tokens(self, text: str) -> int:
         return max(1, len(text) // 4) if text else 0
 
-    def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        codex_home = self.config.codex_home or env.get("CODEX_HOME")
-        if codex_home:
-            env["CODEX_HOME"] = str(Path(codex_home).expanduser())
+    def _env(self, runtime_home: str, runtime_codex_home: str) -> dict[str, str]:
+        """Build a minimal child environment without Mira service credentials."""
+        env = {key: value for key, value in os.environ.items() if key in _SAFE_ENV_KEYS}
+        env["HOME"] = runtime_home
+        env["CODEX_HOME"] = runtime_codex_home
         return env
+
+    def _prepare_codex_home(self, invocation_root: str) -> str:
+        """Create writable ephemeral Codex state containing only OAuth auth."""
+        destination = Path(invocation_root) / "codex-home"
+        destination.mkdir(parents=True, mode=0o700)
+        source_home = self.config.codex_home or os.environ.get("CODEX_HOME")
+        if source_home:
+            source_auth = Path(source_home).expanduser() / "auth.json"
+            if not source_auth.is_file():
+                raise LLMError(f"Codex auth file not found: {source_auth}")
+            destination_auth = destination / "auth.json"
+            destination_auth.write_bytes(source_auth.read_bytes())
+            destination_auth.chmod(0o600)
+        return str(destination)
 
     def _command(self, output_path: str) -> list[str]:
         codex_command = self.config.codex_command or "codex"
@@ -74,16 +108,32 @@ class CodexCLIProvider:
             "--output-last-message",
             output_path,
             "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "-c",
+            'shell_environment_policy.inherit="none"',
         ]
         if self.config.model not in {"", "default", "codex-default"}:
             cmd.extend(["-m", self.config.model])
         cmd.append("-")
         return cmd
 
-    def _cwd(self) -> str | None:
-        if self.config.codex_workdir:
-            return str(Path(self.config.codex_workdir).expanduser())
-        return None
+    async def _terminate_process_tree(self, proc: asyncio.subprocess.Process) -> None:
+        """Terminate Codex and model-spawned descendants before returning."""
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                if proc.returncode is None:
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+        elif proc.returncode is None:
+            with suppress(ProcessLookupError):
+                proc.kill()
+        if proc.returncode is None:
+            await proc.wait()
 
     @retry(
         stop=stop_after_attempt(2),
@@ -94,6 +144,9 @@ class CodexCLIProvider:
     async def _run_codex(self, prompt: str) -> str:
         with tempfile.TemporaryDirectory(prefix="mira-codex-") as tmpdir:
             output_path = str(Path(tmpdir) / "last-message.txt")
+            runtime_home = str(Path(tmpdir) / "runtime")
+            Path(runtime_home).mkdir(mode=0o700)
+            runtime_codex_home = self._prepare_codex_home(tmpdir)
             cmd = self._command(output_path)
             logger.debug("Running Codex CLI provider: %s", shlex.join(cmd[:-1] + ["<stdin>"]))
             try:
@@ -102,8 +155,9 @@ class CodexCLIProvider:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    env=self._env(),
-                    cwd=self._cwd(),
+                    env=self._env(runtime_home, runtime_codex_home),
+                    cwd=runtime_home,
+                    start_new_session=os.name == "posix",
                 )
             except FileNotFoundError as exc:
                 raise LLMError(
@@ -117,14 +171,12 @@ class CodexCLIProvider:
                     timeout=self.config.codex_timeout_seconds,
                 )
             except TimeoutError as exc:
-                proc.kill()
-                await proc.wait()
+                await self._terminate_process_tree(proc)
                 raise LLMError(
                     f"Codex CLI timed out after {self.config.codex_timeout_seconds}s"
                 ) from exc
             except BaseException:
-                proc.kill()
-                await proc.wait()
+                await self._terminate_process_tree(proc)
                 raise
 
             stdout_text = stdout.decode("utf-8", errors="replace")
@@ -170,35 +222,44 @@ class CodexCLIProvider:
         if not candidate:
             raise LLMError("Codex CLI returned an empty response")
 
+        def is_object(value: str) -> bool:
+            try:
+                return isinstance(json.loads(value), dict)
+            except Exception:
+                return False
+
         if "```" in candidate:
             blocks = candidate.split("```")
             for block in blocks[1::2]:
                 block = block.strip()
                 if block.startswith("json"):
                     block = block[4:].strip()
-                try:
-                    json.loads(block)
+                if is_object(block):
                     return block
-                except Exception:
-                    continue
 
         try:
-            json.loads(candidate)
-            return candidate
+            parsed_candidate = json.loads(candidate)
         except Exception:
-            pass
+            parsed_candidate = None
+        else:
+            if isinstance(parsed_candidate, dict):
+                return candidate
+            raise LLMError(
+                f"Codex CLI response must be a JSON object, got {type(parsed_candidate).__name__}"
+            )
 
         start = candidate.find("{")
         end = candidate.rfind("}")
         if start != -1 and end != -1 and end > start:
             obj = candidate[start : end + 1]
             try:
-                json.loads(obj)
-                return obj
+                parsed = json.loads(obj)
             except Exception as exc:
                 raise LLMError(
                     f"Codex CLI returned malformed JSON: {exc}: {candidate[:1000]}"
                 ) from exc
+            if isinstance(parsed, dict):
+                return obj
 
         raise LLMError(f"Codex CLI response did not contain a JSON object: {candidate[:1000]}")
 
@@ -240,11 +301,9 @@ class CodexCLIProvider:
         tools: list[dict],
         temperature: float | None = None,
     ) -> dict:
-        # Codex CLI is already agentic but does not expose Mira's incremental
-        # OpenAI-style tool-call loop. Return content-only so Mira falls back to
-        # the normal forced JSON review call, preserving the output contract.
-        raw = await self.complete_with_tools(messages, tools)
-        return {"content": raw, "tool_calls": []}
+        # Codex CLI does not expose Mira's incremental OpenAI-style tool calls.
+        # Defer immediately so the caller performs exactly one forced review.
+        return {"content": "", "tool_calls": []}
 
     async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         from mira.llm.provider import SUBMIT_REVIEW_TOOL

@@ -180,7 +180,11 @@ def review(
         overrides["review.walkthrough"] = False
 
     try:
-        config = load_config(config_path, overrides)
+        config = load_config(
+            config_path,
+            overrides,
+            trust_execution_settings=config_path is not None,
+        )
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
