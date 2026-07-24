@@ -1415,6 +1415,12 @@ class ReviewEngine:
         # the team's documented preferences so the critic doesn't strip
         # findings that enforce them as "style nits".
         if final_comments and self.config.review.self_critique:
+            # A dependency finding can land on a manifest that lost the size
+            # cull and so isn't in `filtered`. The critic grades on the hunk
+            # covering a comment; with no hunk it reads as "unsupported" and
+            # drops the finding. Add those manifests back as evidence only.
+            _selected = {f.path for f in filtered}
+            critique_files = filtered + [f for f in manifest_candidates if f.path not in _selected]
             try:
                 final_comments = await self_critique(
                     self.llm,
@@ -1422,7 +1428,7 @@ class ReviewEngine:
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
                     indexing_llm=self.indexing_llm,
-                    diff_files=filtered,
+                    diff_files=critique_files,
                     audit=audit,
                 )
             except Exception as exc:
