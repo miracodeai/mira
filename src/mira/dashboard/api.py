@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Database + auth
 _db_url = os.environ.get("DATABASE_URL", "")
-_admin_password = os.environ.get("ADMIN_PASSWORD", "admin")
+_admin_password = os.environ.get("ADMIN_PASSWORD", "")
 _app_db = AppDatabase(_db_url, admin_password=_admin_password)
 
 # All dashboard routes register on this router. `register_dashboard()` wires
