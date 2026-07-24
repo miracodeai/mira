@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import logging
 import os
 import re
@@ -261,7 +262,7 @@ class GitHubProvider(BaseProvider):
             gh_repo = self._github.get_repo(f"{owner}/{repo}")
             pulls = gh_repo.get_pulls(state="open", sort="updated", direction="desc")
             out: list[OpenPRRef] = []
-            for pr in pulls[:limit]:
+            for pr in itertools.islice(pulls, limit):
                 out.append(
                     OpenPRRef(
                         number=pr.number,
@@ -300,7 +301,7 @@ class GitHubProvider(BaseProvider):
         def _fetch() -> list[str]:
             gh_repo = self._github.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
-            return [f.filename for f in pr.get_files()[:limit]]
+            return [f.filename for f in itertools.islice(pr.get_files(), limit)]
 
         try:
             return await asyncio.to_thread(_fetch)
