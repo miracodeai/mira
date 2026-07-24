@@ -84,6 +84,21 @@ class LLMProvider:
         # whatever model is selected); remembered so we drop it and review
         # without thinking rather than failing.
         self._no_reasoning: set[str] = set()
+        # Apply retry decorator imperatively so it reads config values
+        # (max_retries, retry_min_wait, retry_max_wait) at instance time.
+        self._retry = retry(
+            stop=stop_after_attempt(self.config.max_retries),
+            wait=wait_exponential(
+                multiplier=1,
+                min=self.config.retry_min_wait,
+                max=self.config.retry_max_wait,
+            ),
+            retry=retry_if_exception_type(Exception),
+            reraise=True,
+        )
+        self._call_llm = self._retry(self._call_llm)
+        self._call_llm_with_tools = self._retry(self._call_llm_with_tools)
+        self._call_llm_agentic = self._retry(self._call_llm_agentic)
 
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -121,12 +136,6 @@ class LLMProvider:
         body["reasoning"] = {"effort": effort}
         body.pop("temperature", None)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(Exception),
-        reraise=True,
-    )
     async def _call_llm(
         self,
         model: str,
@@ -146,7 +155,7 @@ class LLMProvider:
             body["response_format"] = {"type": "json_object"}
         self._apply_reasoning(body)
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
                 self._chat_url(),
                 headers=self._build_headers(),
@@ -165,12 +174,6 @@ class LLMProvider:
 
         return content
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(Exception),
-        reraise=True,
-    )
     async def _call_llm_with_tools(
         self,
         model: str,
@@ -200,7 +203,7 @@ class LLMProvider:
         }
         self._apply_reasoning(body)
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
                 self._chat_url(),
                 headers=self._build_headers(),
@@ -299,12 +302,6 @@ class LLMProvider:
                 f"LLM completion failed with {self.config.model}: {primary_err}"
             ) from primary_err
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(Exception),
-        reraise=True,
-    )
     async def _call_llm_agentic(
         self,
         model: str,
@@ -329,7 +326,7 @@ class LLMProvider:
         }
         self._apply_reasoning(body)
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
                 self._chat_url(),
                 headers=self._build_headers(),

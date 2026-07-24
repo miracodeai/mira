@@ -73,6 +73,29 @@ class TestLoadConfig:
         assert config.review.walkthrough_sequence_diagram is True
         assert config.index.max_file_size == 1_048_576
 
+    def test_llm_retry_timeout_defaults(self):
+        from mira.config import LLMConfig
+
+        c = LLMConfig()
+        assert c.max_retries == 3
+        assert c.request_timeout == 120
+        assert c.retry_min_wait == 2
+        assert c.retry_max_wait == 30
+
+    def test_llm_retry_timeout_override(self):
+        from mira.config import LLMConfig
+
+        c = LLMConfig(
+            max_retries=5,
+            request_timeout=300,
+            retry_min_wait=5,
+            retry_max_wait=60,
+        )
+        assert c.max_retries == 5
+        assert c.request_timeout == 300
+        assert c.retry_min_wait == 5
+        assert c.retry_max_wait == 60
+
     def test_focus_only_on_problems_override(self, sample_config_path: Path):
         config = load_config(
             sample_config_path,

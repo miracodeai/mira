@@ -19,6 +19,13 @@ llm:
   # region: "us-east-1"
   # aws_profile: "my-profile"  # optional, uses default AWS credential chain if omitted
 
+  # Retry and timeout configuration (defaults: 3 attempts, 120s timeout, 2-30s backoff)
+  # Increase for flex-tier models or proxied endpoints under load
+  # max_retries: 3
+  # request_timeout: 120
+  # retry_min_wait: 2
+  # retry_max_wait: 30
+
 filter:
   # Minimum confidence threshold (0.0 - 1.0)
   confidence_threshold: 0.7

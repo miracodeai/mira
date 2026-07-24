@@ -62,6 +62,12 @@ class LLMConfig(BaseModel):
     # (env vars, instance profile, ECS task role, SSO).
     region: str = "us-east-1"
     aws_profile: str | None = None
+    # Retry and timeout configuration for LLM calls.
+    # Defaults match the previous hardcoded values to preserve existing behavior.
+    max_retries: int = Field(default=3, ge=1)
+    request_timeout: int = Field(default=120, ge=1)
+    retry_min_wait: int = Field(default=2, ge=0)
+    retry_max_wait: int = Field(default=30, ge=0)
 
     @field_validator("base_url")
     @classmethod

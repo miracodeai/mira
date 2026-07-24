@@ -135,13 +135,20 @@ class BedrockProvider:
             config.region,
             config.model,
         )
+        # Apply retry decorator imperatively so it reads config values
+        # (max_retries, retry_min_wait, retry_max_wait) at instance time.
+        self._retry = retry(
+            stop=stop_after_attempt(self.config.max_retries),
+            wait=wait_exponential_jitter(
+                initial=self.config.retry_min_wait,
+                max=self.config.retry_max_wait,
+                jitter=2,
+            ),
+            retry=retry_if_exception_type(_BedrockThrottlingError),
+            reraise=True,
+        )
+        self._call_converse = self._retry(self._call_converse)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(initial=2, max=30, jitter=2),
-        retry=retry_if_exception_type(_BedrockThrottlingError),
-        reraise=True,
-    )
     async def _call_converse(
         self,
         model: str,

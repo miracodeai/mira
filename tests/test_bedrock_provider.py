@@ -292,6 +292,26 @@ class TestBedrockErrorHandling:
         with pytest.raises(LLMError, match="not found"):
             await provider.complete([{"role": "user", "content": "hello"}], json_mode=False)
 
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
+    async def test_throttling_retries_config_count(self, mock_session_cls):
+        from mira.llm.bedrock import BedrockProvider
+
+        mock_client = MagicMock()
+        err = Exception("ThrottlingException: rate exceeded")
+        mock_client.converse.side_effect = err
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        provider = BedrockProvider(
+            _bedrock_config(max_retries=5, retry_min_wait=0, retry_max_wait=0)
+        )
+        with pytest.raises(LLMError):
+            await provider.complete([{"role": "user", "content": "hello"}], json_mode=False)
+
+        assert mock_client.converse.call_count == 5
+
 
 class TestBedrockCompleteWithTools:
     @pytest.mark.asyncio
