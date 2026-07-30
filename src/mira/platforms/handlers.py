@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -116,7 +117,10 @@ async def run_pr_review(
 
     # Keep visibility current — the blast-radius filter relies on it to avoid
     # naming private repos in a public repo's review.
-    _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
+    try:
+        _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
+    except sqlite3.OperationalError as exc:
+        logger.debug("set_repo_visibility failed (ignored): %s", exc)
 
     repo_record = _app_db.get_repo(owner, repo, platform=platform)
     is_indexed = bool(repo_record and repo_record.status == "ready")

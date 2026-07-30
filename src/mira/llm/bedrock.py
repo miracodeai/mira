@@ -117,10 +117,7 @@ class BedrockProvider:
         try:
             import boto3
         except ImportError as e:
-            raise LLMError(
-                "boto3 is required for the Bedrock provider. "
-                "Install with: pip install mira-reviewer[bedrock]"
-            ) from e
+            raise LLMError("bedrock_no_boto3") from e
 
         self.config = config
         session = boto3.Session(
@@ -229,25 +226,18 @@ class BedrockProvider:
 
         # Access denied — not retryable, clear message
         if "AccessDeniedException" in error_msg:
-            raise LLMError(
-                f"Bedrock access denied for model {model}. "
-                "Ensure your IAM role/user has bedrock:InvokeModel permission "
-                "and the model is enabled in your account."
-            ) from error
+            raise LLMError("bedrock_access_denied", model=model) from error
 
         # Model not found
         if "ResourceNotFoundException" in error_msg:
-            raise LLMError(
-                f"Bedrock model not found: {model}. "
-                "Check the model ID and ensure it's available in your region."
-            ) from error
+            raise LLMError("bedrock_model_not_found", model=model) from error
 
         # Validation error (bad request shape)
         if "ValidationException" in error_msg:
-            raise LLMError(f"Bedrock validation error for {model}: {error_msg}") from error
+            raise LLMError("bedrock_validation_error", model=model, error=error_msg) from error
 
         # Catch-all
-        raise LLMError(f"Bedrock API error for {model}: {error_msg}") from error
+        raise LLMError("bedrock_api_error", model=model, error=error_msg) from error
 
     def _extract_text(self, response: dict) -> str:
         """Extract text content from a Bedrock Converse response."""
@@ -302,11 +292,13 @@ class BedrockProvider:
                     )
                 except Exception as fallback_err:
                     raise LLMError(
-                        f"Both primary ({self.config.model}) and fallback "
-                        f"({self.config.fallback_model}) models failed: {fallback_err}"
+                        "both_models_failed",
+                        primary_model=self.config.model,
+                        fallback_model=self.config.fallback_model,
+                        error=fallback_err,
                     ) from fallback_err
             raise LLMError(
-                f"Bedrock call failed with {self.config.model}: {primary_err}"
+                "bedrock_call_failed", model=self.config.model, error=primary_err
             ) from primary_err
 
     async def complete(
@@ -371,7 +363,7 @@ class BedrockProvider:
             logger.warning("Bedrock model returned text instead of tool call, using as fallback")
             return text
 
-        raise LLMError("Bedrock model returned neither tool call nor content")
+        raise LLMError("bedrock_no_tool_call")
 
     async def complete_agentic(
         self,

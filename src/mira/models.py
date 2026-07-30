@@ -211,6 +211,7 @@ class WalkthroughResult:
         index_was_empty: bool = False,
         dashboard_url: str = "",
         overlaps: list[OverlapFinding] | None = None,
+        failure_notice: str | None = None,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -345,6 +346,18 @@ class WalkthroughResult:
                 f"this repo — Mira will then know about callers, dependents, "
                 f"and cross-repo impact."
             )
+
+        if failure_notice:
+            parts.append("")
+            parts.append("---")
+            parts.append("")
+            parts.append(
+                "<details>\n<summary><b>❌ Review failed</b> — click for details</summary>\n"
+            )
+            parts.append("")
+            parts.append(failure_notice)
+            parts.append("")
+            parts.append("</details>")
 
         parts.append("")
         parts.append("---")

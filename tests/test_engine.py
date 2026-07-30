@@ -22,6 +22,7 @@ from mira.core.engine import (
 from mira.core.threads import _extract_sections
 from mira.llm.provider import LLMProvider
 from mira.models import (
+    WALKTHROUGH_MARKER,
     FileChangeType,
     FileDiff,
     KeyIssue,
@@ -747,6 +748,114 @@ class TestReviewEngine:
                 assert kwargs.get("existing_comments") is None, (
                     f"Chunk {i + 1} should not receive synthetic cross-chunk comments"
                 )
+
+    @pytest.mark.asyncio
+    async def test_review_failure_updates_placeholder_comment(
+        self,
+        mock_provider: AsyncMock,
+        sample_diff_text: str,
+    ):
+        """When _review_diff_internal raises, the placeholder comment is updated
+        with a failure message before the exception propagates."""
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=50)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        # Provider returns a valid placeholder ID so the update path can fire
+        # First call returns None (no existing comment), second returns the new ID
+        mock_provider.find_bot_comment = AsyncMock(side_effect=[None, 42])
+        mock_provider.post_comment = AsyncMock(return_value=42)
+        mock_provider.update_comment = AsyncMock()
+
+        pr_info = PRInfo(
+            title="Test PR",
+            description="",
+            base_branch="main",
+            head_branch="feature",
+            url="https://github.com/test/repo/pull/1",
+            number=1,
+            owner="test",
+            repo="repo",
+        )
+        mock_provider.get_pr_info.return_value = pr_info
+        mock_provider.get_pr_diff.return_value = sample_diff_text
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
+
+        # Patch _review_diff_internal to raise directly — bypasses all internal
+        # exception swallowing, tests the outer handler in review_pr.
+        engine._review_diff_internal = AsyncMock(side_effect=ValueError("LLM broke"))
+
+        with pytest.raises(ValueError, match="LLM broke"):
+            await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # The original exception must propagate
+        # But before it did, the placeholder should have been updated
+        mock_provider.update_comment.assert_called_once()
+        call_args = mock_provider.update_comment.call_args
+        assert call_args[0][1] == 42, "must update the placeholder comment by ID"
+        body = call_args[0][2]
+        assert WALKTHROUGH_MARKER in body
+        assert "Code review" in body
+        assert "ValueError" in body
+
+    @pytest.mark.asyncio
+    async def test_review_failure_re_renders_walkthrough_without_in_progress(
+        self,
+        mock_provider: AsyncMock,
+        sample_diff_text: str,
+    ):
+        """When the walkthrough already landed in-progress, a subsequent
+        review failure must re-render it without the in-progress banner and
+        append the failure notice — not wipe it, not leave it stuck."""
+        llm = MagicMock(spec=LLMProvider)
+        llm.count_tokens = MagicMock(return_value=50)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        mock_provider.find_bot_comment = AsyncMock(side_effect=[None, 42])
+        mock_provider.post_comment = AsyncMock(return_value=42)
+        mock_provider.update_comment = AsyncMock()
+
+        pr_info = PRInfo(
+            title="Test PR",
+            description="",
+            base_branch="main",
+            head_branch="feature",
+            url="https://github.com/test/repo/pull/1",
+            number=1,
+            owner="test",
+            repo="repo",
+        )
+        mock_provider.get_pr_info.return_value = pr_info
+        mock_provider.get_pr_diff.return_value = sample_diff_text
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
+
+        async def _raise_after_walkthrough(*args, **kwargs):
+            cb = kwargs.get("on_walkthrough_ready")
+            wt = WalkthroughResult(summary="Walkthrough summary")
+            if cb is not None:
+                await cb(wt)
+            raise ValueError("LLM broke")
+
+        engine._review_diff_internal = AsyncMock(side_effect=_raise_after_walkthrough)
+
+        with pytest.raises(ValueError, match="LLM broke"):
+            await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # update_comment called twice: once for in-progress, once for failure
+        assert mock_provider.update_comment.call_count == 2
+        # First call: in-progress banner present
+        first_body = mock_provider.update_comment.call_args_list[0][0][2]
+        assert "in progress" in first_body.lower()
+        # Second call: no in-progress banner, walkthrough content preserved,
+        # failure notice appended
+        second_body = mock_provider.update_comment.call_args_list[1][0][2]
+        assert "in progress" not in second_body.lower()
+        assert "Walkthrough summary" in second_body
+        assert "<details>" in second_body
+        assert "Review failed" in second_body
+        assert "ValueError" in second_body
 
 
 class TestDryRun:

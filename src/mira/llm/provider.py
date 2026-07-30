@@ -41,11 +41,7 @@ def _get_api_key(config: LLMConfig, profile: dict | None = None) -> str:
         # Back-compat with pre-`api_key_env` setups.
         key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
     if not key:
-        raise LLMError(
-            f"No API key found. Set {config.api_key_env} (or OPENROUTER_API_KEY / "
-            f'OPENAI_API_KEY) in the environment, or set llm.api_key_env: "" in '
-            f"your config for a local endpoint that needs no auth."
-        )
+        raise LLMError("no_api_key", api_key_env=config.api_key_env)
     return key
 
 
@@ -173,8 +169,8 @@ class LLMProvider:
             )
             if resp.status_code != 200:
                 if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    raise NonRetriableLLMError(f"LLM API error {resp.status_code}: {resp.text}")
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
+                    raise NonRetriableLLMError("api_error", status=resp.status_code, body=resp.text)
+                raise LLMError("api_error", status=resp.status_code, body=resp.text)
             data = resp.json()
 
         content = data["choices"][0]["message"].get("content") or ""
@@ -243,8 +239,8 @@ class LLMProvider:
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             if resp.status_code != 200:
                 if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    raise NonRetriableLLMError(f"LLM API error {resp.status_code}: {resp.text}")
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
+                    raise NonRetriableLLMError("api_error", status=resp.status_code, body=resp.text)
+                raise LLMError("api_error", status=resp.status_code, body=resp.text)
             data = resp.json()
 
         usage = data.get("usage")
@@ -265,7 +261,7 @@ class LLMProvider:
             logger.warning("Model returned content instead of tool call, using content as fallback")
             return content
 
-        raise LLMError("Model returned neither tool call nor content")
+        raise LLMError("no_tool_call")
 
     async def complete(
         self,
@@ -311,11 +307,13 @@ class LLMProvider:
                     )
                 except Exception as fallback_err:
                     raise LLMError(
-                        f"Both primary ({self.config.model}) and fallback "
-                        f"({self.config.fallback_model}) models failed: {fallback_err}"
+                        "both_models_failed",
+                        primary_model=self.config.model,
+                        fallback_model=self.config.fallback_model,
+                        error=fallback_err,
                     ) from fallback_err
             raise LLMError(
-                f"LLM completion failed with {self.config.model}: {primary_err}"
+                "completion_failed", model=self.config.model, error=primary_err
             ) from primary_err
 
     async def _call_llm_agentic(
@@ -350,8 +348,8 @@ class LLMProvider:
             )
             if resp.status_code != 200:
                 if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    raise NonRetriableLLMError(f"LLM API error {resp.status_code}: {resp.text}")
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
+                    raise NonRetriableLLMError("api_error", status=resp.status_code, body=resp.text)
+                raise LLMError("api_error", status=resp.status_code, body=resp.text)
             data = resp.json()
 
         usage = data.get("usage")
@@ -393,11 +391,13 @@ class LLMProvider:
                     )
                 except Exception as fallback_err:
                     raise LLMError(
-                        f"Both primary ({self.config.model}) and fallback "
-                        f"({self.config.fallback_model}) models failed: {fallback_err}"
+                        "both_models_failed",
+                        primary_model=self.config.model,
+                        fallback_model=self.config.fallback_model,
+                        error=fallback_err,
                     ) from fallback_err
             raise LLMError(
-                f"LLM agentic call failed with {self.config.model}: {primary_err}"
+                "agentic_failed", model=self.config.model, error=primary_err
             ) from primary_err
 
     async def complete_with_tools(
@@ -439,11 +439,13 @@ class LLMProvider:
                     )
                 except Exception as fallback_err:
                     raise LLMError(
-                        f"Both primary ({self.config.model}) and fallback "
-                        f"({self.config.fallback_model}) models failed: {fallback_err}"
+                        "both_models_failed",
+                        primary_model=self.config.model,
+                        fallback_model=self.config.fallback_model,
+                        error=fallback_err,
                     ) from fallback_err
             raise LLMError(
-                f"LLM tool-call failed with {self.config.model}: {primary_err}"
+                "tool_call_failed", model=self.config.model, error=primary_err
             ) from primary_err
 
     async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:

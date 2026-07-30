@@ -28,7 +28,7 @@ from mira.core.passes import (
 )
 from mira.core.priority import rank_files
 from mira.core.threads import resolve_verified_threads, short_thread_description
-from mira.exceptions import ResponseParseError
+from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
@@ -417,6 +417,17 @@ class ReviewEngine:
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
 
+    @staticmethod
+    def _format_failure_notice(exc: BaseException) -> str:
+        """Format a user-safe failure notice without model names or internal errors."""
+        message = exc.safe_message if isinstance(exc, MiraError) else type(exc).__name__
+        return (
+            f"The code review failed to complete due to an unexpected error.\n\n"
+            f"**Stage:** Code review\n"
+            f"**Error type:** `{type(exc).__name__}`\n"
+            f"**Message:** {message}"
+        )
+
     async def _detect_overlaps_safe(
         self,
         pr_info: PRInfo,
@@ -546,6 +557,8 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to post walkthrough placeholder: %s", exc)
 
+        _walkthrough_result: list[WalkthroughResult | None] = [None]
+
         async def _on_walkthrough_ready(wt: WalkthroughResult | None) -> None:
             if self.dry_run or wt is None or placeholder_id is None:
                 return
@@ -555,6 +568,7 @@ class ReviewEngine:
                     in_progress=True,
                 )
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
+                _walkthrough_result[0] = wt
             except Exception as exc:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
@@ -673,9 +687,50 @@ class ReviewEngine:
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
             )
-        except BaseException:
+        except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()
+
+            # Await the in-progress walkthrough notification BEFORE updating the
+            # comment. If the walkthrough LLM call resolved but the callback
+            # hasn't run yet, this lets it post the in-progress content and
+            # store the result so we can re-render it below. If it fails or
+            # times out, we suppress and fall back to the bare failure notice.
+            notify_task = getattr(self, "_walkthrough_notify_task", None)
+            if notify_task is not None:
+                with contextlib.suppress(Exception):
+                    await notify_task
+                self._walkthrough_notify_task = None
+
+            # Update placeholder so the user knows the review failed.
+            # If the walkthrough already landed, re-render it without the
+            # in-progress banner and append the failure notice — preserves
+            # walkthrough content while removing the stuck "in progress" state.
+            if placeholder_id is not None:
+                try:
+                    wt = _walkthrough_result[0]
+                    if wt is not None:
+                        failure_body = wt.to_markdown(
+                            bot_name=self.bot_name or "miracodeai",
+                            in_progress=False,
+                            failure_notice=self._format_failure_notice(exc),
+                        )
+                    else:
+                        failure_body = (
+                            f"{WALKTHROUGH_MARKER}\n"
+                            "## Mira PR Walkthrough\n\n"
+                            "---\n\n"
+                            "<details>\n"
+                            "<summary><b>❌ Review failed</b> — click for details</summary>\n\n"
+                            f"{self._format_failure_notice(exc)}\n\n"
+                            "</details>\n"
+                        )
+                    await self.provider.update_comment(pr_info, placeholder_id, failure_body)
+                except Exception as comment_exc:
+                    logger.warning(
+                        "Failed to update placeholder on review failure: %s", comment_exc
+                    )
+
             raise
 
         # The final walkthrough must land after the in-progress one, or it gets
