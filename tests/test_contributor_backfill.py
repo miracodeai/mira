@@ -124,6 +124,43 @@ def test_backfill_sync_is_idempotent(db: AppDatabase) -> None:
     assert sum(d.total for d in days) == 2
 
 
+def test_maybe_wait_for_rate_limit_uses_resources_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PyGithub >=2.7: RateLimitOverview has no .core — read .resources.core."""
+    core = MagicMock(remaining=5000, reset=datetime(2099, 1, 1, tzinfo=UTC))
+    overview = MagicMock(spec=["resources"])
+    overview.resources.core = core
+    # Mimic prod: top-level .core must not exist.
+    del overview.core
+
+    gh = MagicMock()
+    gh.get_rate_limit.return_value = overview
+    slept: list[float] = []
+    monkeypatch.setattr(cb.time, "sleep", slept.append)
+
+    cb._maybe_wait_for_rate_limit(gh)
+    assert slept == []  # budget healthy → no sleep
+
+
+def test_maybe_wait_for_rate_limit_sleeps_when_low(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = MagicMock(remaining=50, reset=datetime(2099, 1, 1, tzinfo=UTC))
+    overview = MagicMock()
+    overview.resources.core = core
+
+    gh = MagicMock()
+    gh.get_rate_limit.return_value = overview
+    slept: list[float] = []
+    monkeypatch.setattr(cb.time, "sleep", slept.append)
+    monkeypatch.setattr(cb.time, "time", lambda: core.reset.timestamp() - 100)
+
+    cb._maybe_wait_for_rate_limit(gh)
+    assert len(slept) == 1
+    assert slept[0] == 105  # 100s to reset + 5s buffer
+
+
 def test_backfill_commits_skips_authorless(db: AppDatabase) -> None:
     linked = MagicMock()
     linked.sha = "sha1"

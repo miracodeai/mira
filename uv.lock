@@ -777,7 +777,7 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'serve'", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.5" },
-    { name = "pygithub", specifier = ">=2.1" },
+    { name = "pygithub", specifier = ">=2.7" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'serve'", specifier = ">=2.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
