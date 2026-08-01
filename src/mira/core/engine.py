@@ -442,7 +442,7 @@ class ReviewEngine:
             if not current_paths:
                 return []
 
-            store = IndexStore.open(pr_info.owner, pr_info.repo)
+            store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
             try:
                 symbols: set[str] = set()
                 for path in current_paths:
@@ -832,7 +832,7 @@ class ReviewEngine:
 
             from mira.models import Severity
 
-            store = IndexStore.open(pr_info.owner, pr_info.repo)
+            store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
             blocker_count = sum(1 for c in result.comments if c.severity == Severity.BLOCKER)
             warning_count = sum(1 for c in result.comments if c.severity == Severity.WARNING)
             suggestion_count = sum(
@@ -1041,7 +1041,7 @@ class ReviewEngine:
             try:
                 pr_info = getattr(self, "_pr_info", None)
                 if pr_info is not None:
-                    store = IndexStore.open(pr_info.owner, pr_info.repo)
+                    store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
                     source_fetcher = None
                     if self.provider and pr_info:
                         from mira.index.context import ProviderSourceFetcher
@@ -1181,7 +1181,9 @@ class ReviewEngine:
         try:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
-                _rules_store = IndexStore.open(pr_info.owner, pr_info.repo)
+                _rules_store = IndexStore.open(
+                    pr_info.owner, pr_info.repo, platform=pr_info.platform
+                )
 
                 learned_rules = _rules_store.get_learned_rules_text()
 
@@ -1351,7 +1353,9 @@ class ReviewEngine:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
                 try:
-                    _pkg_store = IndexStore.open(pr_info.owner, pr_info.repo)
+                    _pkg_store = IndexStore.open(
+                        pr_info.owner, pr_info.repo, platform=pr_info.platform
+                    )
                     try:
                         existing_packages = sorted(
                             {p.name for p in _pkg_store.list_manifest_packages()}
