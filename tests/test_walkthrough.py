@@ -176,6 +176,58 @@ class TestParseWalkthroughResponse:
         result = parse_walkthrough_response(raw)
         assert result.effort is None
 
+    def test_leaked_arg_xml_in_object_fields(self):
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [],
+                "effort": "level</arg_key><arg_value>2",
+                "confidence_score": "score</arg_key><arg_value>4",
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.summary == "Changes"
+        assert result.effort is not None
+        assert result.effort.level == 2
+        assert result.confidence_score is not None
+        assert result.confidence_score.score == 4
+
+    def test_full_arg_xml_fragment_rebuilt(self):
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [],
+                "effort": (
+                    "<arg_key>level</arg_key><arg_value>2</arg_value>"
+                    "<arg_key>label</arg_key><arg_value>Trivial</arg_value>"
+                ),
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.effort is not None
+        assert result.effort.level == 2
+        assert result.effort.label == "Trivial"
+
+    def test_malformed_object_field_dropped(self):
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [],
+                "effort": "some random garbage",
+                "confidence_score": {"score": 1, "label": "x", "reason": "y"},
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.summary == "Changes"
+        assert result.effort is None
+        assert result.confidence_score is not None
+        assert result.confidence_score.score == 1
+
+    def test_trailing_tool_xml_truncated(self):
+        raw = '{"summary": "Changes", "change_groups": []}</parameter></invoke>'
+        result = parse_walkthrough_response(raw)
+        assert result.summary == "Changes"
+
     def test_skips_file_missing_path(self):
         raw = json.dumps(
             {
@@ -222,6 +274,45 @@ class TestParseWalkthroughResponse:
         result = parse_walkthrough_response(raw)
         assert len(result.change_groups) == 1
         assert result.change_groups[0].label == "Core"
+
+    def test_salvage_failure_defaults_effort(self):
+        """Leaked XML fragment that fails sub-model validation → effort drops to None (P3)."""
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [],
+                "effort": ("level</arg_key><arg_value>high"),
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.summary == "Changes"
+        assert result.effort is None
+
+    def test_salvage_failure_defaults_confidence_score(self):
+        """Leaked XML fragment that fails sub-model validation → confidence_score drops to None (P3)."""
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [],
+                "confidence_score": ("score</arg_key><arg_value>uncertain"),
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.summary == "Changes"
+        assert result.confidence_score is None
+
+    def test_malformed_dict_field_dropped(self):
+        """Dict-form effort with invalid value fails LLMWalkthroughEffort validation → dropped to None."""
+        raw = json.dumps(
+            {
+                "summary": "Changes",
+                "change_groups": [],
+                "effort": {"level": 3, "label": "Moderate", "minutes": "not_an_int"},
+            }
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.summary == "Changes"
+        assert result.effort is None
 
 
 class TestConvertToWalkthroughResult:
