@@ -61,11 +61,18 @@ async def _register_and_index_repo(platform: str, env_token: str, body: BaseMode
         store = None
         try:
             store = IndexStore.open(owner, repo, platform=platform)
-            count = await index_repo(
+            await index_repo(
                 owner=owner, repo=repo, store=store, fetcher=make_fetcher(platform, token)
             )
+            # index_repo returns files re-indexed this run, not the store total.
+            total_files = len(store.all_paths())
             _api._app_db.set_repo_status(
-                owner, repo, "ready", files_indexed=count, bump_last_indexed=True, platform=platform
+                owner,
+                repo,
+                "ready",
+                files_indexed=total_files,
+                bump_last_indexed=True,
+                platform=platform,
             )
         except EmptyRepoError as empty:
             _api._app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)

@@ -531,11 +531,14 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
             )
             # Real indexing run finished — bump last_indexed_at so the
             # dashboard's "Indexed N ago" reflects this completion.
+            # `count` is files re-indexed *this run* (not the store total), so
+            # read the store for the true total to keep the repos list in sync.
+            total_files = len(store.all_paths())
             _api._app_db.set_repo_status(
                 owner,
                 repo,
                 "ready",
-                files_indexed=count,
+                files_indexed=total_files,
                 bump_last_indexed=True,
                 platform=platform,
             )

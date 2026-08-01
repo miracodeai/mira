@@ -530,12 +530,15 @@ async def _run_initial_indexing(default_mode: str) -> None:
                 llm=llm,
                 full=(repo_record.index_mode == "full"),
             )
+            # `count` is files re-indexed this run, not the store total.
+            # Read the true total before closing to keep the DB in sync.
+            total_files = len(store.all_paths())
             store.close()
             _app_db.set_repo_status(
                 owner,
                 repo,
                 "ready",
-                files_indexed=count,
+                files_indexed=total_files,
                 bump_last_indexed=True,
                 platform=platform,
             )
