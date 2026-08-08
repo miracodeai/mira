@@ -52,6 +52,11 @@ class LLMConfig(BaseModel):
     # Provider selection. "openai" uses any OpenAI-compatible endpoint (default).
     # "bedrock" uses AWS Bedrock Converse API directly (requires boto3).
     provider: str = "openai"
+    # Protocol dialect for the OpenAI-compatible endpoint: "chat"
+    # (Chat Completions, default) or "responses" (OpenAI Responses API).
+    # Only meaningful when `provider` is "openai" — bedrock ignores it
+    # (create_llm checks provider first).
+    api_style: str = "chat"
     # Endpoint configuration. Defaults to OpenRouter but any OpenAI-compatible
     # chat-completions endpoint works — vLLM, Ollama, LiteLLM proxy, LocalAI,
     # llama.cpp server, Together, Fireworks, Groq, etc. Set api_key_env to ""

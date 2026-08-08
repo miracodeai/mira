@@ -39,6 +39,8 @@ export function SettingsPage() {
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
   const [thinkingMode, setThinkingMode] = useState("off")
   const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
+  const [apiStyle, setApiStyle] = useState("chat")
+  const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
 
@@ -74,6 +76,8 @@ export function SettingsPage() {
       setReviewOptions(m.review_options)
       setThinkingMode(m.review_thinking_mode)
       setThinkingOptions(m.thinking_options)
+      setApiStyle(m.api_style ?? "chat")
+      setApiStyleOptions(m.api_style_options ?? [])
     })
     api.getGlobalSettings().then((s) => {
       setEffective(
@@ -99,7 +103,7 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels(indexingModel, reviewModel, thinkingMode)
+    await api.saveModels(indexingModel, reviewModel, thinkingMode, apiStyle)
     setSavingModels(false)
     setModelsSaved(true)
     setTimeout(() => setModelsSaved(false), 2000)
@@ -355,7 +359,9 @@ export function SettingsPage() {
               </p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Review Thinking Mode</label>
+              <label className="text-sm font-medium">
+                Review Thinking Mode
+              </label>
               <Select value={thinkingMode} onValueChange={setThinkingMode}>
                 <SelectTrigger>
                   <SelectValue />
@@ -371,10 +377,32 @@ export function SettingsPage() {
               <p className="text-xs text-muted-foreground">
                 Extended reasoning budget for reviews — improves depth on
                 capable models at the cost of latency and tokens. Works on
-                OpenRouter and Bedrock (Claude); on other endpoints it's
-                skipped automatically when unsupported.
+                OpenRouter and Bedrock (Claude); on other endpoints it's skipped
+                automatically when unsupported.
               </p>
             </div>
+            {backend !== "bedrock" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">API Protocol</label>
+                <Select value={apiStyle} onValueChange={setApiStyle}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {apiStyleOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Protocol used to talk to this endpoint. Responses API requires
+                  a server exposing /responses (OpenAI and compatible proxies);
+                  Chat Completions works everywhere.
+                </p>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <Button size="sm" onClick={saveModels} disabled={savingModels}>
                 {savingModels && (

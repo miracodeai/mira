@@ -18,18 +18,30 @@ export const settingsApi = {
       }[]
       review_options: { value: string; label: string; recommended?: boolean }[]
       review_thinking_mode: string
-      thinking_options: { value: string; label: string; recommended?: boolean }[]
+      thinking_options: {
+        value: string
+        label: string
+        recommended?: boolean
+      }[]
+      api_style: string
+      api_style_options: {
+        value: string
+        label: string
+        recommended?: boolean
+      }[]
     }>("/api/settings/models"),
 
   saveModels: (
     indexing_model: string,
     review_model: string,
     review_thinking_mode: string = "off",
+    api_style: string = "chat"
   ) =>
     putJson<{ ok: boolean }>("/api/settings/models", {
       indexing_model,
       review_model,
       review_thinking_mode,
+      api_style,
     }),
 
   getCostEstimate: () =>
