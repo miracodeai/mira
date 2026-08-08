@@ -368,12 +368,17 @@ class ModelsResponse(BaseModel):
     # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high").
     review_thinking_mode: str
     thinking_options: list[ModelOption]
+    # Protocol dialect for the OpenAI-compatible endpoint ("chat"/"responses"),
+    # resolved DB → config → default. Mirrors review_thinking_mode.
+    api_style: str
+    api_style_options: list[ModelOption]
 
 
 class ModelsUpdate(BaseModel):
     indexing_model: str
     review_model: str
     review_thinking_mode: str = "off"
+    api_style: str = "chat"
 
 
 class GlobalSettingsResponse(BaseModel):

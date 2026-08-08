@@ -32,6 +32,21 @@ THINKING_MODES: list[dict[str, str]] = [
 ]
 THINKING_MODE_VALUES = {m["value"] for m in THINKING_MODES}
 
+# API-protocol options for the Models page. Single source for the dropdown
+# and validation, mirroring THINKING_MODES.
+API_STYLES: list[dict[str, str]] = [
+    {"value": "chat", "label": "Chat Completions"},
+    {"value": "responses", "label": "Responses API"},
+]
+API_STYLE_VALUES = {m["value"] for m in API_STYLES}
+
+
+def resolve_api_style(config: LLMConfig, db_value: str | None = None) -> str:
+    """Resolve the API protocol: DB → config.api_style → "chat"."""
+    if db_value and db_value in API_STYLE_VALUES:
+        return db_value
+    return config.api_style if config.api_style in API_STYLE_VALUES else "chat"
+
 
 def estimate_indexing_cost(file_count: int, model: str) -> dict:
     """Estimate cost of indexing N files with the given model.
@@ -108,6 +123,7 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     """
     db_model: str | None = None
     db_thinking: str | None = None
+    db_style: str | None = None
     try:
         from mira.dashboard.api import _app_db
 
@@ -117,11 +133,13 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
             elif purpose == "review":
                 db_model = _app_db.get_setting("review_model")
                 db_thinking = _app_db.get_setting("review_thinking_mode")
+            db_style = _app_db.get_setting("api_style")
     except Exception:
         pass  # DB not available — resolve from config fields alone
 
     # Thinking mode only applies to reviews; other purposes leave it off.
     thinking_mode: str | None = None
+    resolved_style = resolve_api_style(base, db_style)
     if purpose == "indexing":
         resolved = get_indexing_model(base, db_model)
         config_model = base.indexing_model
@@ -130,8 +148,8 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
         config_model = base.review_model
         thinking_mode = get_review_thinking_mode(base, db_thinking)
     else:
-        return base.model_copy(update={"reasoning_effort": None})
+        return base.model_copy(update={"reasoning_effort": None, "api_style": resolved_style})
 
     source = "dashboard setting" if db_model else ("mira.yaml" if config_model else "default")
     logger.info("%s model: %s (source: %s)", purpose.capitalize(), resolved, source)
-    return base.model_copy(update={"model": resolved, "reasoning_effort": thinking_mode})
+    return base.model_copy(update={"model": resolved, "reasoning_effort": thinking_mode, "api_style": resolved_style})
