@@ -152,4 +152,6 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
 
     source = "dashboard setting" if db_model else ("mira.yaml" if config_model else "default")
     logger.info("%s model: %s (source: %s)", purpose.capitalize(), resolved, source)
-    return base.model_copy(update={"model": resolved, "reasoning_effort": thinking_mode, "api_style": resolved_style})
+    return base.model_copy(
+        update={"model": resolved, "reasoning_effort": thinking_mode, "api_style": resolved_style}
+    )

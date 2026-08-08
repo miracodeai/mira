@@ -52,9 +52,7 @@ def _make_resp_tool(name: str, args: str, call_id: str = "call_1") -> dict:
     }
 
 
-def _make_resp_text_and_tool(
-    text: str, name: str, args: str, call_id: str = "call_1"
-) -> dict:
+def _make_resp_text_and_tool(text: str, name: str, args: str, call_id: str = "call_1") -> dict:
     return {
         "output": [
             {
@@ -97,6 +95,10 @@ def _mock_client(resp, extra_posts=None):
 
 @pytest.fixture
 def config() -> LLMConfig:
+    # api_key_env="OPENAI_API_KEY" is intentional: the module-level
+    # ``os.environ.setdefault("OPENROUTER_API_KEY", ...)`` means the
+    # fixture exercises ``_get_api_key``'s back-compat fallback chain
+    # (config env var -> profile override -> OPENROUTER_API_KEY fallback).
     return LLMConfig(
         model="gpt-4o",
         base_url="https://api.openai.com/v1",
@@ -151,9 +153,7 @@ class TestComplete:
         mock_client = _mock_client(mock_resp)
 
         with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
-            await provider.complete(
-                [{"role": "user", "content": "json"}], json_mode=True
-            )
+            await provider.complete([{"role": "user", "content": "json"}], json_mode=True)
 
         body = mock_client.post.call_args[1]["json"]
         assert "input" in body
@@ -181,26 +181,22 @@ class TestComplete:
     @pytest.mark.asyncio
     async def test_non_retriable_error(self, config: LLMConfig):
         provider = ResponsesProvider(config)
-        mock_resp = _mock_httpx_response(
-            {"error": {"message": "bad model"}}, 400
-        )
+        mock_resp = _mock_httpx_response({"error": {"message": "bad model"}}, 400)
         mock_client = _mock_client(mock_resp)
 
-        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
-            with pytest.raises(NonRetriableLLMError):
-                await provider.complete([{"role": "user", "content": "test"}])
+        with (patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client),
+                pytest.raises(NonRetriableLLMError)):
+            await provider.complete([{"role": "user", "content": "test"}])
 
     @pytest.mark.asyncio
     async def test_retriable_error(self, config: LLMConfig):
         provider = ResponsesProvider(config)
-        mock_resp = _mock_httpx_response(
-            {"error": {"message": "rate limit"}}, 500
-        )
+        mock_resp = _mock_httpx_response({"error": {"message": "rate limit"}}, 500)
         mock_client = _mock_client(mock_resp)
 
-        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
-            with pytest.raises(LLMError):
-                await provider.complete([{"role": "user", "content": "test"}])
+        with (patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client),
+                pytest.raises(LLMError)):
+            await provider.complete([{"role": "user", "content": "test"}])
 
 
 class TestCompleteWithTools:
@@ -239,7 +235,7 @@ class TestCompleteWithTools:
     @pytest.mark.asyncio
     async def test_forced_tool_choice(self, config: LLMConfig):
         provider = ResponsesProvider(config)
-        mock_data = _make_resp_tool("submit_review", '{}')
+        mock_data = _make_resp_tool("submit_review", "{}")
         mock_resp = _mock_httpx_response(mock_data, 200)
         mock_client = _mock_client(mock_resp)
 
@@ -254,9 +250,7 @@ class TestCompleteWithTools:
             }
         ]
         with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
-            await provider.complete_with_tools(
-                [{"role": "user", "content": "review"}], tools=tools
-            )
+            await provider.complete_with_tools([{"role": "user", "content": "review"}], tools=tools)
 
         body = mock_client.post.call_args[1]["json"]
         assert body["tool_choice"] == {
@@ -268,9 +262,7 @@ class TestCompleteWithTools:
     async def test_tool_choice_400_fallback(self, config: LLMConfig):
         provider = ResponsesProvider(config)
 
-        err_resp = _mock_httpx_response(
-            {"error": "tool_choice not supported"}, 400
-        )
+        err_resp = _mock_httpx_response({"error": "tool_choice not supported"}, 400)
         ok_data = _make_resp_tool("submit_review", '{"ok":true}')
         ok_resp = _mock_httpx_response(ok_data, 200)
 
@@ -301,9 +293,7 @@ class TestCompleteAgentic:
     @pytest.mark.asyncio
     async def test_returns_chat_shaped_dict(self, config: LLMConfig):
         provider = ResponsesProvider(config)
-        mock_data = _make_resp_text_and_tool(
-            "let me check", "submit_review", '{"comments":[]}'
-        )
+        mock_data = _make_resp_text_and_tool("let me check", "submit_review", '{"comments":[]}')
         mock_resp = _mock_httpx_response(mock_data, 200)
         mock_client = _mock_client(mock_resp)
 
@@ -397,17 +387,13 @@ class TestCompleteAgentic:
         body = mock_client.post.call_args[1]["json"]
         input_items = body["input"]
 
-        # Find function_call item
         func_items = [i for i in input_items if i.get("type") == "function_call"]
         assert len(func_items) == 1
         func = func_items[0]
         assert func["name"] == "read_file"
         assert func["call_id"] == "call_1"
 
-        # Find function_call_output item
-        output_items = [
-            i for i in input_items if i.get("type") == "function_call_output"
-        ]
+        output_items = [i for i in input_items if i.get("type") == "function_call_output"]
         assert len(output_items) == 1
         assert output_items[0]["call_id"] == "call_1"
         assert output_items[0]["output"] == "print('hello')"
@@ -427,7 +413,149 @@ class TestCreateLlmDispatch:
     def test_bedrock_ignores_api_style(self):
         from mira.llm.bedrock import BedrockProvider
 
-        provider = create_llm(
-            LLMConfig(provider="bedrock", api_style="responses")
-        )
+        provider = create_llm(LLMConfig(provider="bedrock", api_style="responses"))
         assert isinstance(provider, BedrockProvider)
+
+
+class TestReviewAndWalkthrough:
+    @pytest.mark.asyncio
+    async def test_review_calls_complete_with_tools(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_tool("submit_review", '{"comments":[]}')
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            result = await provider.review([{"role": "user", "content": "review"}])
+
+        assert result == '{"comments":[]}'
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_calls_complete_with_tools(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_tool("submit_walkthrough", '{"summary":"x","file_changes":[]}')
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            result = await provider.walkthrough([{"role": "user", "content": "wt"}])
+
+        assert result == '{"summary":"x","file_changes":[]}'
+
+
+class TestCountTokens:
+    def test_estimates_tokens(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        assert provider.count_tokens("hello world") == 2  # 11 chars // 4
+        assert provider.count_tokens("") == 0
+        assert provider.count_tokens("a" * 100) == 25
+
+
+class TestUsage:
+    def test_usage_before_calls(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        usage = provider.usage
+        assert usage == {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_usage_accumulates(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_text("result", _make_resp_usage(100, 50))
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete([{"role": "user", "content": "test"}])
+
+        usage = provider.usage
+        assert usage["prompt_tokens"] == 100
+        assert usage["completion_tokens"] == 50
+        assert usage["total_tokens"] == 150
+
+
+class TestApplyReasoning:
+    @pytest.mark.asyncio
+    async def test_reasoning_rejection_records_fallback(self, config: LLMConfig):
+        """When a model rejects reasoning effort, ResponsesProvider records
+        it so subsequent calls skip reasoning for that model."""
+        config.reasoning_effort = "high"
+        provider = ResponsesProvider(config)
+
+        err_resp = _mock_httpx_response({"error": "reasoning not supported"}, 400)
+        ok_data = _make_resp_text("done", _make_resp_usage(10, 10))
+        ok_resp = _mock_httpx_response(ok_data, 200)
+
+        mock_client = _mock_client(None, extra_posts=[err_resp, ok_resp])
+
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "do_thing", "parameters": {"type": "object"}},
+            }
+        ]
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete_agentic([{"role": "user", "content": "test"}], tools=tools)
+
+        # Model should be recorded in _no_reasoning after rejection
+        assert "gpt-4o" in provider._no_reasoning
+        assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_apply_reasoning_adds_reasoning_field(self, config: LLMConfig):
+        """_apply_reasoning adds a reasoning field to the body when effort is set."""
+        config.reasoning_effort = "high"
+        provider = ResponsesProvider(config)
+        body = {"model": "gpt-4o"}
+        provider._apply_reasoning(body)
+        assert "reasoning" in body
+        assert body["reasoning"] == {"effort": "high"}
+
+    @pytest.mark.asyncio
+    async def test_apply_reasoning_skips_when_off(self, config: LLMConfig):
+        """_apply_reasoning is a no-op when reasoning effort is off or None."""
+        provider = ResponsesProvider(config)
+        body = {"model": "gpt-4o", "temperature": 0.1}
+        provider._apply_reasoning(body)
+        assert "reasoning" not in body
+        # Temperature should NOT be popped when reasoning is off
+        assert "temperature" in body
+
+
+class TestResponseMessage:
+    def test_tool_calls_only_yields_none_content(self):
+        from mira.llm.responses import _response_message
+
+        data = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "call_1",
+                    "call_id": "call_1",
+                    "name": "submit_review",
+                    "arguments": "{}",
+                }
+            ]
+        }
+        result = _response_message(data)
+        assert result["role"] == "assistant"
+        assert result["content"] is None
+        assert len(result["tool_calls"]) == 1
+
+
+class TestOutputText:
+    def test_fallback_to_output_text(self):
+        from mira.llm.responses import _output_text
+
+        # When no message item exists, fallback to top-level output_text
+        data = {"output_text": "fallback text"}
+        assert _output_text(data) == "fallback text"
+
+    def test_empty_output_returns_empty_string(self):
+        from mira.llm.responses import _output_text
+
+        data = {"output": []}
+        assert _output_text(data) == ""

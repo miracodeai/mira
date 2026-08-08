@@ -163,9 +163,7 @@ async def get_models() -> ModelsResponse:
     thinking = get_review_thinking_mode(
         config.llm, _api._app_db.get_setting("review_thinking_mode")
     )
-    api_style = resolve_api_style(
-        config.llm, _api._app_db.get_setting("api_style")
-    )
+    api_style = resolve_api_style(config.llm, _api._app_db.get_setting("api_style"))
 
     backend = active_backend(config.llm)
     catalog = await fetch_catalog(config.llm)
@@ -257,6 +255,11 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
             status_code=400,
             detail=f"{body.review_thinking_mode!r} is not a valid thinking mode.",
         )
+    if body.api_style not in API_STYLE_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{body.api_style!r} is not a valid API style.",
+        )
     # "" clears the override so mira.yaml is authoritative again. Any other id
     # is stored as-is — the dashboard accepts the same free-form model ids as
     # mira.yaml (the dropdown still guides toward registry models), and the
@@ -272,12 +275,7 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     else:
         _api._app_db.set_setting("review_thinking_mode", "")
 
-    if body.api_style not in API_STYLE_VALUES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.api_style!r} is not a valid API style.",
-        )
-    # Clear "chat" (default) to "" so a stored value never shadows mira.yaml.
+    # Clear "chat" (default) to "" so a stored value never shadows mira.yaml config overrides.
     if body.api_style and body.api_style != "chat":
         _api._app_db.set_setting("api_style", body.api_style)
     else:

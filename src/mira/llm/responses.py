@@ -13,18 +13,10 @@ import logging
 from typing import ClassVar
 
 import httpx
-from tenacity import (
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from mira.config import LLMConfig
-from mira.exceptions import LLMError, NonRetriableLLMError
-from mira.llm import provider_profiles as profiles
-from mira.llm.provider import _get_api_key, _retriable, _strip_model_prefix
-from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
+from mira.exceptions import LLMError
+from mira.llm.base import OpenAICompatibleProvider, _strip_model_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +53,7 @@ def _responses_input(messages: list[dict]) -> list[dict]:
             if not content and not tool_calls:
                 continue  # skip empty assistant
             if content:
-                items.append(
-                    {"type": "message", "role": "assistant", "content": content}
-                )
+                items.append({"type": "message", "role": "assistant", "content": content})
             for tc in tool_calls:
                 args = tc.get("function", {}).get("arguments", "{}")
                 if isinstance(args, dict):
@@ -96,8 +86,8 @@ def _responses_input(messages: list[dict]) -> list[dict]:
 def _responses_tool(chat_tool: dict) -> dict:
     """Flatten {"type":"function","function":{...}} to the Responses shape
     {"type":"function","name","description","parameters"}."""
-    f = chat_tool["function"]
-    out: dict = {"type": "function", "name": f["name"]}
+    f = chat_tool.get("function", {})
+    out: dict = {"type": "function", "name": f.get("name", "")}
     if f.get("description"):
         out["description"] = f["description"]
     if f.get("parameters"):
@@ -162,63 +152,22 @@ def _response_message(data: dict) -> dict:
 # ── Provider class ──────────────────────────────────────────────────
 
 
-class ResponsesProvider:
+class ResponsesProvider(OpenAICompatibleProvider):
     """OpenAI Responses API provider ({base_url}/responses).
 
     Same OpenAI-compatible endpoint/auth/model ids as the chat provider, but
-    speaks the /responses protocol. Presents the same chat-shaped conversation
-    contract to callers.
+    speaks the /responses protocol. Inherits protocol-agnostic infrastructure
+    from :class:`OpenAICompatibleProvider`.
     """
 
     supports_json_mode: ClassVar[bool] = True
     supports_tool_calling: ClassVar[bool] = True
 
     def __init__(self, config: LLMConfig) -> None:
-        self.config = config
-        self.profile = profiles.resolve(config.base_url)
-        self.total_prompt_tokens = 0
-        self.total_completion_tokens = 0
-        self._no_forced_tool_choice: set[str] = set()
-        self._no_reasoning: set[str] = set()
+        super().__init__(config)
         self._url = f"{config.base_url.rstrip('/')}/responses"
 
-        self._retry = retry(
-            stop=stop_after_attempt(config.max_retries),
-            wait=wait_exponential(
-                multiplier=1,
-                min=config.retry_min_wait,
-                max=config.retry_max_wait,
-            ),
-            retry=retry_if_exception(_retriable),
-            reraise=True,
-        )
-        self._call_llm = self._retry(self._call_llm)
-        self._call_llm_with_tools = self._retry(self._call_llm_with_tools)
-        self._call_llm_agentic = self._retry(self._call_llm_agentic)
-
-    def _build_headers(self) -> dict[str, str]:
-        """Build request headers: Content-Type, optional Bearer auth, and any
-        provider-specific extras from the profile."""
-        if hasattr(self, "_cached_headers"):
-            return dict(self._cached_headers)
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        key = _get_api_key(self.config, self.profile)
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        headers.update(self.profile.get("extra_headers", {}))
-        self._cached_headers = headers
-        return dict(headers)
-
-    def _apply_reasoning(self, body: dict) -> None:
-        """Enable extended thinking when a reasoning effort is configured."""
-        effort = self.config.reasoning_effort
-        if not effort or effort == "off":
-            return
-        if body.get("model") in self._no_reasoning:
-            return
-        effort = self.profile.get("reasoning_effort_map", {}).get(effort, effort)
-        body["reasoning"] = {"effort": effort}
-        body.pop("temperature", None)
+    # ── Overrides ────────────────────────────────────────────────────
 
     def _account_usage(self, data: dict) -> None:
         """Accumulate token counts from Responses API usage.
@@ -231,7 +180,7 @@ class ResponsesProvider:
             self.total_prompt_tokens += usage.get("input_tokens", 0)
             self.total_completion_tokens += usage.get("output_tokens", 0)
 
-    # ── Internal LLM calls (retry-decorated) ────────────────────────
+    # ── Internal LLM calls (retry-decorated by base class) ──────────
 
     async def _call_llm(
         self,
@@ -258,10 +207,7 @@ class ResponsesProvider:
                 headers=self._build_headers(),
                 json=body,
             )
-            if resp.status_code != 200:
-                if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    raise NonRetriableLLMError(f"LLM API error {resp.status_code}: {resp.text}")
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
+            self._handle_error(resp)
             data = resp.json()
 
         self._account_usage(data)
@@ -280,6 +226,8 @@ class ResponsesProvider:
         tool arguments as the JSON response.
         """
         api_model = _strip_model_prefix(model, self.config.base_url)
+        if not tools:
+            raise LLMError("tools list must not be empty")
         forced_choice: dict | str = {
             "type": "function",
             "name": tools[0]["function"]["name"],
@@ -305,30 +253,19 @@ class ResponsesProvider:
                 and body["tool_choice"] != "auto"
                 and "tool_choice" in resp.text.lower()
             ):
-                logger.info(
-                    "Model %s rejected forced tool_choice; retrying with auto", api_model
-                )
+                logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
                 self._no_forced_tool_choice.add(api_model)
                 body["tool_choice"] = "auto"
-                resp = await client.post(
-                    self._url, headers=self._build_headers(), json=body
-                )
+                resp = await client.post(self._url, headers=self._build_headers(), json=body)
             if resp.status_code == 400 and "reasoning" in body and "reasoning" in resp.text.lower():
-                logger.info(
-                    "Model %s rejected reasoning effort; retrying without it", api_model
-                )
+                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
                 self._no_reasoning.add(api_model)
                 body.pop("reasoning", None)
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
-                resp = await client.post(
-                    self._url, headers=self._build_headers(), json=body
-                )
-            if resp.status_code != 200:
-                if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    raise NonRetriableLLMError(f"LLM API error {resp.status_code}: {resp.text}")
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
+                resp = await client.post(self._url, headers=self._build_headers(), json=body)
+            self._handle_error(resp)
             data = resp.json()
 
         self._account_usage(data)
@@ -342,9 +279,7 @@ class ResponsesProvider:
         # Fallback: text content
         text = _output_text(data)
         if text:
-            logger.warning(
-                "Model returned content instead of tool call, using content as fallback"
-            )
+            logger.warning("Model returned content instead of tool call, using content as fallback")
             return text
 
         raise LLMError("Model returned neither tool call nor content")
@@ -361,6 +296,8 @@ class ResponsesProvider:
         Returns the full assistant message (with ``tool_calls`` and ``content``)
         so the caller can dispatch and continue the conversation.
         """
+        if not tools:
+            raise LLMError("tools list must not be empty")
         body: dict = {
             "model": _strip_model_prefix(model, self.config.base_url),
             "input": _responses_input(messages),
@@ -379,167 +316,15 @@ class ResponsesProvider:
             )
             if resp.status_code == 400 and "reasoning" in body and "reasoning" in resp.text.lower():
                 api_model = _strip_model_prefix(model, self.config.base_url)
-                logger.info(
-                    "Model %s rejected reasoning effort; retrying without it", api_model
-                )
+                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
                 self._no_reasoning.add(api_model)
                 body.pop("reasoning", None)
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
-                resp = await client.post(
-                    self._url, headers=self._build_headers(), json=body
-                )
-            if resp.status_code != 200:
-                if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    raise NonRetriableLLMError(f"LLM API error {resp.status_code}: {resp.text}")
-                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
+                resp = await client.post(self._url, headers=self._build_headers(), json=body)
+            self._handle_error(resp)
             data = resp.json()
 
         self._account_usage(data)
         return _response_message(data)
-
-    # ── Public API (matches LLMProviderProtocol) ─────────────────────
-
-    async def complete(
-        self,
-        messages: list[dict[str, str]],
-        json_mode: bool = True,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> str:
-        """Complete a prompt using JSON mode, with fallback model support."""
-        try:
-            return await self._call_llm(
-                self.config.model,
-                messages,
-                json_mode,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except NonRetriableLLMError:
-            raise
-        except Exception as primary_err:
-            if self.config.fallback_model:
-                logger.warning(
-                    "Primary model %s failed (%s), trying fallback %s",
-                    self.config.model,
-                    primary_err,
-                    self.config.fallback_model,
-                )
-                try:
-                    return await self._call_llm(
-                        self.config.fallback_model,
-                        messages,
-                        json_mode,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                except Exception as fallback_err:
-                    raise LLMError(
-                        f"Both primary ({self.config.model}) and fallback "
-                        f"({self.config.fallback_model}) models failed: {fallback_err}"
-                    ) from fallback_err
-            raise LLMError(
-                f"LLM completion failed with {self.config.model}: {primary_err}"
-            ) from primary_err
-
-    async def complete_with_tools(
-        self,
-        messages: list[dict[str, str]],
-        tools: list[dict],
-        temperature: float | None = None,
-    ) -> str:
-        """Complete a prompt using tool calling for structured output."""
-        try:
-            return await self._call_llm_with_tools(
-                self.config.model, messages, tools, temperature=temperature
-            )
-        except NonRetriableLLMError:
-            raise
-        except Exception as primary_err:
-            if self.config.fallback_model:
-                logger.warning(
-                    "Primary model %s failed (%s), trying fallback %s",
-                    self.config.model,
-                    primary_err,
-                    self.config.fallback_model,
-                )
-                try:
-                    return await self._call_llm_with_tools(
-                        self.config.fallback_model,
-                        messages,
-                        tools,
-                        temperature=temperature,
-                    )
-                except Exception as fallback_err:
-                    raise LLMError(
-                        f"Both primary ({self.config.model}) and fallback "
-                        f"({self.config.fallback_model}) models failed: {fallback_err}"
-                    ) from fallback_err
-            raise LLMError(
-                f"LLM tool-call failed with {self.config.model}: {primary_err}"
-            ) from primary_err
-
-    async def complete_agentic(
-        self,
-        messages: list,
-        tools: list[dict],
-        temperature: float | None = None,
-    ) -> dict:
-        """Single hop of an agentic loop. Returns the assistant message dict."""
-        try:
-            return await self._call_llm_agentic(
-                self.config.model, messages, tools, temperature=temperature
-            )
-        except NonRetriableLLMError:
-            raise
-        except Exception as primary_err:
-            if self.config.fallback_model:
-                logger.warning(
-                    "Primary model %s failed (%s), trying fallback %s",
-                    self.config.model,
-                    primary_err,
-                    self.config.fallback_model,
-                )
-                try:
-                    return await self._call_llm_agentic(
-                        self.config.fallback_model,
-                        messages,
-                        tools,
-                        temperature=temperature,
-                    )
-                except Exception as fallback_err:
-                    raise LLMError(
-                        f"Both primary ({self.config.model}) and fallback "
-                        f"({self.config.fallback_model}) models failed: {fallback_err}"
-                    ) from fallback_err
-            raise LLMError(
-                f"LLM agentic call failed with {self.config.model}: {primary_err}"
-            ) from primary_err
-
-    async def review(
-        self, messages: list[dict[str, str]], temperature: float | None = None
-    ) -> str:
-        """Submit a review using tool calling."""
-        return await self.complete_with_tools(
-            messages, tools=[SUBMIT_REVIEW_TOOL], temperature=temperature
-        )
-
-    async def walkthrough(self, messages: list[dict[str, str]]) -> str:
-        """Submit a walkthrough using tool calling."""
-        return await self.complete_with_tools(
-            messages, tools=[SUBMIT_WALKTHROUGH_TOOL]
-        )
-
-    def count_tokens(self, text: str) -> int:
-        """Estimate token count. Uses ~4 chars per token heuristic."""
-        return len(text) // 4
-
-    @property
-    def usage(self) -> dict[str, int]:
-        return {
-            "prompt_tokens": self.total_prompt_tokens,
-            "completion_tokens": self.total_completion_tokens,
-            "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
-        }

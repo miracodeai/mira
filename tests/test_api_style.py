@@ -21,7 +21,7 @@ from mira.dashboard.models_config import (
     llm_config_for,
     resolve_api_style,
 )
-from mira.dashboard.routers.admin import set_models
+from mira.dashboard.routers.admin import get_models, set_models
 
 
 def _admin_req():
@@ -127,9 +127,7 @@ class TestSetModelsApiStyle:
         )
         assert in_memory_db.get_setting("api_style") == ""
 
-    def test_default_clears_and_does_not_shadow_config(
-        self, in_memory_db: AppDatabase
-    ):
+    def test_default_clears_and_does_not_shadow_config(self, in_memory_db: AppDatabase):
         # Save "chat" (default) → should clear the DB entry
         set_models(
             ModelsUpdate(indexing_model="gpt-4o", review_model="gpt-4o"),
@@ -159,3 +157,14 @@ class TestSetModelsApiStyle:
     def test_api_style_values_are_complete(self):
         assert "chat" in API_STYLE_VALUES
         assert "responses" in API_STYLE_VALUES
+
+
+class TestGetModelsEndpoint:
+    @pytest.mark.asyncio
+    async def test_api_style_fields_present_in_response(self, in_memory_db: AppDatabase):
+        """GET /api/settings/models response must include api_style fields."""
+        result = await get_models()
+        assert hasattr(result, "api_style")
+        assert hasattr(result, "api_style_options")
+        assert result.api_style == "chat"  # default
+        assert len(result.api_style_options) >= 2
