@@ -107,6 +107,20 @@ CREATE TABLE IF NOT EXISTS pr_review_progress (
     PRIMARY KEY (platform, owner, repo, pr_number)
 );
 
+-- A renewable lease prevents two webhook workers from reviewing the same PR
+-- at the same time. The token makes refresh/release ownership-safe, while the
+-- expiry lets another worker recover the claim after a crash.
+CREATE TABLE IF NOT EXISTS review_claims (
+    platform TEXT NOT NULL DEFAULT 'github',
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    claim_token TEXT NOT NULL,
+    claimed_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    PRIMARY KEY (platform, owner, repo, pr_number)
+);
+
 -- ── Contributor analytics ──
 -- People who contribute to indexed repos, keyed provider-agnostically so a
 -- future non-GitHub provider slots in without a schema change.
@@ -272,6 +286,17 @@ CREATE TABLE IF NOT EXISTS pr_review_progress (
     chunk_index INTEGER NOT NULL DEFAULT 0,
     last_reviewed_sha TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (platform, owner, repo, pr_number)
+);
+
+CREATE TABLE IF NOT EXISTS review_claims (
+    platform TEXT NOT NULL DEFAULT 'github',
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    claim_token TEXT NOT NULL,
+    claimed_at DOUBLE PRECISION NOT NULL,
+    expires_at DOUBLE PRECISION NOT NULL,
     PRIMARY KEY (platform, owner, repo, pr_number)
 );
 
@@ -491,6 +516,7 @@ class AppDatabase:
         self._admin_password = admin_password
         self._pg_conn = None
         self._pg_lock = threading.Lock()
+        self._sqlite_lock = threading.Lock()
         self._sqlite_conn: sqlite3.Connection | None = None
 
         if url.startswith("postgresql://") or url.startswith("postgres://"):
@@ -513,6 +539,7 @@ class AppDatabase:
         if parent:
             os.makedirs(parent, exist_ok=True)
         self._sqlite_conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._sqlite_conn.execute("PRAGMA busy_timeout=5000")
         self._sqlite_conn.execute("PRAGMA journal_mode=WAL")
         self._sqlite_conn.execute("PRAGMA foreign_keys=ON")
         self._sqlite_conn.executescript(_SQLITE_SCHEMA)
@@ -1474,6 +1501,110 @@ class AppDatabase:
         return [f"{r.title}: {r.content}" for r in rules if r.enabled][:20]
 
     # ── PR review progress ──
+
+    def try_claim_review(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        *,
+        platform: str = "github",
+        ttl_seconds: float = 3600,
+    ) -> str | None:
+        """Acquire a renewable per-PR lease, or return ``None`` if one is active.
+
+        The single INSERT/UPSERT statement is atomic in both SQLite and
+        PostgreSQL, so separate worker processes and replicas cannot both win.
+        """
+        now = time.time()
+        token = secrets.token_urlsafe(24)
+        expires_at = now + ttl_seconds
+        params = (platform, owner, repo, pr_number, token, now, expires_at, now)
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            with self._sqlite_lock:
+                cur = self._sqlite_conn.execute(
+                    "INSERT INTO review_claims "
+                    "(platform, owner, repo, pr_number, claim_token, claimed_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(platform, owner, repo, pr_number) DO UPDATE SET "
+                    "claim_token=excluded.claim_token, claimed_at=excluded.claimed_at, "
+                    "expires_at=excluded.expires_at WHERE review_claims.expires_at <= ?",
+                    params,
+                )
+                self._sqlite_conn.commit()
+                acquired = cur.rowcount == 1
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "INSERT INTO review_claims "
+                    "(platform, owner, repo, pr_number, claim_token, claimed_at, expires_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT(platform, owner, repo, pr_number) DO UPDATE SET "
+                    "claim_token=EXCLUDED.claim_token, claimed_at=EXCLUDED.claimed_at, "
+                    "expires_at=EXCLUDED.expires_at WHERE review_claims.expires_at <= %s",
+                    params,
+                )
+                acquired = cur.rowcount == 1
+        return token if acquired else None
+
+    def refresh_review_claim(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        claim_token: str,
+        *,
+        platform: str = "github",
+        ttl_seconds: float = 3600,
+    ) -> bool:
+        """Extend a lease only when ``claim_token`` still owns it."""
+        expires_at = time.time() + ttl_seconds
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            with self._sqlite_lock:
+                cur = self._sqlite_conn.execute(
+                    "UPDATE review_claims SET expires_at=? WHERE platform=? AND owner=? "
+                    "AND repo=? AND pr_number=? AND claim_token=?",
+                    (expires_at, platform, owner, repo, pr_number, claim_token),
+                )
+                self._sqlite_conn.commit()
+                return cur.rowcount == 1
+        with self._pg_cursor() as cur:
+            cur.execute(
+                "UPDATE review_claims SET expires_at=%s WHERE platform=%s AND owner=%s "
+                "AND repo=%s AND pr_number=%s AND claim_token=%s",
+                (expires_at, platform, owner, repo, pr_number, claim_token),
+            )
+            return cur.rowcount == 1
+
+    def release_review_claim(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        claim_token: str,
+        *,
+        platform: str = "github",
+    ) -> bool:
+        """Release a lease only when ``claim_token`` still owns it."""
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            with self._sqlite_lock:
+                cur = self._sqlite_conn.execute(
+                    "DELETE FROM review_claims WHERE platform=? AND owner=? AND repo=? "
+                    "AND pr_number=? AND claim_token=?",
+                    (platform, owner, repo, pr_number, claim_token),
+                )
+                self._sqlite_conn.commit()
+                return cur.rowcount == 1
+        with self._pg_cursor() as cur:
+            cur.execute(
+                "DELETE FROM review_claims WHERE platform=%s AND owner=%s AND repo=%s "
+                "AND pr_number=%s AND claim_token=%s",
+                (platform, owner, repo, pr_number, claim_token),
+            )
+            return cur.rowcount == 1
 
     def upsert_pr_review_progress(
         self, progress: PRReviewProgress, platform: str = "github"

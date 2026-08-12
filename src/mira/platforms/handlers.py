@@ -4,8 +4,11 @@ none is tied to a specific platform's payload shape."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +49,82 @@ PAUSE_LABEL = "mira-paused"
 _PAUSE_KEYWORDS = {"pause"}
 
 _RESUME_KEYWORDS = {"resume"}
+
+_REVIEW_CLAIM_TTL_SECONDS = 3600
+_REVIEW_CLAIM_REFRESH_SECONDS = 300
+
+
+async def _refresh_review_claim(
+    db: Any,
+    owner: str,
+    repo: str,
+    number: int,
+    claim_token: str,
+    platform: str,
+) -> None:
+    """Keep a long-running review's durable lease alive."""
+    while True:
+        await asyncio.sleep(_REVIEW_CLAIM_REFRESH_SECONDS)
+        try:
+            refreshed = db.refresh_review_claim(
+                owner,
+                repo,
+                number,
+                claim_token,
+                platform=platform,
+                ttl_seconds=_REVIEW_CLAIM_TTL_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to refresh review claim for %s/%s#%d", owner, repo, number)
+            continue
+        if not refreshed:
+            logger.error("Review claim ownership lost for %s/%s#%d", owner, repo, number)
+            return
+
+
+@asynccontextmanager
+async def _review_claim(
+    owner: str,
+    repo: str,
+    number: int,
+    pr_title: str,
+    pr_url: str,
+    platform: str,
+) -> AsyncIterator[bool]:
+    """Claim one PR across all workers and mirror its status in memory."""
+    from mira.dashboard.api import _app_db
+
+    claim_token = _app_db.try_claim_review(
+        owner,
+        repo,
+        number,
+        platform=platform,
+        ttl_seconds=_REVIEW_CLAIM_TTL_SECONDS,
+    )
+    if claim_token is None:
+        yield False
+        return
+
+    repo_full = f"{owner}/{repo}"
+    review_tracker.start(repo_full, number, pr_title, pr_url)
+    refresh_task = asyncio.create_task(
+        _refresh_review_claim(_app_db, owner, repo, number, claim_token, platform)
+    )
+    try:
+        yield True
+    finally:
+        refresh_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await refresh_task
+        try:
+            released = _app_db.release_review_claim(
+                owner, repo, number, claim_token, platform=platform
+            )
+        except Exception:
+            logger.exception("Failed to release review claim for %s", pr_url)
+        else:
+            if not released:
+                logger.warning("Review claim was no longer owned for %s", pr_url)
 
 
 def _open_store(owner: str, repo: str, platform: str = "github") -> IndexStore:
@@ -93,41 +172,40 @@ async def run_pr_review(
     """
     repo_full = f"{owner}/{repo}"
 
-    # Atomically claim the slot — avoids stacking redundant runs when
-    # two concurrent webhooks arrive. Returns False if already reviewing.
-    if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
-        logger.info("Review already in progress for %s, skipping", pr_url)
-        return
+    async with _review_claim(owner, repo, number, pr_title, pr_url, platform) as claimed:
+        if not claimed:
+            logger.info("Review already in progress for %s, skipping", pr_url)
+            return
 
-    config = load_config()
-    from mira.dashboard.models_config import llm_config_for
+        config = load_config()
+        from mira.dashboard.models_config import llm_config_for
 
-    llm = create_llm(llm_config_for("review", config.llm))
-    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
-    engine = ReviewEngine(
-        config=config,
-        llm=llm,
-        provider=provider,
-        bot_name=bot_name,
-        indexing_llm=indexing_llm,
-    )
+        llm = create_llm(llm_config_for("review", config.llm))
+        indexing_llm = create_llm(llm_config_for("indexing", config.llm))
+        engine = ReviewEngine(
+            config=config,
+            llm=llm,
+            provider=provider,
+            bot_name=bot_name,
+            indexing_llm=indexing_llm,
+        )
 
-    from mira.dashboard.api import _app_db
+        from mira.dashboard.api import _app_db
 
-    # Keep visibility current — the blast-radius filter relies on it to avoid
-    # naming private repos in a public repo's review.
-    _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
+        # Keep visibility current — the blast-radius filter relies on it to avoid
+        # naming private repos in a public repo's review.
+        _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
 
-    repo_record = _app_db.get_repo(owner, repo, platform=platform)
-    is_indexed = bool(repo_record and repo_record.status == "ready")
+        repo_record = _app_db.get_repo(owner, repo, platform=platform)
+        is_indexed = bool(repo_record and repo_record.status == "ready")
 
-    logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
-    try:
-        result = await engine.review_pr(pr_url)
-        review_tracker.complete(repo_full, number)
-    except Exception as exc:
-        review_tracker.fail(repo_full, number, str(exc))
-        raise
+        logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
+        try:
+            result = await engine.review_pr(pr_url)
+            review_tracker.complete(repo_full, number)
+        except Exception as exc:
+            review_tracker.fail(repo_full, number, str(exc))
+            raise
 
     # The walkthrough comment already carries the "more accurate after indexing"
     # nudge for unindexed repos, so we don't post a separate note here — that
@@ -211,18 +289,22 @@ async def run_pr_command(
             indexing_llm=indexing_llm,
         )
         engine._review_only_paths = set(progress.skipped_paths)  # type: ignore[attr-defined]
-        if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
-            logger.info("Review already in progress for %s, skipping", pr_url)
-            return
-        logger.info(
-            "review-rest on %s by @%s — %d file(s)", pr_url, actor, len(progress.skipped_paths)
-        )
-        try:
-            await engine.review_pr(pr_url)
-            review_tracker.complete(repo_full, number)
-        except Exception as exc:
-            review_tracker.fail(repo_full, number, str(exc))
-            raise
+        async with _review_claim(owner, repo, number, pr_title, pr_url, platform) as claimed:
+            if not claimed:
+                logger.info("Review already in progress for %s, skipping", pr_url)
+                return
+            logger.info(
+                "review-rest on %s by @%s — %d file(s)",
+                pr_url,
+                actor,
+                len(progress.skipped_paths),
+            )
+            try:
+                await engine.review_pr(pr_url)
+                review_tracker.complete(repo_full, number)
+            except Exception as exc:
+                review_tracker.fail(repo_full, number, str(exc))
+                raise
     elif is_review:
         engine = ReviewEngine(
             config=config,
@@ -231,16 +313,17 @@ async def run_pr_command(
             bot_name=bot_name,
             indexing_llm=indexing_llm,
         )
-        if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
-            logger.info("Review already in progress for %s, skipping", pr_url)
-            return
-        logger.info("Re-review triggered for %s by @%s", pr_url, actor)
-        try:
-            await engine.review_pr(pr_url)
-            review_tracker.complete(repo_full, number)
-        except Exception as exc:
-            review_tracker.fail(repo_full, number, str(exc))
-            raise
+        async with _review_claim(owner, repo, number, pr_title, pr_url, platform) as claimed:
+            if not claimed:
+                logger.info("Review already in progress for %s, skipping", pr_url)
+                return
+            logger.info("Re-review triggered for %s by @%s", pr_url, actor)
+            try:
+                await engine.review_pr(pr_url)
+                review_tracker.complete(repo_full, number)
+            except Exception as exc:
+                review_tracker.fail(repo_full, number, str(exc))
+                raise
     else:
         pr_info = await provider.get_pr_info(pr_url)
         diff_text = await provider.get_pr_diff(pr_info)
