@@ -2,65 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
-
 import unidiff
 
+from mira.core.file_types import language_from_path
 from mira.exceptions import DiffParseError
 from mira.models import FileChangeType, FileDiff, HunkInfo, PatchSet
-
-_EXTENSION_LANGUAGE_MAP: dict[str, str] = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".jsx": "javascript",
-    ".rb": "ruby",
-    ".go": "go",
-    ".rs": "rust",
-    ".java": "java",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
-    ".cs": "csharp",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".c": "c",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".swift": "swift",
-    ".php": "php",
-    ".scala": "scala",
-    ".sh": "bash",
-    ".bash": "bash",
-    ".zsh": "zsh",
-    ".yml": "yaml",
-    ".yaml": "yaml",
-    ".json": "json",
-    ".toml": "toml",
-    ".xml": "xml",
-    ".html": "html",
-    ".css": "css",
-    ".scss": "scss",
-    ".sql": "sql",
-    ".md": "markdown",
-    ".r": "r",
-    ".dart": "dart",
-    ".lua": "lua",
-    ".ex": "elixir",
-    ".exs": "elixir",
-    ".erl": "erlang",
-    ".hs": "haskell",
-    ".ml": "ocaml",
-    ".clj": "clojure",
-    ".vim": "vim",
-    ".tf": "terraform",
-    ".proto": "protobuf",
-}
 
 
 def _detect_language(path: str) -> str:
     """Detect programming language from file extension."""
-    return _EXTENSION_LANGUAGE_MAP.get(PurePosixPath(path).suffix, "")
+    return language_from_path(path)
 
 
 def _determine_change_type(patched_file: unidiff.PatchedFile) -> FileChangeType:
