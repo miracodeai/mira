@@ -1385,6 +1385,23 @@ class ReviewEngine:
                     return [], [], ""
 
         review_task = _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
+        # Per-chunk executors (fresh per call) so each chunk gets its own
+        # 50KB tool-output budget; one shared executor would let an early
+        # chunk exhaust the budget and wedge later chunks.
+        _security_executor_factory = None
+        if (
+            self.config.review.security_agentic
+            and self.config.review.agentic_tools
+            and self._agentic_source_fetcher is not None
+        ):
+            from mira.llm.agentic_tools import AgenticToolExecutor
+
+            def _security_executor_factory() -> AgenticToolExecutor:
+                return AgenticToolExecutor(
+                    source_fetcher=self._agentic_source_fetcher,
+                    repo_tree=list(self._agentic_repo_tree),
+                )
+
         security_task = _asyncio.create_task(
             security_review_pass(
                 self.llm,
@@ -1392,6 +1409,7 @@ class ReviewEngine:
                 _security_relevant_files(filtered),
                 pr_title,
                 security_llm=self.security_llm,
+                agentic_executor_factory=_security_executor_factory,
             )
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])

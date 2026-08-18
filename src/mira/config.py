@@ -210,6 +210,13 @@ class ReviewConfig(BaseModel):
     # comments and go through the same noise filter.
     security_pass: bool = True
 
+    # Agentic loop (`read_file`, `grep_repo`) for the security pass on the
+    # security-tier model, so it can verify cross-file claims before filing,
+    # like the main pass. Falls back to the one-shot call when the loop bails
+    # without a submission. Gated on `agentic_tools` plus a live source
+    # fetcher — without either, the pass runs the one-shot path unchanged.
+    security_agentic: bool = True
+
     # Deterministic CVE check on changed dependency manifests: packages added
     # or version-bumped by the PR are queried against OSV.dev at review time
     # (the background poller only re-scans the repo hourly, post-merge). No
