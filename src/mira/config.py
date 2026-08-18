@@ -216,6 +216,12 @@ class ReviewConfig(BaseModel):
     # LLM involved — one batch HTTP request per PR with manifest changes.
     osv_scan: bool = True
 
+    # Deterministic regex+entropy scan of added diff lines for hardcoded
+    # keys/tokens/passwords. No LLM involved — pure in-memory regex pass,
+    # no network. Complements the LLM security pass (which has no key-format
+    # rules).
+    secrets_scan: bool = True
+
     # Give the reviewer LLM tools (`read_file`, `grep_repo`) to fetch
     # cross-file context on demand. On unindexed repos this closes the
     # Java/Go gaps JIT pre-fetch can't reach; on indexed repos it lets the

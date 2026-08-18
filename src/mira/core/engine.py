@@ -59,6 +59,7 @@ from mira.models import (
     build_review_stats,
 )
 from mira.providers.base import BaseProvider
+from mira.security.secrets_scan import scan_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -1445,8 +1446,20 @@ class ReviewEngine:
             else _asyncio.sleep(0, result=[])
         )
 
-        chunk_results, security_comments, dependency_comments, osv_comments = await _asyncio.gather(
-            review_task, security_task, dependency_task, osv_task
+        secrets_task = _asyncio.create_task(
+            scan_secrets(filtered)
+            if filtered and self.config.review.secrets_scan
+            else _asyncio.sleep(0, result=[])
+        )
+
+        (
+            chunk_results,
+            security_comments,
+            dependency_comments,
+            osv_comments,
+            secrets_comments,
+        ) = await _asyncio.gather(
+            review_task, security_task, dependency_task, osv_task, secrets_task
         )
 
         all_comments: list[ReviewComment] = []
@@ -1464,6 +1477,8 @@ class ReviewEngine:
         all_comments.extend(dependency_comments)
         audit.append({"stage": "drafted", "chunk": "osv", "count": len(osv_comments)})
         all_comments.extend(osv_comments)
+        audit.append({"stage": "drafted", "chunk": "secrets", "count": len(secrets_comments)})
+        all_comments.extend(secrets_comments)
 
         all_comments = [classify_severity(c) for c in all_comments]
 

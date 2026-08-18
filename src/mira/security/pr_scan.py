@@ -9,6 +9,7 @@ No LLM involved.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from mira.index.manifests import parse_manifest
@@ -28,13 +29,31 @@ logger = logging.getLogger(__name__)
 _MAX_VULNS_PER_COMMENT = 3
 
 
-def _added_line_hits(file_diff: FileDiff, needle: str) -> list[tuple[int, str]]:
-    """(target line number, line text) of added lines containing `needle`.
+def _added_line_hits(file_diff: FileDiff, needle: str | re.Pattern | None) -> list[tuple[int, str]]:
+    """(target line number, line text) of added lines matching `needle`.
 
     Hunk content includes the @@ header (diff_parser stores str(hunk)) —
     skip it WITHOUT incrementing; target_start is the first body line.
+
+    - `str`: case-insensitive substring match (existing behavior).
+    - compiled `re.Pattern`: `needle.search(line)` on the raw added line
+      (the pattern carries its own flags, no lowercasing).
+    - `None`: every added line.
     """
-    needle_l = needle.lower()
+    if isinstance(needle, str):
+        needle_l = needle.lower()
+
+        def _match(line: str) -> bool:
+            return needle_l in line.lower()
+    elif isinstance(needle, re.Pattern):
+
+        def _match(line: str) -> bool:
+            return needle.search(line) is not None
+    else:
+
+        def _match(line: str) -> bool:
+            return True
+
     hits: list[tuple[int, str]] = []
     for hunk in file_diff.hunks:
         line_no = hunk.target_start
@@ -42,7 +61,7 @@ def _added_line_hits(file_diff: FileDiff, needle: str) -> list[tuple[int, str]]:
             if raw.startswith("@@"):
                 continue
             if raw.startswith("+"):
-                if needle_l in raw[1:].lower():
+                if _match(raw[1:]):
                     hits.append((line_no, raw[1:]))
                 line_no += 1
             elif raw.startswith("-"):
