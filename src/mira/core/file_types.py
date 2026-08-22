@@ -1,4 +1,4 @@
-"""Shared file-extension enum."""
+"""Shared file extension and language utilities."""
 
 from __future__ import annotations
 
@@ -95,37 +95,32 @@ EXTENSION_LANGUAGES: dict[str, Language] = {
     ".proto": Language.PROTOBUF,
 }
 
-INDEXABLE_EXTENSIONS = frozenset(
+INDEXABLE_LANGUAGES: frozenset[str] = frozenset(
     {
-        ".py",
-        ".js",
-        ".ts",
-        ".tsx",
-        ".jsx",
-        ".go",
-        ".rs",
-        ".java",
-        ".rb",
-        ".php",
-        ".c",
-        ".cpp",
-        ".h",
-        ".hpp",
-        ".cs",
-        ".swift",
-        ".kt",
-        ".scala",
-        ".lua",
-        ".sh",
-        ".bash",
-        ".zsh",
-        ".yaml",
-        ".yml",
-        ".toml",
-        ".json",
-        ".sql",
-        ".graphql",
-        ".proto",
+        Language.PYTHON,
+        Language.JAVASCRIPT,
+        Language.TYPESCRIPT,
+        Language.RUBY,
+        Language.GO,
+        Language.RUST,
+        Language.JAVA,
+        Language.KOTLIN,
+        Language.CSHARP,
+        Language.CPP,
+        Language.C,
+        Language.SWIFT,
+        Language.PHP,
+        Language.SCALA,
+        Language.BASH,
+        Language.ZSH,
+        Language.YAML,
+        Language.JSON,
+        Language.TOML,
+        Language.SQL,
+        Language.LUA,
+        Language.TERRAFORM,
+        Language.GRAPHQL,
+        Language.PROTOBUF,
     }
 )
 
@@ -156,4 +151,5 @@ def language_from_path(path: str, default: str = "") -> str:
 
 def is_indexable_path(path: str) -> bool:
     """Whether a path has a source/config extension supported by indexing."""
-    return extension_from_path(path) in INDEXABLE_EXTENSIONS
+    language = EXTENSION_LANGUAGES.get(extension_from_path(path))
+    return language in INDEXABLE_LANGUAGES
