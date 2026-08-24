@@ -83,6 +83,23 @@ def _responses_input(messages: list[dict]) -> list[dict]:
     return items
 
 
+# Codex-class Responses API backends reject ``text.format`` of
+# ``json_object`` unless the input contains the word "json" in some
+# form. When the caller's prompt never mentions JSON, prepend a minimal
+# system hint so the request passes the backend's validation.
+_JSON_HINT = "Respond with a JSON object only. No markdown fences, no prose."
+
+
+def _ensure_json_word(items: list[dict]) -> list[dict]:
+    """Prepend ``_JSON_HINT`` if no input item mentions "json" (case-insensitive)."""
+    for item in items:
+        for value in item.values():
+            if isinstance(value, str) and "json" in value.lower():
+                return items
+    items.insert(0, {"role": "system", "content": _JSON_HINT})
+    return items
+
+
 def _responses_tool(chat_tool: dict) -> dict:
     """Flatten {"type":"function","function":{...}} to the Responses shape
     {"type":"function","name","description","parameters"}."""
@@ -199,6 +216,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
         }
         if json_mode:
             body["text"] = {"format": {"type": "json_object"}}
+            body["input"] = _ensure_json_word(body["input"])
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:

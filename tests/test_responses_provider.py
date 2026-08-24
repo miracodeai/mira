@@ -11,7 +11,7 @@ import pytest
 from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm import create_llm
-from mira.llm.responses import ResponsesProvider
+from mira.llm.responses import ResponsesProvider, _ensure_json_word
 
 # Set a dummy API key for tests so _get_api_key() doesn't fail
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key-for-unit-tests")
@@ -201,6 +201,151 @@ class TestComplete:
             pytest.raises(LLMError),
         ):
             await provider.complete([{"role": "user", "content": "test"}])
+
+
+class TestJsonHintInjection:
+    """Responses backends (Codex) require the word "json" in the input
+    whenever text.format type is json_object."""
+
+    @pytest.mark.asyncio
+    async def test_json_hint_prepended_when_missing(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_text('{"ok": true}', _make_resp_usage(10, 10))
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete(
+                [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Summarize this PR."},
+                ],
+                json_mode=True,
+            )
+
+        body = mock_client.post.call_args[1]["json"]
+        assert body["text"]["format"]["type"] == "json_object"
+        first = body["input"][0]
+        assert first["role"] == "system"
+        assert "json" in first["content"].lower()
+        # Original system message and user message preserved after the hint.
+        assert body["input"][1] == {"role": "system", "content": "You are a helpful assistant."}
+        assert body["input"][2] == {"role": "user", "content": "Summarize this PR."}
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_json_already_present(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_text("{}", _make_resp_usage(10, 10))
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete(
+                [
+                    {"role": "system", "content": "Respond with a JSON object."},
+                    {"role": "user", "content": "Summarize this PR."},
+                ],
+                json_mode=True,
+            )
+
+        body = mock_client.post.call_args[1]["json"]
+        assert len(body["input"]) == 2
+        assert body["input"][0] == {
+            "role": "system",
+            "content": "Respond with a JSON object.",
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_json_word_in_user_content(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_text("{}", _make_resp_usage(10, 10))
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete(
+                [{"role": "user", "content": "Return the diff as JSON."}],
+                json_mode=True,
+            )
+
+        body = mock_client.post.call_args[1]["json"]
+        assert len(body["input"]) == 1
+        assert body["input"][0]["content"] == "Return the diff as JSON."
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_json_in_tool_result(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_text("{}", _make_resp_usage(10, 10))
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        convo = [
+            {"role": "user", "content": "Run the check."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path": "config.json"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"status": "ok"}'},
+        ]
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete(convo, json_mode=True)
+
+        body = mock_client.post.call_args[1]["json"]
+        # "json" appears in the function_call arguments — no hint needed.
+        assert body["input"][0] == {"role": "user", "content": "Run the check."}
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_json_mode_disabled(self, config: LLMConfig):
+        provider = ResponsesProvider(config)
+        mock_data = _make_resp_text("plain text", _make_resp_usage(10, 10))
+        mock_resp = _mock_httpx_response(mock_data, 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete([{"role": "user", "content": "say hello"}], json_mode=False)
+
+        body = mock_client.post.call_args[1]["json"]
+        assert "text" not in body
+        assert len(body["input"]) == 1
+        assert body["input"][0]["content"] == "say hello"
+
+
+class TestJsonHintHelper:
+    def test_returns_same_list_when_word_present(self):
+        items = [{"role": "system", "content": "Respond in JSON."}]
+        assert _ensure_json_word(items) is items
+
+    def test_case_insensitive_match(self):
+        items = [{"role": "user", "content": "give me the Json blob"}]
+        assert _ensure_json_word(items) is items
+
+    def test_prepends_hint_when_absent(self):
+        items = [{"role": "user", "content": "hi"}]
+        out = _ensure_json_word(items)
+        assert len(out) == 2
+        assert out[0]["role"] == "system"
+        assert "json" in out[0]["content"].lower()
+        assert out[1] == {"role": "user", "content": "hi"}
+
+    def test_scans_non_role_values(self):
+        # "json" inside function_call arguments must count.
+        items = [
+            {
+                "type": "function_call",
+                "id": "c1",
+                "call_id": "c1",
+                "name": "read_file",
+                "arguments": '{"path": "json_schema.py"}',
+            }
+        ]
+        assert _ensure_json_word(items) is items
 
 
 class TestCompleteWithTools:
