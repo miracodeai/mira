@@ -19,15 +19,17 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 }
 
 # Thinking-mode options for the review model. "off" disables extended thinking
-# (today's behavior); low/medium/high map to OpenRouter's unified
-# ``reasoning.effort``. Single source for the dashboard dropdown and validation.
+# (today's behavior); low/medium/high/xhigh map to the provider's unified
+# ``reasoning.effort``; "max" is a top level remapped per provider (OpenRouter
+# sends it as "xhigh"). Single source for the dashboard dropdown and validation.
 THINKING_MODES: list[dict[str, str]] = [
     {"value": "off", "label": "Off"},
     {"value": "low", "label": "Low"},
     {"value": "medium", "label": "Medium"},
     {"value": "high", "label": "High"},
-    # DeepSeek's top "max" level (sent as "xhigh" on OpenRouter, which rejects
-    # "max"). Not every provider supports it.
+    {"value": "xhigh", "label": "XHigh"},
+    # Top "max" level (sent as "xhigh" on OpenRouter, which rejects "max").
+    # Sits above "xhigh". Not every provider supports it.
     {"value": "max", "label": "Max"},
 ]
 THINKING_MODE_VALUES = {m["value"] for m in THINKING_MODES}

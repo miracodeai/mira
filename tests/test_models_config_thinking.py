@@ -99,6 +99,15 @@ class TestSetModelsThinkingValidation:
         assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_thinking_mode") == "medium"
 
+    def test_persists_xhigh_thinking_mode(self, in_memory_db: AppDatabase):
+        body = ModelsUpdate(
+            indexing_model="anthropic/claude-haiku-4-5",
+            review_model="anthropic/claude-sonnet-4-6",
+            review_thinking_mode="xhigh",
+        )
+        assert set_models(body, _admin_req()) == {"ok": True}
+        assert in_memory_db.get_setting("review_thinking_mode") == "xhigh"
+
     def test_off_clears_setting_so_config_can_win(self, in_memory_db: AppDatabase):
         # "off" must not be persisted as a literal — it'd shadow a mira.yaml
         # override. It's stored as "" (the column is NOT NULL) and reads as unset.

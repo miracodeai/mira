@@ -199,6 +199,32 @@ class TestComplete:
             body = mock_client.post.call_args.kwargs["json"]
             assert body["reasoning"] == {"effort": "max"}
 
+    @pytest.mark.parametrize(
+        ("effort", "expected"),
+        [
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "xhigh"),
+            ("max", "xhigh"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_all_effort_levels_map_on_openrouter(self, effort, expected):
+        config = LLMConfig(model="test-model", reasoning_effort=effort)
+        provider = LLMProvider(config)
+        mock_resp = _mock_httpx_response(_make_response_json("ok"))
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            client = AsyncMock()
+            client.post = AsyncMock(return_value=mock_resp)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            cls.return_value = client
+            await provider.complete([{"role": "user", "content": "hi"}])
+            body = client.post.call_args.kwargs["json"]
+            assert body["reasoning"] == {"effort": expected}
+            assert "temperature" not in body
+
     @pytest.mark.asyncio
     async def test_reasoning_off_leaves_body_unchanged(self):
         for effort in (None, "off"):
