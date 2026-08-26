@@ -86,6 +86,8 @@ Run Mira self-hosted to auto-review every PR and merge request and answer `@mira
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/workspace/templates/05874bad-2d98-43f4-aa93-332f394e9ebd)
 
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Mira/)
+
 ```yaml
 # mira.yaml — deployment-wide defaults. Every key is optional.
 llm:
