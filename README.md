@@ -82,7 +82,7 @@ Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.6.
 
 Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), and Forgejo/Codeberg (via an access token) are all fully supported; Bitbucket is next.
 
-**1. Deploy** — one-click on Railway, or with Docker:
+**1. Deploy** — one-click on Railway, RepoCloud, or with Docker:
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/workspace/templates/05874bad-2d98-43f4-aa93-332f394e9ebd)
 
