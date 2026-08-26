@@ -15,6 +15,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig, load_config
+from mira.core.file_types import is_indexable_path, language_from_path
 from mira.index.manifests import is_manifest, parse_manifest
 from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
 from mira.llm import create_llm
@@ -37,39 +38,6 @@ class IndexingCancelled(Exception):
 
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts" / "templates"
-
-# File extensions we index (source code only)
-_INDEXABLE_EXTENSIONS = {
-    ".py",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-    ".go",
-    ".rs",
-    ".java",
-    ".rb",
-    ".php",
-    ".c",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".cs",
-    ".swift",
-    ".kt",
-    ".scala",
-    ".lua",
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".json",
-    ".sql",
-    ".graphql",
-    ".proto",
-}
 
 # Patterns to always skip (binaries, vendored code, lock files, etc.)
 _SKIP_PATTERNS = [
@@ -166,8 +134,7 @@ def _should_index(path: str, exclude_patterns: list[str] | None = None) -> bool:
         for pattern in exclude_patterns:
             if fnmatch(path, pattern) or fnmatch(filename, pattern):
                 return False
-    _, ext = os.path.splitext(filename)
-    return ext.lower() in _INDEXABLE_EXTENSIONS
+    return is_indexable_path(filename)
 
 
 def _content_hash(content: str) -> str:
@@ -175,43 +142,10 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
 
 
-_EXT_LANG = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".jsx": "javascript",
-    ".go": "go",
-    ".rs": "rust",
-    ".java": "java",
-    ".rb": "ruby",
-    ".php": "php",
-    ".cpp": "cpp",
-    ".c": "c",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".cs": "csharp",
-    ".kt": "kotlin",
-    ".swift": "swift",
-    ".scala": "scala",
-    ".lua": "lua",
-    ".sh": "shell",
-    ".bash": "shell",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".toml": "toml",
-    ".json": "json",
-    ".sql": "sql",
-    ".graphql": "graphql",
-    ".proto": "protobuf",
-}
-
-
 def _language_from_path(path: str) -> str:
     """Best-effort language guess from file extension. Used for trivial-file
     entries that skip the LLM."""
-    _, ext = os.path.splitext(path)
-    return _EXT_LANG.get(ext.lower(), "")
+    return language_from_path(path)
 
 
 def _safe_call(call: Any) -> tuple[str, str]:
