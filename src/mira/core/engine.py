@@ -522,6 +522,30 @@ class ReviewEngine:
         pr_info = await self.provider.get_pr_info(pr_url)
         self._pr_info = pr_info
 
+        # Merge conflicts make the PR diff unreliable (and often empty). Post an
+        # explicit skip instead of a quiet "0 comments" walkthrough (#253).
+        if pr_info.mergeable_state == "dirty":
+            reason = (
+                "this PR has merge conflicts, so the diff could not be read "
+                "reliably. Resolve the conflicts and comment `@mira review` to re-run."
+            )
+            result = ReviewResult(
+                summary="Skipped — merge conflicts",
+                skipped_reason=reason,
+            )
+            if not self.dry_run:
+                body = (
+                    "## Mira PR Walkthrough
+
+"
+                    f"*⚠️ Skipped — {reason}*"
+                )
+                try:
+                    await self.provider.post_comment(pr_info, body)
+                except Exception as exc:
+                    logger.warning("Failed to post merge-conflict skip comment: %s", exc)
+            return result
+
         async def _resolve_threads() -> tuple[
             int, int, list[UnresolvedThread], list[ThreadDecision]
         ]:
