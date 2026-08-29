@@ -421,6 +421,11 @@ class PRInfo:
     # and surfaced (with avatar) in the activity dashboard.
     author: str = ""
     author_avatar_url: str = ""
+    # GitHub mergeability: "clean" / "dirty" / "unstable" / "blocked" / "unknown"
+    # (or "" when the host did not report one). "dirty" means merge conflicts.
+    # While GitHub is still computing, providers leave this empty rather than
+    # guessing — callers must treat "" as unknown, not as a conflict.
+    mergeable_state: str = ""
 
 
 @dataclass
