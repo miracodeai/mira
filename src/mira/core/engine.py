@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -20,14 +21,16 @@ from mira.core.file_filter import filter_files
 from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
     agentic_review_loop,
+    dependency_review_pass,
     regenerate_summary,
     security_review_pass,
     self_critique,
 )
 from mira.core.priority import rank_files
 from mira.core.threads import resolve_verified_threads, short_thread_description
-from mira.exceptions import ResponseParseError
+from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
+from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
 from mira.llm.prompts.review import (
     build_review_prompt,
@@ -41,7 +44,10 @@ from mira.llm.response_parser import (
 )
 from mira.models import (
     WALKTHROUGH_MARKER,
+    FileChangeType,
     KeyIssue,
+    OverlapFinding,
+    PRFingerprint,
     PRInfo,
     ReviewChunk,
     ReviewComment,
@@ -53,6 +59,7 @@ from mira.models import (
     build_review_stats,
 )
 from mira.providers.base import BaseProvider
+from mira.security.secrets_scan import scan_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +131,6 @@ def _clamp_confidence_to_findings(
 # Paths excluded from the dedicated security pass — see core/passes.py.
 # Keep conservative: anything that might house auth/crypto/origin/injection logic stays in.
 _SECURITY_PASS_SKIP_PATTERNS = (
-    # DB migrations: schema changes, indexes — no request handling.
-    "db/migrate/",
-    "/migrations/",
     # Tests: assertions about behavior, not the behavior itself.
     "spec/",
     "/__tests__/",
@@ -177,7 +181,7 @@ def _security_relevant_files(files: list) -> list:
     """Return the subset of files plausibly containing security findings.
 
     The dedicated security pass runs as one LLM call across the entire
-    diff. When the diff is dominated by migrations / specs / lockfiles,
+    diff. When the diff is dominated by specs / lockfiles,
     those non-code files dilute attention away from the actual vulnerable
     code. This filter trims the obvious-no-finding cases so the model can
     focus.
@@ -191,6 +195,25 @@ def _security_relevant_files(files: list) -> list:
         if any(lower.endswith(s) for s in _SECURITY_TEST_SUFFIXES):
             continue
         keep.append(f)
+    return keep
+
+
+def _manifest_files(files: list) -> list:
+    """Return changed dependency-manifest files for the dependency pass.
+
+    Keeps package.json / pyproject.toml / requirements.txt / go.mod / Dockerfile
+    that were added or modified. Lockfiles are excluded — they record resolved
+    transitive deps that churn constantly and would only add noise; we only care
+    about human-declared dependencies. Deleted manifests add nothing to check.
+    """
+    keep = []
+    for f in files:
+        if (
+            f.change_type in (FileChangeType.ADDED, FileChangeType.MODIFIED)
+            and is_manifest(f.path)
+            and not _is_lockfile_path(f.path)
+        ):
+            keep.append(f)
     return keep
 
 
@@ -273,6 +296,65 @@ def _drop_orphan_key_issues(
     return [ki for ki in key_issues if _matches(ki)]
 
 
+def _diff_line_map(diff_text: str) -> dict[str, set[int]]:
+    """New-side line numbers covered by each file's hunks.
+
+    These are the only lines GitHub will anchor an inline review comment to;
+    anything outside gets a 422 at posting time.
+    """
+    lines: dict[str, set[int]] = {}
+    try:
+        patch = parse_diff(diff_text)
+    except Exception:
+        return lines
+    for f in patch.files:
+        covered = lines.setdefault(f.path, set())
+        for h in f.hunks:
+            covered.update(range(h.target_start, h.target_start + h.target_length))
+    return lines
+
+
+def _drop_unanchorable_comments(
+    comments: list[ReviewComment],
+    line_map: dict[str, set[int]],
+) -> tuple[list[ReviewComment], list[ReviewComment]]:
+    """Split comments into (anchorable, dropped) against the PR's base diff.
+
+    A round-2 review of a merge commit can produce findings on mainline code
+    that isn't part of the PR's own diff — GitHub rejects those inlines.
+    """
+    kept: list[ReviewComment] = []
+    dropped: list[ReviewComment] = []
+    for c in comments:
+        covered = line_map.get(c.path, set())
+        anchor = c.end_line if (c.end_line and c.end_line > c.line) else c.line
+        if c.line in covered and anchor in covered:
+            kept.append(c)
+        else:
+            dropped.append(c)
+    return kept, dropped
+
+
+_DIFF_HEADER_RE = re.compile(r"^diff --git \"?a/.*?\"? \"?b/(.*?)\"?$")
+
+
+def _restrict_diff_to_paths(diff_text: str, paths: set[str]) -> str:
+    """Keep only the per-file sections of a unified diff whose new path is in ``paths``.
+
+    Used to trim a round-2 incremental (compare) diff down to the PR's own
+    files: a merge commit's compare diff includes everything the base branch
+    brought in, which isn't this PR's code to review.
+    """
+    sections = re.split(r"(?m)^(?=diff --git )", diff_text)
+    kept: list[str] = []
+    for section in sections:
+        header = section.split("\n", 1)[0]
+        m = _DIFF_HEADER_RE.match(header)
+        if m is None or m.group(1) in paths:
+            kept.append(section)
+    return "".join(kept)
+
+
 def filter_blast_radius_for_visibility(
     dependents: list[dict],
     reviewed_private: bool | None,
@@ -302,10 +384,12 @@ class ReviewEngine:
         bot_name: str = "miracodeai",
         dry_run: bool = False,
         indexing_llm: LLMProviderProtocol | None = None,
+        security_llm: LLMProviderProtocol | None = None,
     ) -> None:
         self.config = config
         self.llm = llm
         self.indexing_llm = indexing_llm or llm
+        self.security_llm = security_llm or llm
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
@@ -332,6 +416,95 @@ class ReviewEngine:
             return existing_id
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
+
+    @staticmethod
+    def _format_failure_notice(exc: BaseException) -> str:
+        """Format a user-safe failure notice without model names or internal errors."""
+        message = exc.safe_message if isinstance(exc, MiraError) else type(exc).__name__
+        return (
+            f"The code review failed to complete due to an unexpected error.\n\n"
+            f"**Stage:** Code review\n"
+            f"**Error type:** `{type(exc).__name__}`\n"
+            f"**Message:** {message}"
+        )
+
+    async def _detect_overlaps_safe(
+        self,
+        pr_info: PRInfo,
+        diff_text: str,
+    ) -> list[OverlapFinding]:
+        """Detect other open PRs stepping on this one. Best-effort; never raises.
+
+        Also caches this PR's change fingerprint so later reviews of *other*
+        PRs can compare against it without re-fetching its files. Runs in
+        parallel with the main review (see review_pr).
+        """
+        if not self.config.review.overlap.enabled or self.dry_run:
+            return []
+        provider = self.provider
+        if provider is None or not hasattr(provider, "list_open_prs"):
+            return []
+        try:
+            from mira.core.overlap import detect_overlaps
+
+            patch = parse_diff(diff_text)
+            filtered = filter_files(patch.files, self.config.filter)
+            current_paths = sorted({f.path for f in filtered})
+            if not current_paths:
+                return []
+
+            store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
+            try:
+                symbols: set[str] = set()
+                for path in current_paths:
+                    summary = store.get_summary(path)
+                    if summary:
+                        symbols.update(s.name for s in summary.symbols)
+                current_fp = PRFingerprint(
+                    pr_number=pr_info.number,
+                    head_sha=pr_info.head_sha,
+                    title=pr_info.title,
+                    body=pr_info.description,
+                    paths=current_paths,
+                    symbols=sorted(symbols),
+                )
+                store.upsert_pr_fingerprint(current_fp)
+                cached = {
+                    fp.pr_number: fp
+                    for fp in store.list_pr_fingerprints()
+                    if fp.pr_number != pr_info.number
+                }
+
+                cfg = self.config.review.overlap
+                candidates = await provider.list_open_prs(
+                    pr_info.owner, pr_info.repo, limit=cfg.max_candidates
+                )
+                bot = (self.bot_name or "").removesuffix("[bot]").lower()
+                candidates = [
+                    c
+                    for c in candidates
+                    if c.number != pr_info.number
+                    and not c.draft
+                    and c.author.removesuffix("[bot]").lower() != bot
+                ]
+                if not candidates:
+                    return []
+
+                return await detect_overlaps(
+                    provider=provider,
+                    llm=self.llm,
+                    config=self.config,
+                    pr_info=pr_info,
+                    current=current_fp,
+                    cached=cached,
+                    candidates=candidates,
+                    save_fp=store.upsert_pr_fingerprint,
+                )
+            finally:
+                store.close()
+        except Exception as exc:
+            logger.warning("Overlap detection failed, continuing: %s", exc)
+            return []
 
     async def review_pr(self, pr_url: str) -> ReviewResult:
         """Full pipeline: fetch PR -> review -> post results.
@@ -384,6 +557,8 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to post walkthrough placeholder: %s", exc)
 
+        _walkthrough_result: list[WalkthroughResult | None] = [None]
+
         async def _on_walkthrough_ready(wt: WalkthroughResult | None) -> None:
             if self.dry_run or wt is None or placeholder_id is None:
                 return
@@ -393,6 +568,7 @@ class ReviewEngine:
                     in_progress=True,
                 )
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
+                _walkthrough_result[0] = wt
             except Exception as exc:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
@@ -424,6 +600,9 @@ class ReviewEngine:
             logger.warning("Failed to compute review round: %s", exc)
 
         # Round 2+ uses incremental diff to avoid re-flagging untouched files.
+        # Overlap detection keeps the full diff — its fingerprint must cover the
+        # whole PR, not just the latest commits.
+        full_diff_text = diff_text
         if review_round >= 2 and pr_info.head_sha:
             try:
                 from mira.dashboard.api import _app_db
@@ -440,6 +619,20 @@ class ReviewEngine:
                         last_sha,
                         pr_info.head_sha,
                     )
+                    if incremental.strip():
+                        # A merge commit's compare diff includes everything the
+                        # base branch brought in — not this PR's code. Review
+                        # only the files the PR itself changes.
+                        pr_paths = {f.path for f in parse_diff(full_diff_text).files}
+                        restricted = _restrict_diff_to_paths(incremental, pr_paths)
+                        if len(restricted) != len(incremental):
+                            logger.info(
+                                "Round %d: restricted incremental to PR files (%d -> %d chars)",
+                                review_round,
+                                len(incremental),
+                                len(restricted),
+                            )
+                        incremental = restricted
                     if incremental.strip():
                         logger.info(
                             "Round %d incremental diff %s..%s on PR %s (was %d chars, now %d)",
@@ -475,16 +668,70 @@ class ReviewEngine:
         except Exception:
             pass
 
-        result = await self._review_diff_internal(
-            diff_text,
-            pr_title=pr_info.title,
-            pr_description=pr_info.description,
-            existing_comments=unresolved_threads or None,
-            on_walkthrough_ready=_on_walkthrough_ready,
-            review_round=review_round,
-            resolved_threads=resolved_thread_dicts or None,
-            team_conventions=team_conventions,
-        )
+        # Cross-PR overlap detection runs alongside the main review — it only
+        # needs the diff + GitHub, not the review output. Skipped when the
+        # review itself is skipped (empty incremental diff): findings only
+        # surface in the walkthrough, which won't be posted.
+        overlap_task = None
+        if diff_text.strip():
+            overlap_task = _asyncio.create_task(self._detect_overlaps_safe(pr_info, full_diff_text))
+
+        try:
+            result = await self._review_diff_internal(
+                diff_text,
+                pr_title=pr_info.title,
+                pr_description=pr_info.description,
+                existing_comments=unresolved_threads or None,
+                on_walkthrough_ready=_on_walkthrough_ready,
+                review_round=review_round,
+                resolved_threads=resolved_thread_dicts or None,
+                team_conventions=team_conventions,
+            )
+        except BaseException as exc:
+            if overlap_task is not None:
+                overlap_task.cancel()
+
+            # Await the in-progress walkthrough notification BEFORE updating the
+            # comment. If the walkthrough LLM call resolved but the callback
+            # hasn't run yet, this lets it post the in-progress content and
+            # store the result so we can re-render it below. If it fails or
+            # times out, we suppress and fall back to the bare failure notice.
+            notify_task = getattr(self, "_walkthrough_notify_task", None)
+            if notify_task is not None:
+                with contextlib.suppress(Exception):
+                    await notify_task
+                self._walkthrough_notify_task = None
+
+            # Update placeholder so the user knows the review failed.
+            # If the walkthrough already landed, re-render it without the
+            # in-progress banner and append the failure notice — preserves
+            # walkthrough content while removing the stuck "in progress" state.
+            if placeholder_id is not None:
+                try:
+                    wt = _walkthrough_result[0]
+                    if wt is not None:
+                        failure_body = wt.to_markdown(
+                            bot_name=self.bot_name or "miracodeai",
+                            in_progress=False,
+                            failure_notice=self._format_failure_notice(exc),
+                        )
+                    else:
+                        failure_body = (
+                            f"{WALKTHROUGH_MARKER}\n"
+                            "## Mira PR Walkthrough\n\n"
+                            "---\n\n"
+                            "<details>\n"
+                            "<summary><b>❌ Review failed</b> — click for details</summary>\n\n"
+                            f"{self._format_failure_notice(exc)}\n\n"
+                            "</details>\n"
+                        )
+                    await self.provider.update_comment(pr_info, placeholder_id, failure_body)
+                except Exception as comment_exc:
+                    logger.warning(
+                        "Failed to update placeholder on review failure: %s", comment_exc
+                    )
+
+            raise
 
         # The final walkthrough must land after the in-progress one, or it gets
         # overwritten on fast PRs and stays stuck on "in progress".
@@ -492,6 +739,28 @@ class ReviewEngine:
         if notify_task is not None:
             with contextlib.suppress(Exception):
                 await notify_task
+
+        overlaps: list[OverlapFinding] = []
+        if overlap_task is not None:
+            with contextlib.suppress(Exception):
+                overlaps = await overlap_task
+
+        # Inline comments must anchor to lines in the PR's diff vs base, or
+        # GitHub 422s them at posting time and the key-issues table ends up
+        # naming findings with no inline attached. Drop them here and re-sync.
+        if result.comments:
+            kept, unanchorable = _drop_unanchorable_comments(
+                result.comments, _diff_line_map(full_diff_text)
+            )
+            if unanchorable:
+                logger.info(
+                    "Dropped %d comment(s) outside the PR diff: %s",
+                    len(unanchorable),
+                    ", ".join(f"{c.path}:{c.line}" for c in unanchorable),
+                )
+                result.comments = kept
+                if result.key_issues:
+                    result.key_issues = _drop_orphan_key_issues(result.key_issues, kept)
 
         if result.walkthrough:
             _clamp_confidence_to_findings(result.walkthrough, result.comments)
@@ -565,6 +834,7 @@ class ReviewEngine:
                         total_paths=result.total_paths or None,
                         index_was_empty=getattr(self, "_index_was_empty", False),
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
+                        overlaps=overlaps or None,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -617,7 +887,7 @@ class ReviewEngine:
 
             from mira.models import Severity
 
-            store = IndexStore.open(pr_info.owner, pr_info.repo)
+            store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
             blocker_count = sum(1 for c in result.comments if c.severity == Severity.BLOCKER)
             warning_count = sum(1 for c in result.comments if c.severity == Severity.WARNING)
             suggestion_count = sum(
@@ -674,7 +944,7 @@ class ReviewEngine:
                 logger.debug("Feedback synthesis failed: %s", synth_err)
             store.close()
 
-            # Merge with any prior progress for this PR so @mira-bot review-rest
+            # Merge with any prior progress for this PR so @miracodeai review-rest
             # can target only the still-unreviewed paths.
             try:
                 from mira.dashboard.api import _app_db
@@ -789,6 +1059,18 @@ class ReviewEngine:
                 len(skipped),
             )
 
+        # Dependency-overlap candidates are picked *before* the size/priority
+        # cull below. The pass is cheap and narrowly scoped, so a manifest that
+        # loses the diff-budget race — or a big dependency bump that trips
+        # max_file_size — shouldn't silently disable it. `only_paths` still
+        # applies: review-rest targets a specific subset and shouldn't re-warn
+        # about manifests the first pass already covered.
+        manifest_candidates = (
+            _manifest_files([f for f in filtered if only_paths is None or f.path in only_paths])
+            if self.config.review.dependency_overlap
+            else []
+        )
+
         filtered = selected
 
         async def _generate_walkthrough() -> WalkthroughResult | None:
@@ -814,7 +1096,7 @@ class ReviewEngine:
             try:
                 pr_info = getattr(self, "_pr_info", None)
                 if pr_info is not None:
-                    store = IndexStore.open(pr_info.owner, pr_info.repo)
+                    store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
                     source_fetcher = None
                     if self.provider and pr_info:
                         from mira.index.context import ProviderSourceFetcher
@@ -838,28 +1120,29 @@ class ReviewEngine:
                     index_has_data_for_changed = bool(store.get_summaries(changed_paths))
                     self._jit_needed = not index_has_data_for_changed
                     self._index_was_empty = not bool(store.all_paths())
+
+                    # Hoisted: agentic fetcher/tree setup runs whenever a source fetcher exists
+                    # (indexed or not), so the reviewer tools are available on indexed repos too.
+                    tree_paths: set[str] | None = None
+                    if source_fetcher is not None and (
+                        self.config.review.agentic_tools or not index_has_data_for_changed
+                    ):
+                        self._agentic_source_fetcher = source_fetcher
+                        if hasattr(self.provider, "get_repo_tree"):
+                            try:
+                                tree_paths = set(
+                                    await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
+                                )
+                            except Exception as exc:
+                                logger.debug("Repo tree fetch failed: %s", exc)
+                        self._agentic_repo_tree = sorted(tree_paths) if tree_paths else []
+
                     if not index_has_data_for_changed and source_fetcher is not None:
                         try:
                             from mira.index.jit_context import (
                                 build_jit_cross_file_context,
                             )
 
-                            tree_paths: set[str] | None = None
-                            if hasattr(self.provider, "get_repo_tree"):
-                                try:
-                                    tree_paths = set(
-                                        await self.provider.get_repo_tree(
-                                            pr_info,
-                                            pr_info.head_branch,
-                                        )
-                                    )
-                                except Exception as exc:
-                                    logger.debug(
-                                        "JIT: tree fetch failed: %s",
-                                        exc,
-                                    )
-                            self._agentic_source_fetcher = source_fetcher
-                            self._agentic_repo_tree = sorted(tree_paths) if tree_paths else []
                             jit = await build_jit_cross_file_context(
                                 changed_files=filtered,
                                 source_fetcher=source_fetcher,
@@ -954,7 +1237,9 @@ class ReviewEngine:
         try:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
-                _rules_store = IndexStore.open(pr_info.owner, pr_info.repo)
+                _rules_store = IndexStore.open(
+                    pr_info.owner, pr_info.repo, platform=pr_info.platform
+                )
 
                 learned_rules = _rules_store.get_learned_rules_text()
 
@@ -1030,7 +1315,6 @@ class ReviewEngine:
                     raw_response = ""
                     use_agentic = (
                         self.config.review.agentic_tools
-                        and getattr(self, "_jit_needed", False)
                         and self._agentic_source_fetcher is not None
                     )
                     if use_agentic:
@@ -1108,18 +1392,99 @@ class ReviewEngine:
                     return [], [], ""
 
         review_task = _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
+        # Per-chunk executors (fresh per call) so each chunk gets its own
+        # 50KB tool-output budget; one shared executor would let an early
+        # chunk exhaust the budget and wedge later chunks.
+        _security_executor_factory = None
+        if (
+            self.config.review.security_agentic
+            and self.config.review.agentic_tools
+            and self._agentic_source_fetcher is not None
+        ):
+            from mira.llm.agentic_tools import AgenticToolExecutor
+
+            def _security_executor_factory() -> AgenticToolExecutor:
+                return AgenticToolExecutor(
+                    source_fetcher=self._agentic_source_fetcher,
+                    repo_tree=list(self._agentic_repo_tree),
+                )
+
         security_task = _asyncio.create_task(
             security_review_pass(
                 self.llm,
                 filtered,
                 _security_relevant_files(filtered),
                 pr_title,
-                indexing_llm=self.indexing_llm,
+                security_llm=self.security_llm,
+                agentic_executor_factory=_security_executor_factory,
             )
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])
         )
-        chunk_results, security_comments = await _asyncio.gather(review_task, security_task)
+
+        # Dependency-overlap pass: only when the PR touches a manifest file, so
+        # most PRs pay nothing. When it does, fetch the repo's existing package
+        # names from the index so the pass can spot a duplicate of one already
+        # present (empty list on an unindexed repo — pass falls back to the diff).
+        manifest_files = manifest_candidates
+        existing_packages: list[str] = []
+        pr_source_fetcher = None
+        if manifest_files:
+            pr_info = getattr(self, "_pr_info", None)
+            if pr_info is not None:
+                try:
+                    _pkg_store = IndexStore.open(
+                        pr_info.owner, pr_info.repo, platform=pr_info.platform
+                    )
+                    try:
+                        existing_packages = sorted(
+                            {p.name for p in _pkg_store.list_manifest_packages()}
+                        )
+                    finally:
+                        _pkg_store.close()
+                except Exception as exc:
+                    logger.debug("Manifest package lookup failed: %s", exc)
+                if self.provider is not None:
+                    from mira.index.context import ProviderSourceFetcher
+
+                    pr_source_fetcher = ProviderSourceFetcher(
+                        self.provider, pr_info, pr_info.head_branch
+                    )
+        dependency_task = _asyncio.create_task(
+            dependency_review_pass(
+                self.llm,
+                manifest_files,
+                existing_packages,
+                pr_title,
+                indexing_llm=self.indexing_llm,
+            )
+            if manifest_files
+            else _asyncio.sleep(0, result=[])
+        )
+
+        from mira.security.pr_scan import scan_manifest_changes
+
+        osv_task = _asyncio.create_task(
+            scan_manifest_changes(manifest_files, pr_source_fetcher)
+            if manifest_files and self.config.review.osv_scan and pr_source_fetcher is not None
+            else _asyncio.sleep(0, result=[])
+        )
+
+        secrets_task = _asyncio.create_task(
+            scan_secrets(filtered)
+            if filtered and self.config.review.secrets_scan
+            else _asyncio.sleep(0, result=[])
+        )
+
+        (
+            chunk_results,
+            security_comments,
+            dependency_comments,
+            osv_comments,
+            secrets_comments,
+        ) = await _asyncio.gather(
+            review_task, security_task, dependency_task, osv_task, secrets_task
+        )
 
         all_comments: list[ReviewComment] = []
         all_key_issues: list[KeyIssue] = []
@@ -1132,6 +1497,12 @@ class ReviewEngine:
                 summaries.append(summary_text)
         audit.append({"stage": "drafted", "chunk": "security", "count": len(security_comments)})
         all_comments.extend(security_comments)
+        audit.append({"stage": "drafted", "chunk": "dependency", "count": len(dependency_comments)})
+        all_comments.extend(dependency_comments)
+        audit.append({"stage": "drafted", "chunk": "osv", "count": len(osv_comments)})
+        all_comments.extend(osv_comments)
+        audit.append({"stage": "drafted", "chunk": "secrets", "count": len(secrets_comments)})
+        all_comments.extend(secrets_comments)
 
         all_comments = [classify_severity(c) for c in all_comments]
 
@@ -1159,6 +1530,12 @@ class ReviewEngine:
         # the team's documented preferences so the critic doesn't strip
         # findings that enforce them as "style nits".
         if final_comments and self.config.review.self_critique:
+            # A dependency finding can land on a manifest that lost the size
+            # cull and so isn't in `filtered`. The critic grades on the hunk
+            # covering a comment; with no hunk it reads as "unsupported" and
+            # drops the finding. Add those manifests back as evidence only.
+            _selected = {f.path for f in filtered}
+            critique_files = filtered + [f for f in manifest_candidates if f.path not in _selected]
             try:
                 final_comments = await self_critique(
                     self.llm,
@@ -1166,7 +1543,7 @@ class ReviewEngine:
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
                     indexing_llm=self.indexing_llm,
-                    diff_files=filtered,
+                    diff_files=critique_files,
                     audit=audit,
                 )
             except Exception as exc:

@@ -600,7 +600,7 @@ function PendingLearningsCard({ rules }: { rules: OrgLearnedRuleModel[] }) {
         </div>
       </CardHeader>
       <CardContent className="px-0 pb-0">
-        <Table>
+        <Table className="w-full">
           <TableBody>
             {top.map((r) => (
               <TableRow
@@ -614,8 +614,8 @@ function PendingLearningsCard({ rules }: { rules: OrgLearnedRuleModel[] }) {
                     {r.owner}/{r.repo}
                   </span>
                 </TableCell>
-                <TableCell className="text-sm text-muted-foreground">
-                  <span className="line-clamp-1">{r.rule_text}</span>
+                <TableCell className="max-w-0 text-sm text-muted-foreground">
+                  <span className="block truncate">{r.rule_text}</span>
                 </TableCell>
               </TableRow>
             ))}

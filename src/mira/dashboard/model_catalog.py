@@ -19,7 +19,7 @@ import httpx
 from mira.config import LLMConfig
 from mira.llm import provider_profiles as profiles
 from mira.llm import registry
-from mira.llm.provider import _get_api_key
+from mira.llm.base import _get_api_key
 
 logger = logging.getLogger(__name__)
 

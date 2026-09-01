@@ -23,6 +23,13 @@ from mira.dashboard.models_config import (
 from mira.dashboard.routers.admin import set_models
 
 
+def _admin_req():
+    from types import SimpleNamespace
+
+    user = SimpleNamespace(is_admin=True)
+    return SimpleNamespace(state=SimpleNamespace(user=user))
+
+
 @pytest.fixture
 def in_memory_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppDatabase:
     """Fresh per-test SQLite DB swapped in for the module-level `_app_db`."""
@@ -80,7 +87,7 @@ class TestSetModelsThinkingValidation:
             review_thinking_mode="ultra",
         )
         with pytest.raises(HTTPException) as exc:
-            set_models(body)
+            set_models(body, _admin_req())
         assert exc.value.status_code == 400
 
     def test_persists_valid_thinking_mode(self, in_memory_db: AppDatabase):
@@ -89,7 +96,7 @@ class TestSetModelsThinkingValidation:
             review_model="anthropic/claude-sonnet-4-6",
             review_thinking_mode="medium",
         )
-        assert set_models(body) == {"ok": True}
+        assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_thinking_mode") == "medium"
 
     def test_off_clears_setting_so_config_can_win(self, in_memory_db: AppDatabase):
@@ -100,7 +107,7 @@ class TestSetModelsThinkingValidation:
             review_model="anthropic/claude-sonnet-4-6",
             review_thinking_mode="off",
         )
-        assert set_models(body) == {"ok": True}
+        assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_thinking_mode") == ""
         cfg = LLMConfig(review_reasoning_effort="high")
         assert (

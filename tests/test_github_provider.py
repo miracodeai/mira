@@ -9,8 +9,9 @@ import httpx
 import pytest
 from github import GithubException
 
+from mira.core.diff_parser import parse_diff
 from mira.exceptions import ProviderError
-from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
+from mira.models import FileChangeType, PRInfo, ReviewComment, ReviewResult, Severity
 from mira.providers.github import (
     _CATEGORY_DISPLAY,
     GitHubProvider,
@@ -1296,3 +1297,234 @@ class TestRemoveLabel:
 
         # Should not raise
         await provider.remove_label(pr_info, "mira-paused")
+
+
+class TestGetPRDiff406Fallback:
+    """Tests for PR diff 406 fallback to per-file patches."""
+
+    @pytest.mark.asyncio
+    async def test_406_fallback_with_patch_and_skipped_file(self):
+        """406 triggers files-API fallback; files without patch are skipped."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+
+        call_count = 0
+
+        async def _mock_get(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call — the .diff endpoint returns 406
+                return httpx.Response(
+                    406,
+                    text="",
+                    request=httpx.Request("GET", url),
+                )
+            # Second call — files API returns JSON
+            files = [
+                {
+                    "filename": "src/a.py",
+                    "status": "modified",
+                    "patch": "@@ -1,1 +1,2 @@\n context\n+added",
+                },
+                {
+                    "filename": "src/binary.dat",
+                    "status": "modified",
+                    "patch": None,
+                },
+            ]
+            return httpx.Response(
+                200,
+                json=files,
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            result = await provider.get_pr_diff(pr_info)
+
+        # Synthesized diff contains the file with patch
+        assert "diff --git a/src/a.py b/src/a.py" in result
+        assert "+added" in result
+        # Skipped file should NOT appear
+        assert "src/binary.dat" not in result
+
+        # Parseability check
+        parsed = parse_diff(result)
+        assert len(parsed.files) == 1
+        assert parsed.files[0].path == "src/a.py"
+        assert parsed.files[0].added_lines == 1
+
+    @pytest.mark.asyncio
+    async def test_406_fallback_pagination(self):
+        """Pagination across multiple pages yields all files."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+
+        call_count = 0
+
+        async def _mock_get(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(
+                    406,
+                    text="",
+                    request=httpx.Request("GET", url),
+                )
+            params = kwargs.get("params", {})
+            page = params.get("page", 1)
+            if page == 1:
+                # 100 entries on page 1 — all modified with patch
+                files = [
+                    {
+                        "filename": f"page1/file_{i}.py",
+                        "status": "modified",
+                        "patch": "@@ -1 +1 @@\n-old\n+new",
+                    }
+                    for i in range(100)
+                ]
+            else:
+                # 1 entry on page 2 — an added file
+                files = [
+                    {
+                        "filename": "page2/added.py",
+                        "status": "added",
+                        "patch": "@@ -0,0 +1,1 @@\n+new",
+                    }
+                ]
+            return httpx.Response(
+                200,
+                json=files,
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            result = await provider.get_pr_diff(pr_info)
+
+        parsed = parse_diff(result)
+
+        # With "new file mode" header, all 101 files parse correctly as
+        # their true change_type (no ghost MODIFIED entry for added files).
+        assert len(parsed.files) == 101
+
+        # Verify the added file from page 2 round-trips
+        assert "+++ b/page2/added.py" in result
+        added = [
+            f
+            for f in parsed.files
+            if f.path == "page2/added.py" and f.change_type == FileChangeType.ADDED
+        ]
+        assert len(added) == 1
+        assert added[0].change_type == FileChangeType.ADDED
+
+    @pytest.mark.asyncio
+    async def test_406_fallback_rename_synthesis(self):
+        """Renames produce rename from/to headers parseable as RENAMED."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+
+        call_count = 0
+
+        async def _mock_get(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(
+                    406,
+                    text="",
+                    request=httpx.Request("GET", url),
+                )
+            files = [
+                {
+                    "filename": "new.py",
+                    "previous_filename": "old.py",
+                    "status": "renamed",
+                    "patch": "@@ -1 +1 @@\n-old\n+new",
+                }
+            ]
+            return httpx.Response(
+                200,
+                json=files,
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            result = await provider.get_pr_diff(pr_info)
+
+        assert "rename from old.py" in result
+        assert "rename to new.py" in result
+
+        parsed = parse_diff(result)
+        assert len(parsed.files) == 1
+        assert parsed.files[0].change_type == FileChangeType.RENAMED
+        assert parsed.files[0].old_path == "old.py"
+
+    @pytest.mark.asyncio
+    async def test_406_fallback_all_statuses_parse(self):
+        """Each file status round-trips through parse_diff with correct change_type."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+
+        call_count = 0
+
+        async def _mock_get(self, url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(
+                    406,
+                    text="",
+                    request=httpx.Request("GET", url),
+                )
+            files = [
+                {
+                    "filename": "added.py",
+                    "status": "added",
+                    "patch": "@@ -0,0 +1,1 @@\n+new",
+                },
+                {
+                    "filename": "removed.py",
+                    "status": "removed",
+                    "patch": "@@ -1,1 +0,0 @@\n-gone",
+                },
+                {
+                    "filename": "renamed.py",
+                    "previous_filename": "old.py",
+                    "status": "renamed",
+                    "patch": "@@ -1 +1 @@\n-old\n+new",
+                },
+                {
+                    "filename": "modified.py",
+                    "status": "modified",
+                    "patch": "@@ -1 +1 @@\n-old\n+new",
+                },
+            ]
+            return httpx.Response(
+                200,
+                json=files,
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            result = await provider.get_pr_diff(pr_info)
+
+        # All four statuses must parse without error
+        parsed = parse_diff(result)
+        assert len(parsed.files) == 4
+
+        # Verify each file has the correct change_type
+        by_path = {f.path: f for f in parsed.files}
+
+        assert by_path["added.py"].change_type == FileChangeType.ADDED
+        assert by_path["removed.py"].change_type == FileChangeType.DELETED
+        assert by_path["modified.py"].change_type == FileChangeType.MODIFIED
+
+        # Renamed file: old_path is the source, path is the destination
+        renamed = [f for f in parsed.files if f.change_type == FileChangeType.RENAMED]
+        assert len(renamed) == 1
+        assert renamed[0].old_path == "old.py"
+        assert renamed[0].path == "renamed.py"

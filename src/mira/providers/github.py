@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
     HumanReviewComment,
+    OpenPRRef,
     PRInfo,
     ReviewComment,
     ReviewResult,
@@ -145,6 +147,44 @@ def parse_pr_url(pr_url: str) -> tuple[str, str, int]:
     return match.group("owner"), match.group("repo"), int(match.group("number"))
 
 
+def _file_to_diff(f: dict[str, Any]) -> str:
+    """Rebuild a unified-diff file section from a GitHub files-API entry.
+
+    The API returns each file's ``patch`` without the ``diff --git`` /
+    ``---`` / ``+++`` headers unidiff needs, so reconstruct them from the
+    entry's ``filename``/``status``/``previous_filename``.
+    """
+    path = f["filename"]
+    status = f.get("status", "modified")
+    patch = f["patch"]
+    if status == "renamed":
+        prev = f.get("previous_filename") or path
+        header = [
+            f"diff --git a/{prev} b/{path}",
+            f"rename from {prev}",
+            f"rename to {path}",
+            f"--- a/{prev}",
+            f"+++ b/{path}",
+        ]
+    elif status == "added":
+        header = [
+            f"diff --git a/{path} b/{path}",
+            "new file mode 100644",
+            "--- /dev/null",
+            f"+++ b/{path}",
+        ]
+    elif status == "removed":
+        header = [
+            f"diff --git a/{path} b/{path}",
+            "deleted file mode 100644",
+            f"--- a/{path}",
+            "+++ /dev/null",
+        ]
+    else:
+        header = [f"diff --git a/{path} b/{path}", f"--- a/{path}", f"+++ b/{path}"]
+    return "\n".join(header) + "\n" + patch
+
+
 class GitHubProvider(BaseProvider):
     """GitHub code hosting provider."""
 
@@ -194,6 +234,17 @@ class GitHubProvider(BaseProvider):
         async def _fetch_diff() -> str:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(diff_url, headers=headers, follow_redirects=True)
+                if resp.status_code == 406:
+                    # GitHub 406s once a PR diff exceeds its ~20,000-line cap.
+                    # Fall back to per-file patches from the files API.
+                    logger.info(
+                        "PR diff too large for single fetch (406); falling back to per-file patches"
+                    )
+                    return await self._fetch_files_diff(
+                        client,
+                        f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/pulls/{pr_info.number}/files",
+                        pr_info,
+                    )
                 resp.raise_for_status()
                 return resp.text
 
@@ -203,6 +254,52 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to fetch PR diff: {e}") from e
+
+    async def _fetch_files_diff(
+        self, client: httpx.AsyncClient, files_url: str, pr_info: PRInfo
+    ) -> str:
+        """Synthesize a unified diff from per-file patches (files API).
+
+        Fallback for when the .diff media type 406s (diff over GitHub's
+        ~20,000-line cap). Paginates up to GitHub's 3000-file ceiling; files
+        too large for an individual patch arrive without one and are skipped
+        with a warning.
+        """
+        headers = {
+            "Authorization": f"token {self._token}",
+            "Accept": "application/vnd.github+json",
+        }
+        files: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await client.get(
+                files_url,
+                headers=headers,
+                params={"per_page": 100, "page": page},
+                follow_redirects=True,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            files.extend(batch)
+            if len(batch) < 100 or len(files) >= 3000:
+                break
+            page += 1
+
+        parts: list[str] = []
+        skipped: list[str] = []
+        for f in files:
+            if f.get("patch"):
+                parts.append(_file_to_diff(f))
+            else:
+                skipped.append(f.get("filename", "?"))
+        if skipped:
+            logger.warning(
+                "Per-file diff fallback: %d file(s) too large for individual patches, skipped in %s: %s",
+                len(skipped),
+                pr_info.url,
+                ", ".join(skipped[:10]) + ("…" if len(skipped) > 10 else ""),
+            )
+        return "\n\n".join(parts)
 
     async def get_compare_diff(
         self,
@@ -241,6 +338,74 @@ class GitHubProvider(BaseProvider):
             return await _fetch()
         except Exception as e:
             raise ProviderError(f"Failed to fetch compare diff: {e}") from e
+
+    async def list_open_prs(
+        self,
+        owner: str,
+        repo: str,
+        limit: int = 20,
+    ) -> list[OpenPRRef]:
+        """List the most recently updated open PRs in a repo.
+
+        Returns lightweight refs (no diff fetched) used by cross-PR overlap
+        detection to decide which PRs are worth comparing in depth. Capped at
+        ``limit`` to bound the work on busy repos.
+        """
+
+        @_retry_transient
+        def _fetch() -> list[OpenPRRef]:
+            gh_repo = self._github.get_repo(f"{owner}/{repo}")
+            pulls = gh_repo.get_pulls(state="open", sort="updated", direction="desc")
+            out: list[OpenPRRef] = []
+            for pr in itertools.islice(pulls, limit):
+                out.append(
+                    OpenPRRef(
+                        number=pr.number,
+                        title=pr.title or "",
+                        body=pr.body or "",
+                        head_sha=pr.head.sha or "",
+                        author=(pr.user.login if pr.user else ""),
+                        draft=bool(pr.draft),
+                        base_ref=pr.base.ref if pr.base else "",
+                        head_ref=pr.head.ref if pr.head else "",
+                        url=pr.html_url,
+                    )
+                )
+            return out
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception as e:
+            raise ProviderError(f"Failed to list open PRs: {e}") from e
+
+    async def get_pr_files(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        limit: int = 300,
+    ) -> list[str]:
+        """Return the file paths changed by a PR (filenames only).
+
+        Far cheaper than fetching the full diff — used as the fallback when a
+        candidate PR has no cached fingerprint (or it's stale). Returns an empty
+        list if the PR has vanished (closed/merged mid-review).
+        """
+
+        @_retry_transient
+        def _fetch() -> list[str]:
+            gh_repo = self._github.get_repo(f"{owner}/{repo}")
+            pr = gh_repo.get_pull(number)
+            return [f.filename for f in itertools.islice(pr.get_files(), limit)]
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except GithubException as e:
+            if getattr(e, "status", None) == 404:
+                return []
+            raise ProviderError(f"Failed to fetch PR files: {e}") from e
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch PR files: {e}") from e
 
     async def post_review(
         self,

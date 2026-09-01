@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from mira.config import FilterConfig, MiraConfig
 from mira.platforms.gitlab.auth import GitLabTokenAuth
 from mira.platforms.server import create_app
 
@@ -226,3 +227,93 @@ async def test_github_route_404_when_not_configured(client):
     # GitLab-only deployment: the GitHub webhook route is disabled.
     resp = await client.post("/github/webhook", content="{}", headers={"X-GitHub-Event": "ping"})
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_mr_open_blocked_author_filtered(client):
+    payload = _mr_payload(action="open")
+    payload["user"]["username"] = "dependabot"
+    cfg = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
+        )
+    assert resp.json()["status"] == "ignored"
+    h.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mr_open_allowed_author_not_filtered(client):
+    payload = _mr_payload(action="open")
+    payload["user"]["username"] = "alice"
+    cfg = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
+        )
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mr_open_allowlist_filters_off_list(client):
+    payload = _mr_payload(action="open")
+    payload["user"]["username"] = "bob"
+    cfg = MiraConfig(filter=FilterConfig(allowed_authors=["alice"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
+        )
+    assert resp.json()["status"] == "ignored"
+    h.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_note_review_bypass_for_blocked_author(client):
+    payload = _note_payload(note="@mira-bot review")
+    payload["user"]["username"] = "dependabot"
+    cfg = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_gitlab_note", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_note_non_review_no_bypass(client):
+    payload = _note_payload(note="@mira-bot pause")
+    payload["user"]["username"] = "alice"
+    cfg = MiraConfig(filter=FilterConfig(blocked_authors=["alice"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_gitlab_note", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+    assert resp.json()["status"] == "ignored"
+    h.assert_not_called()

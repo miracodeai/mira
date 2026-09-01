@@ -20,6 +20,13 @@ from mira.dashboard.models_config import llm_config_for
 from mira.dashboard.routers.admin import get_models, set_models
 
 
+def _admin_req():
+    from types import SimpleNamespace
+
+    user = SimpleNamespace(is_admin=True)
+    return SimpleNamespace(state=SimpleNamespace(user=user))
+
+
 @pytest.fixture
 def in_memory_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppDatabase:
     """Fresh per-test SQLite DB swapped in for the module-level `_app_db`."""
@@ -59,7 +66,7 @@ class TestSetModelsInheritAndCustom:
     def test_empty_value_clears_override(self, in_memory_db: AppDatabase):
         in_memory_db.set_setting("review_model", "anthropic/claude-sonnet-4-6")
         body = ModelsUpdate(indexing_model="", review_model="")
-        assert set_models(body) == {"ok": True}
+        assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_model") == ""
         # Cleared override → config is authoritative again.
         cfg = LLMConfig(review_model="openai/gpt-5.1")
@@ -70,7 +77,7 @@ class TestSetModelsInheritAndCustom:
             indexing_model="local/llama-3.3-70b",
             review_model="openai/gpt-5.1-codex-mini",
         )
-        assert set_models(body) == {"ok": True}
+        assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_model") == "openai/gpt-5.1-codex-mini"
         assert llm_config_for("review", LLMConfig()).model == "openai/gpt-5.1-codex-mini"
 

@@ -40,6 +40,11 @@ class LLMConfig(BaseModel):
     # Optional per-purpose overrides. Fall back to `model` if not set.
     indexing_model: str | None = None
     review_model: str | None = None
+    # Optional dedicated model for the security review pass. Falls back to
+    # `review_model`, then `model` — deliberately never to `indexing_model`:
+    # the security sweep is the highest-stakes pass and must not silently
+    # downgrade to the indexing tier.
+    security_model: str | None = None
     # Extended-thinking effort for reviews ("low"/"medium"/"high"; None/"off" =
     # no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
     # `reasoning_effort` is the resolved value the provider reads (set by
@@ -52,6 +57,11 @@ class LLMConfig(BaseModel):
     # Provider selection. "openai" uses any OpenAI-compatible endpoint (default).
     # "bedrock" uses AWS Bedrock Converse API directly (requires boto3).
     provider: str = "openai"
+    # Protocol dialect for the OpenAI-compatible endpoint: "chat"
+    # (Chat Completions, default) or "responses" (OpenAI Responses API).
+    # Only meaningful when `provider` is "openai" — bedrock ignores it
+    # (create_llm checks provider first).
+    api_style: str = "chat"
     # Endpoint configuration. Defaults to OpenRouter but any OpenAI-compatible
     # chat-completions endpoint works — vLLM, Ollama, LiteLLM proxy, LocalAI,
     # llama.cpp server, Together, Fireworks, Groq, etc. Set api_key_env to ""
@@ -62,6 +72,12 @@ class LLMConfig(BaseModel):
     # (env vars, instance profile, ECS task role, SSO).
     region: str = "us-east-1"
     aws_profile: str | None = None
+    # Retry and timeout configuration for LLM calls.
+    # Defaults match the previous hardcoded values to preserve existing behavior.
+    max_retries: int = Field(default=3, ge=1)
+    request_timeout: int = Field(default=120, ge=1)
+    retry_min_wait: int = Field(default=2, ge=0)
+    retry_max_wait: int = Field(default=30, ge=0)
     # Codex CLI provider settings. Auth is handled by Codex itself through
     # CODEX_HOME/auth.json from `codex login`; Mira does not need an OpenAI API key.
     codex_command: str = "codex"
@@ -122,6 +138,35 @@ class FilterConfig(BaseModel):
     )
     exclude_deleted: bool = True
     max_files: int = 50
+    # Only auto-review PRs whose author (payload `sender.login` /
+    # `user.username`) is in this list. Empty list = review all (default).
+    # Bot-self events are always excluded regardless of this list.
+    allowed_authors: list[str] = Field(default_factory=list)
+    # Never auto-review PRs from these authors. Takes precedence over
+    # allowed_authors. A trailing `[bot]` suffix on the payload login is
+    # stripped by the dispatcher check so that `dependabot` here matches
+    # `dependabot[bot]` in a webhook payload.
+    blocked_authors: list[str] = Field(default_factory=list)
+
+
+class OverlapConfig(BaseModel):
+    """Cross-PR overlap detection ("stepping on each other's toes").
+
+    While reviewing a PR, Mira compares it against other open PRs in the repo
+    and flags ones that touch the same code (merge-conflict risk) or pursue the
+    same goal (duplicate effort). A cheap deterministic pre-filter runs first;
+    only the survivors cost an LLM call.
+    """
+
+    enabled: bool = True
+    # Cap on how many recently-updated open PRs to compare against, to bound
+    # GitHub API calls and LLM cost on busy repos.
+    max_candidates: int = Field(default=20, ge=1, le=100)
+    # Verdicts below this confidence are dropped (LLM-scored, 0..1).
+    confidence_floor: float = Field(default=0.6, ge=0.0, le=1.0)
+    # Pre-filter keeps a candidate with no shared files/symbols only if its
+    # title is at least this Jaccard-similar — the duplicate-effort lane.
+    title_similarity_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
 
 
 class ReviewConfig(BaseModel):
@@ -129,7 +174,7 @@ class ReviewConfig(BaseModel):
     # Total diff size cap. Above this, the diff is *not* truncated arbitrarily —
     # files are ranked by priority and the lowest-priority files are skipped
     # until the diff fits. Skipped files are listed in the walkthrough so the
-    # user can invoke `@mira-bot review-rest` to review them.
+    # user can invoke `@miracodeai review-rest` to review them.
     max_diff_size: int = 250_000
     # Per-file size cap. A single huge file (lockfile, generated SDK, etc.)
     # gets skipped before chunking even starts.
@@ -163,22 +208,39 @@ class ReviewConfig(BaseModel):
     self_critique: bool = True
 
     # Run a dedicated security review pass in parallel with the main review.
-    # Uses the *indexing* tier LLM with a security-focused prompt (XSS,
-    # injection, auth bypass, CSRF, SSRF, origin validation, deserialization,
-    # crypto). The main pass on the review tier still catches deeper
-    # chained-inference security bugs — this pass is the cheap pattern-
-    # matching sweep on top. Set ``llm.indexing_model`` to the same model
-    # as ``llm.review_model`` if you want the heavy model on every pass.
-    # Findings are merged into the main review's comments list and go
-    # through the same noise filter (dedup against overlapping main-pass
-    # findings).
+    # Uses the security tier (`llm.security_model`, falling back to the
+    # review model). The main pass on the review tier still catches deeper
+    # chained-inference security bugs — this pass is the focused pattern
+    # sweep (XSS, injection, auth bypass, CSRF, SSRF, origin validation,
+    # deserialization, crypto) on top. Findings merge into the main review's
+    # comments and go through the same noise filter.
     security_pass: bool = True
 
-    # When the repo is not indexed, give the reviewer LLM tools (`read_file`,
-    # `grep_repo`) it can call to fetch cross-file context on demand. Closes
-    # the gap on Java/Go cross-file findings that JIT pre-fetch can't reach
-    # (those languages need build-system parsing to resolve imports).
-    # No effect when the repo is indexed.
+    # Agentic loop (`read_file`, `grep_repo`) for the security pass on the
+    # security-tier model, so it can verify cross-file claims before filing,
+    # like the main pass. Falls back to the one-shot call when the loop bails
+    # without a submission. Gated on `agentic_tools` plus a live source
+    # fetcher — without either, the pass runs the one-shot path unchanged.
+    security_agentic: bool = True
+
+    # Deterministic CVE check on changed dependency manifests: packages added
+    # or version-bumped by the PR are queried against OSV.dev at review time
+    # (the background poller only re-scans the repo hourly, post-merge). No
+    # LLM involved — one batch HTTP request per PR with manifest changes.
+    osv_scan: bool = True
+
+    # Deterministic regex+entropy scan of added diff lines for hardcoded
+    # keys/tokens/passwords. No LLM involved — pure in-memory regex pass,
+    # no network. Complements the LLM security pass (which has no key-format
+    # rules).
+    secrets_scan: bool = True
+
+    # Give the reviewer LLM tools (`read_file`, `grep_repo`) to fetch
+    # cross-file context on demand. On unindexed repos this closes the
+    # Java/Go gaps JIT pre-fetch can't reach; on indexed repos it lets the
+    # reviewer trace callers and dispatch points beyond the pre-fetched
+    # index context. Disable to force single-shot reviews (cheaper, less
+    # thorough).
     agentic_tools: bool = True
 
     # Whether the JIT cross-file resolver should attempt Java + Go imports.
@@ -194,10 +256,27 @@ class ReviewConfig(BaseModel):
     # skip the relationship-store lookup and trim the walkthrough.
     blast_radius: bool = True
 
+    # Warn when a PR adds a dependency that duplicates the functionality of one
+    # already in the repo (e.g. a second table or HTTP-client library). Runs a
+    # dedicated indexing-tier pass, but only when the PR changes a manifest file
+    # (package.json, pyproject.toml, go.mod, …) — no LLM call otherwise.
+    dependency_overlap: bool = True
+
+    # Cross-PR overlap detection — flag other open PRs that step on this one
+    # (same files = merge-conflict risk, or same goal = duplicate effort).
+    overlap: OverlapConfig = Field(default_factory=OverlapConfig)
+
     # Automatically resolve bot review threads that the LLM verifies as fixed
     # on each review pass. Disable to leave all bot comments open until a human
     # resolves them (user-initiated reject/resolve replies still work).
     auto_resolve_conversations: bool = True
+
+    # Auto-review on every push (`synchronize` event). When False, Mira only
+    # reviews when the PR is opened or reopened. Subsequent commits are
+    # ignored unless you comment `@bot_name review` to trigger a manual pass.
+    # Disabling this saves tokens and reduces noise when you batch commits
+    # locally before pushing — only the final diff gets reviewed.
+    review_on_synchronize: bool = True
 
 
 class IndexConfig(BaseModel):
@@ -214,7 +293,9 @@ class ProviderConfig(BaseModel):
 
 class DatabaseConfig(BaseModel):
     url: str = ""  # empty = SQLite fallback. "postgresql://user:pass@host:5432/mira"
-    admin_password: str = "admin"  # default admin password, change in production
+    admin_password: str = (
+        ""  # initial admin password; empty = generated on first start, written to a 0600 file
+    )
 
 
 class MiraConfig(BaseModel):

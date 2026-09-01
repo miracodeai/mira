@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mira.config import LLMConfig
-from mira.exceptions import LLMError
+from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm.provider import LLMProvider
 
 # Set a dummy API key for tests so _get_api_key() doesn't fail
@@ -318,6 +318,100 @@ class TestComplete:
             result = await provider.complete([{"role": "user", "content": "hi"}])
 
         assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_config_timeout_passed_to_httpx(self):
+        config = LLMConfig(model="test-model", request_timeout=300)
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response(_make_response_json("ok"))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+            assert mock_client_cls.call_args.kwargs["timeout"] == 300
+
+    @pytest.mark.asyncio
+    async def test_config_retries_count(self):
+        config = LLMConfig(
+            model="test-model",
+            max_retries=5,
+            retry_min_wait=0,
+            retry_max_wait=0,
+        )
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response({}, status_code=500)
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(LLMError):
+                await provider.complete([{"role": "user", "content": "hi"}])
+
+            assert mock_client.post.call_count == 5
+
+    @pytest.mark.asyncio
+    async def test_4xx_raises_non_retriable_error(self):
+        """4xx errors (except 429) raise NonRetriableLLMError and skip retry."""
+        config = LLMConfig(
+            model="test-model",
+            max_retries=5,
+            retry_min_wait=0,
+            retry_max_wait=0,
+        )
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response({}, status_code=400)
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(NonRetriableLLMError):
+                await provider.complete([{"role": "user", "content": "hi"}])
+
+            # Non-retriable: only 1 attempt, no retries
+            assert mock_client.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_429_raises_retriable_error(self):
+        """429 (rate limit) raises LLMError and retries."""
+        config = LLMConfig(
+            model="test-model",
+            max_retries=3,
+            retry_min_wait=0,
+            retry_max_wait=0,
+        )
+        provider = LLMProvider(config)
+
+        mock_resp = _mock_httpx_response({}, status_code=429)
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(LLMError):
+                await provider.complete([{"role": "user", "content": "hi"}])
+
+            # Retriable: 3 attempts
+            assert mock_client.post.call_count == 3
 
 
 class TestCountTokens:

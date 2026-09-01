@@ -21,6 +21,11 @@ def create_llm(config: LLMConfig) -> LLMProviderProtocol:
 
         return CodexCLIProvider(config)
 
+    if config.api_style == "responses":
+        from mira.llm.responses import ResponsesProvider
+
+        return ResponsesProvider(config)
+
     # Default: OpenAI-compatible endpoint (OpenRouter, vLLM, Ollama, etc.)
     from mira.llm.provider import LLMProvider
 

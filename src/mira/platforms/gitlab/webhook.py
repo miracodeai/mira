@@ -15,10 +15,17 @@ from typing import Any
 
 import httpx
 
+from mira.config import load_config
 from mira.platforms import profiles
 from mira.platforms.auth import PlatformAuth
 from mira.platforms.fetch import _next_link, make_fetcher
-from mira.platforms.mentions import has_mention, mention_names, strip_mentions
+from mira.platforms.mentions import (
+    author_is_filtered,
+    command_after_mention,
+    has_mention,
+    mention_names,
+    strip_mentions,
+)
 from mira.providers import create_provider
 
 logger = logging.getLogger(__name__)
@@ -110,7 +117,15 @@ async def handle_merge_request(payload: dict[str, Any], auth: PlatformAuth, bot_
         token = await auth.get_token()
         provider = create_provider("gitlab", token)
         await run_pr_review(
-            provider, owner, repo, iid, mr_url, is_private, bot_name, platform="gitlab"
+            provider,
+            owner,
+            repo,
+            iid,
+            mr_url,
+            is_private,
+            bot_name,
+            platform="gitlab",
+            pr_title=attrs.get("title", "") or "",
         )
     except Exception:
         logger.exception("Error handling GitLab merge_request event for %s/%s!%s", owner, repo, iid)
@@ -291,6 +306,18 @@ async def dispatch_gitlab_event(
         action = attrs.get("action", "")
         # 'update' fires for many reasons; only review when new commits landed.
         if action in ("open", "reopen") or (action == "update" and attrs.get("oldrev")):
+            cfg = load_config()
+            if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+                logger.debug("MR skipped — author %s filtered by author filter", actor)
+                return "ignored"
+            # Same opt-out as GitHub's `synchronize`: new commits on an already
+            # open MR only get reviewed on an explicit `@bot review` comment.
+            if action == "update" and not cfg.review.review_on_synchronize:
+                logger.info(
+                    "MR !%s push skipped — review.review_on_synchronize is off",
+                    attrs.get("iid", 0),
+                )
+                return "ignored"
             background_tasks.add_task(handle_merge_request, payload, auth, bot_name)
             return "processing"
         if action == "merge":
@@ -304,6 +331,14 @@ async def dispatch_gitlab_event(
         if attrs.get("noteable_type") == "MergeRequest" and has_mention(
             attrs.get("note") or "", names
         ):
+            cmd_word = command_after_mention(attrs.get("note") or "", names)
+            if cmd_word != "review":
+                cfg = load_config()
+                if author_is_filtered(
+                    actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors
+                ):
+                    logger.debug("MR note skipped — author %s filtered", actor)
+                    return "ignored"
             background_tasks.add_task(handle_gitlab_note, payload, auth, bot_name)
             return "processing"
         return "ignored"
@@ -312,6 +347,10 @@ async def dispatch_gitlab_event(
         ref = payload.get("ref", "")
         default_branch = payload.get("project", {}).get("default_branch", "main")
         if ref == f"refs/heads/{default_branch}":
+            cfg = load_config()
+            if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
+                logger.debug("push skipped — author %s filtered", actor)
+                return "ignored"
             background_tasks.add_task(handle_gitlab_push, payload, auth, bot_name)
             return "processing"
 

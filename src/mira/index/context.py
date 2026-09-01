@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from mira.core.file_types import language_from_extension
 from mira.index.extract import extract_symbols, find_symbol_by_name
 from mira.index.store import IndexStore
 from mira.models import PRInfo
@@ -271,24 +272,5 @@ async def build_code_context(
 
 def _ext_to_language(ext: str) -> str:
     """Map file extension to language identifier."""
-    mapping = {
-        "py": "python",
-        "js": "javascript",
-        "ts": "typescript",
-        "tsx": "typescript",
-        "jsx": "javascript",
-        "go": "go",
-        "rs": "rust",
-        "java": "java",
-        "rb": "ruby",
-        "php": "php",
-        "c": "c",
-        "cpp": "cpp",
-        "h": "c",
-        "hpp": "cpp",
-        "cs": "cs",
-        "swift": "swift",
-        "kt": "kotlin",
-        "scala": "scala",
-    }
-    return mapping.get(ext.lower(), ext.lower())
+    normalized = ext.lower().lstrip(".")
+    return language_from_extension(normalized, default=normalized)

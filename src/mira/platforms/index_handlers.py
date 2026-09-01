@@ -74,6 +74,11 @@ async def run_incremental_index(
             fetcher=fetcher,
         )
 
+    # ``count`` is the number of files re-indexed *this run*, not the total
+    # in the store. For incremental runs that's a small subset (e.g. 3 of 120),
+    # so reading the store's actual path count keeps the repos-list file count
+    # in sync with the detail page.
+    total_files = len(store.all_paths())
     store.close()
 
     if count > 0:
@@ -82,7 +87,7 @@ async def run_incremental_index(
                 owner,
                 repo,
                 "ready",
-                files_indexed=count,
+                files_indexed=total_files,
                 bump_last_indexed=True,
                 platform=platform,
             )

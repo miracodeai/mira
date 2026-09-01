@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -9,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 
 from mira.index._store_shared import _StoreSharedMixin
+from mira.models import PRFingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,16 @@ CREATE TABLE IF NOT EXISTS pr_replies (
     github_comment_id INTEGER NOT NULL DEFAULT 0,
     in_reply_to_id INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS pr_fingerprints (
+    pr_number INTEGER PRIMARY KEY,
+    head_sha TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    paths TEXT NOT NULL DEFAULT '[]',
+    symbols TEXT NOT NULL DEFAULT '[]',
+    updated_at REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS review_context (
@@ -989,6 +1001,59 @@ class IndexStore(_StoreSharedMixin):
             "avg_duration_ms": int(row[8]),
             "categories": cat_counts,
         }
+
+    # Fingerprints untouched this long belong to closed/abandoned PRs — prune
+    # them on write so the table doesn't grow forever.
+    _FINGERPRINT_TTL = 30 * 86400
+
+    def upsert_pr_fingerprint(self, fp: PRFingerprint) -> None:
+        """Insert or update the change fingerprint for a PR in this repo."""
+        now = fp.updated_at or time.time()
+        self._conn.execute(
+            "DELETE FROM pr_fingerprints WHERE updated_at < ?",
+            (now - self._FINGERPRINT_TTL,),
+        )
+        self._conn.execute(
+            """INSERT INTO pr_fingerprints
+                   (pr_number, head_sha, title, body, paths, symbols, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(pr_number) DO UPDATE SET
+                 head_sha=excluded.head_sha,
+                 title=excluded.title,
+                 body=excluded.body,
+                 paths=excluded.paths,
+                 symbols=excluded.symbols,
+                 updated_at=excluded.updated_at""",
+            (
+                fp.pr_number,
+                fp.head_sha,
+                fp.title,
+                fp.body,
+                json.dumps(fp.paths),
+                json.dumps(fp.symbols),
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    def list_pr_fingerprints(self) -> list[PRFingerprint]:
+        """Return every cached PR fingerprint for this repo."""
+        rows = self._conn.execute(
+            "SELECT pr_number, head_sha, title, body, paths, symbols, updated_at "
+            "FROM pr_fingerprints"
+        ).fetchall()
+        return [
+            PRFingerprint(
+                pr_number=r[0],
+                head_sha=r[1],
+                title=r[2],
+                body=r[3],
+                paths=json.loads(r[4] or "[]"),
+                symbols=json.loads(r[5] or "[]"),
+                updated_at=r[6],
+            )
+            for r in rows
+        ]
 
     def list_review_context(self) -> list[ReviewContext]:
         """List all review context entries."""

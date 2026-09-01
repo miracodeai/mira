@@ -44,11 +44,21 @@ class RepoFetcher(Protocol):
     ) -> str | None: ...
 
     async def repo_tarball(
-        self, owner: str, repo: str, ref: str, max_file_size: int = 1_048_576
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        max_file_size: int = 1_048_576,
+        indexable_paths: set[str] | None = None,
     ) -> dict[str, str] | None: ...
 
 
-def _strip_tarball(blob: bytes, max_file_size: int, label: str) -> dict[str, str] | None:
+def _strip_tarball(
+    blob: bytes,
+    max_file_size: int,
+    label: str,
+    indexable_paths: set[str] | None = None,
+) -> dict[str, str] | None:
     """Decode a gzipped tarball into ``{repo-relative path: text}``.
 
     Both GitHub and GitLab wrap files under a single top-level dir
@@ -64,6 +74,9 @@ def _strip_tarball(blob: bytes, max_file_size: int, label: str) -> dict[str, str
                     continue
                 parts = member.name.split("/", 1)
                 if len(parts) != 2 or not parts[1]:
+                    continue
+                rel_path = parts[1]
+                if indexable_paths is not None and rel_path not in indexable_paths:
                     continue
                 f = tf.extractfile(member)
                 if f is None:
@@ -135,7 +148,12 @@ class GitHubRepoFetcher:
         return await _fetch()
 
     async def repo_tarball(
-        self, owner: str, repo: str, ref: str, max_file_size: int = 1_048_576
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        max_file_size: int = 1_048_576,
+        indexable_paths: set[str] | None = None,
     ) -> dict[str, str] | None:
         url = f"{self._api}/repos/{owner}/{repo}/tarball/{ref}"
         headers = {**self._headers(), "User-Agent": "mira-indexer"}
@@ -151,7 +169,7 @@ class GitHubRepoFetcher:
         except Exception as exc:
             logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
             return None
-        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}")
+        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}", indexable_paths)
 
 
 class GitLabRepoFetcher:
@@ -231,7 +249,12 @@ class GitLabRepoFetcher:
         return await _fetch()
 
     async def repo_tarball(
-        self, owner: str, repo: str, ref: str, max_file_size: int = 1_048_576
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        max_file_size: int = 1_048_576,
+        indexable_paths: set[str] | None = None,
     ) -> dict[str, str] | None:
         url = f"{self._project(owner, repo)}/repository/archive.tar.gz?sha={ref}"
         try:
@@ -246,7 +269,7 @@ class GitLabRepoFetcher:
         except Exception as exc:
             logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
             return None
-        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}")
+        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}, indexable_paths")
 
 
 class ForgejoRepoFetcher:
@@ -325,7 +348,12 @@ class ForgejoRepoFetcher:
         return await _fetch()
 
     async def repo_tarball(
-        self, owner: str, repo: str, ref: str, max_file_size: int = 1_048_576
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        max_file_size: int = 1_048_576,
+        indexable_paths: set[str] | None = None,
     ) -> dict[str, str] | None:
         url = f"{self._repo(owner, repo)}/archive/{ref}.tar.gz"
         try:
@@ -340,7 +368,7 @@ class ForgejoRepoFetcher:
         except Exception as exc:
             logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
             return None
-        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}")
+        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}, indexable_paths")
 
 
 def _next_link(link_header: str) -> str | None:

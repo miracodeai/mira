@@ -86,7 +86,7 @@ class CodexCLIProvider:
         if source_home:
             source_auth = Path(source_home).expanduser() / "auth.json"
             if not source_auth.is_file():
-                raise LLMError(f"Codex auth file not found: {source_auth}")
+                raise LLMError("codex_auth_file_missing", path=str(source_auth))
             destination_auth = destination / "auth.json"
             destination_auth.write_bytes(source_auth.read_bytes())
             destination_auth.chmod(0o600)
@@ -161,8 +161,7 @@ class CodexCLIProvider:
                 )
             except FileNotFoundError as exc:
                 raise LLMError(
-                    f"Codex CLI command not found: {self.config.codex_command!r}. "
-                    "Install @openai/codex or set llm.codex_command."
+                    "codex_command_not_found", command=self.config.codex_command
                 ) from exc
 
             try:
@@ -172,9 +171,7 @@ class CodexCLIProvider:
                 )
             except TimeoutError as exc:
                 await self._terminate_process_tree(proc)
-                raise LLMError(
-                    f"Codex CLI timed out after {self.config.codex_timeout_seconds}s"
-                ) from exc
+                raise LLMError("codex_timeout", seconds=self.config.codex_timeout_seconds) from exc
             except BaseException:
                 await self._terminate_process_tree(proc)
                 raise
@@ -186,7 +183,11 @@ class CodexCLIProvider:
 
             if proc.returncode != 0:
                 detail = (stderr_text or stdout_text or last_message).strip()
-                raise LLMError(f"Codex CLI failed with exit {proc.returncode}: {detail[-2000:]}")
+                raise LLMError(
+                    "codex_exit_failed",
+                    exit_code=proc.returncode,
+                    detail=detail[-2000:],
+                )
 
             return (last_message or stdout_text).strip()
 
@@ -220,7 +221,7 @@ class CodexCLIProvider:
     def _extract_json_object(self, text: str) -> str:
         candidate = text.strip()
         if not candidate:
-            raise LLMError("Codex CLI returned an empty response")
+            raise LLMError("codex_empty_response")
 
         def is_object(value: str) -> bool:
             try:
@@ -244,9 +245,7 @@ class CodexCLIProvider:
         else:
             if isinstance(parsed_candidate, dict):
                 return candidate
-            raise LLMError(
-                f"Codex CLI response must be a JSON object, got {type(parsed_candidate).__name__}"
-            )
+            raise LLMError("codex_non_object_json", type=type(parsed_candidate).__name__)
 
         start = candidate.find("{")
         end = candidate.rfind("}")
@@ -256,12 +255,14 @@ class CodexCLIProvider:
                 parsed = json.loads(obj)
             except Exception as exc:
                 raise LLMError(
-                    f"Codex CLI returned malformed JSON: {exc}: {candidate[:1000]}"
+                    "codex_malformed_json",
+                    error=str(exc),
+                    excerpt=candidate[:1000],
                 ) from exc
             if isinstance(parsed, dict):
                 return obj
 
-        raise LLMError(f"Codex CLI response did not contain a JSON object: {candidate[:1000]}")
+        raise LLMError("codex_no_json_object", excerpt=candidate[:1000])
 
     async def complete(
         self,

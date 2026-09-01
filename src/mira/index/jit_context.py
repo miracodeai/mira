@@ -18,6 +18,7 @@ import logging
 import re
 from pathlib import PurePosixPath
 
+from mira.core.file_types import language_from_path
 from mira.index.extract import extract_symbols
 from mira.models import FileDiff
 
@@ -94,17 +95,6 @@ _GO_STDLIB_HINTS = (
     "strconv/",
     "time/",
 )
-
-_EXT_TO_LANG = {
-    "py": "python",
-    "js": "javascript",
-    "jsx": "javascript",
-    "ts": "typescript",
-    "tsx": "typescript",
-    "rb": "ruby",
-    "java": "java",
-    "go": "go",
-}
 
 _MAX_FILES = 8
 _MAX_PER_FILE_CHARS = 1500
@@ -437,8 +427,7 @@ async def build_jit_cross_file_context(
         if files_added >= _MAX_FILES or chars_used >= char_budget:
             break
 
-        ext = _ext(changed_file.path)
-        lang = _EXT_TO_LANG.get(ext)
+        lang = language_from_path(changed_file.path)
         if not lang:
             continue
 
@@ -477,7 +466,7 @@ async def build_jit_cross_file_context(
             if not imported_source:
                 continue
 
-            cand_lang = _EXT_TO_LANG.get(_ext(cand), lang)
+            cand_lang = language_from_path(cand, default=lang)
             symbols = extract_symbols(imported_source, cand_lang)
             if not symbols:
                 continue

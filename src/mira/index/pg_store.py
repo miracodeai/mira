@@ -5,6 +5,7 @@ One shared database with `owner`/`repo` columns on every table for scoping.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -19,6 +20,7 @@ from mira.index.store import (
     ExternalRef,
     FeedbackEventRow,
     FileSummary,
+    IndexStore,
     LearnedRuleRow,
     ReplyRow,
     ReviewCommentRow,
@@ -26,6 +28,7 @@ from mira.index.store import (
     ReviewEvent,
     SymbolInfo,
 )
+from mira.models import PRFingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +147,19 @@ CREATE TABLE IF NOT EXISTS pr_replies (
     github_comment_id BIGINT NOT NULL DEFAULT 0,
     in_reply_to_id BIGINT NOT NULL DEFAULT 0,
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS pr_fingerprints (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    head_sha TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    paths TEXT NOT NULL DEFAULT '[]',
+    symbols TEXT NOT NULL DEFAULT '[]',
+    updated_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner, repo, pr_number)
 );
 
 CREATE TABLE IF NOT EXISTS review_context (
@@ -830,6 +846,52 @@ class PgIndexStore(_StoreSharedMixin):
             reviewed_paths=reviewed_paths,
         )
 
+    def upsert_pr_fingerprint(self, fp: PRFingerprint) -> None:
+        now = fp.updated_at or time.time()
+        with self._cursor() as cur:
+            cur.execute(
+                "DELETE FROM pr_fingerprints WHERE owner=%s AND repo=%s AND updated_at < %s",
+                (self._owner, self._repo, now - IndexStore._FINGERPRINT_TTL),
+            )
+            cur.execute(
+                "INSERT INTO pr_fingerprints "
+                "(owner, repo, pr_number, head_sha, title, body, paths, symbols, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (owner, repo, pr_number) DO UPDATE SET "
+                "head_sha=EXCLUDED.head_sha, title=EXCLUDED.title, body=EXCLUDED.body, "
+                "paths=EXCLUDED.paths, symbols=EXCLUDED.symbols, updated_at=EXCLUDED.updated_at",
+                (
+                    self._owner,
+                    self._repo,
+                    fp.pr_number,
+                    fp.head_sha,
+                    fp.title,
+                    fp.body,
+                    json.dumps(fp.paths),
+                    json.dumps(fp.symbols),
+                    now,
+                ),
+            )
+
+    def list_pr_fingerprints(self) -> list[PRFingerprint]:
+        rows = self._fetchall(
+            "SELECT pr_number, head_sha, title, body, paths, symbols, updated_at "
+            "FROM pr_fingerprints WHERE owner=%s AND repo=%s",
+            (self._owner, self._repo),
+        )
+        return [
+            PRFingerprint(
+                pr_number=r[0],
+                head_sha=r[1],
+                title=r[2],
+                body=r[3],
+                paths=json.loads(r[4] or "[]"),
+                symbols=json.loads(r[5] or "[]"),
+                updated_at=r[6],
+            )
+            for r in rows
+        ]
+
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
@@ -900,7 +962,7 @@ class PgIndexStore(_StoreSharedMixin):
         if not comments:
             return
         now = time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.executemany(
                 "INSERT INTO review_comments (owner, repo, review_id, pr_number, pr_url, "
                 "path, line, severity, category, title, body, github_comment_id, created_at) "
@@ -965,7 +1027,7 @@ class PgIndexStore(_StoreSharedMixin):
         created_at: float | None = None,
     ) -> ReplyRow:
         now = created_at if created_at is not None else time.time()
-        with self._conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO pr_replies (owner, repo, pr_number, pr_url, author, "
                 "author_avatar_url, body, comment_path, comment_line, github_comment_id, "

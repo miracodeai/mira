@@ -40,3 +40,23 @@ def command_after_mention(text: str, names: list[str]) -> str:
         if m:
             return m.group(1).lower()
     return ""
+
+
+def author_is_filtered(login: str, allowed: list[str], blocked: list[str]) -> bool:
+    """True if `login` should be skipped for auto-review.
+
+    Precedence (matches GitHub issue #180):
+      - empty `login` → never filtered (no sender info → let the
+        dispatcher's existing bot-self check do its job);
+      - `blocked` wins: matches against the raw login OR the login
+        with a trailing `[bot]` stripped (so `dependabot` in `blocked`
+        matches `dependabot[bot]` from the webhook);
+      - then if `allowed` is non-empty and `login` (raw or stripped)
+        is not in it → filtered.
+    """
+    if not login:
+        return False
+    variants = {login, login.removesuffix("[bot]")}
+    if any(v in blocked for v in variants):
+        return True
+    return bool(allowed and not any(v in allowed for v in variants))

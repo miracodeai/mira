@@ -228,7 +228,7 @@ class RelationshipStore:
                         full_name = f"{repo_record.owner}/{repo_record.repo}"
                         try:
                             self._stores[full_name] = IndexStore.open(
-                                repo_record.owner, repo_record.repo
+                                repo_record.owner, repo_record.repo, platform=repo_record.platform
                             )
                         except Exception as exc:
                             logger.warning("Failed to open index for %s: %s", full_name, exc)

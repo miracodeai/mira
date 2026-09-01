@@ -6,7 +6,7 @@ import asyncio
 import os
 from datetime import UTC, datetime
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi import Response as FastAPIResponse
 
 from mira.dashboard import api as _api
@@ -27,6 +27,7 @@ from mira.dashboard.api import (
     _open_relationships,
     _open_store,
     _pick_platform_record,
+    _require_admin,
     logger,
     router,
 )
@@ -57,11 +58,12 @@ def list_repos() -> list[RepoListItem]:
 
 
 @router.post("/api/repos/sync")
-async def sync_repos() -> dict:
+async def sync_repos(request: Request) -> dict:
     """Reconcile the repos table with actual GitHub App installations.
 
     Removes repos that are no longer accessible and adds any new ones.
     """
+    _require_admin(request)
     app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
     private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
     if not app_id or not private_key:
@@ -437,8 +439,9 @@ def get_packages(owner: str, repo: str) -> list[PackageModel]:
 
 
 @router.post("/api/repos/{owner}/{repo}/index")
-async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
+async def trigger_index(owner: str, repo: str, request: Request, full: bool = False) -> dict:
     """Trigger indexing for a repo. full=true wipes and re-indexes everything."""
+    _require_admin(request)
     from mira.index.status import tracker
 
     full_name = f"{owner}/{repo}"
@@ -528,11 +531,14 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
             )
             # Real indexing run finished — bump last_indexed_at so the
             # dashboard's "Indexed N ago" reflects this completion.
+            # `count` is files re-indexed *this run* (not the store total), so
+            # read the store for the true total to keep the repos list in sync.
+            total_files = len(store.all_paths())
             _api._app_db.set_repo_status(
                 owner,
                 repo,
                 "ready",
-                files_indexed=count,
+                files_indexed=total_files,
                 bump_last_indexed=True,
                 platform=platform,
             )
@@ -564,7 +570,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
 
 
 @router.delete("/api/repos/{owner}/{repo}/index")
-async def cancel_index(owner: str, repo: str) -> dict:
+async def cancel_index(owner: str, repo: str, request: Request) -> dict:
     """Request cancellation of an in-progress indexing job.
 
     Returns ``{"status": "cancelling"}`` if a job was active,
@@ -572,6 +578,7 @@ async def cancel_index(owner: str, repo: str) -> dict:
     ``cancelled`` once the indexer notices the flag (at the next batch
     boundary).
     """
+    _require_admin(request)
     from mira.index.status import tracker
 
     full_name = f"{owner}/{repo}"

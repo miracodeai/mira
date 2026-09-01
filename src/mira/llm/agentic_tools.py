@@ -1,14 +1,12 @@
-"""Tools the reviewer LLM can call when the repo isn't indexed.
+"""Tools the reviewer LLM can call during review (`read_file`, `grep_repo`).
 
-When a repo has no pre-built index, JIT cross-file context covers Python /
-JS / TS / Ruby (parseable imports) but leaves Java and Go gaps because their
-import resolution needs build-system context. To close that gap, give the
-reviewer two tools — `read_file` and `grep_repo` — and let it pull the
-specific cross-file context it actually needs to verify a candidate finding.
+On unindexed repos the tools cover what JIT pre-fetch can't reach
+(Java/Go import resolution); on indexed repos they let the model trace
+callers and dispatch points beyond the pre-fetched index context.
 
 This module owns the tool *schemas* and a per-review *executor* that
 dispatches calls, caches results, and hard-caps total output. The agentic
-loop itself lives in `engine.py:_review_chunk`.
+loop itself lives in ``passes.py:agentic_review_loop``.
 """
 
 from __future__ import annotations

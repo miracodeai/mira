@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
 # cd to project root (parent of scripts/)
@@ -78,7 +78,7 @@ sleep 2
 
 # Start frontend
 echo "Starting frontend on port 5173..."
-cd UI/mira
+cd ui/mira
 VITE_API_URL=http://localhost:8100 npm run dev &
 UI_PID=$!
 cd ../..

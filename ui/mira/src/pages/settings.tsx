@@ -32,13 +32,18 @@ export function SettingsPage() {
   // "" = inherit from deployment config; anything else is a model id.
   const [indexingModel, setIndexingModel] = useState("")
   const [reviewModel, setReviewModel] = useState("")
+  const [securityModel, setSecurityModel] = useState("")
   const [configIndexingModel, setConfigIndexingModel] = useState("")
   const [configReviewModel, setConfigReviewModel] = useState("")
+  const [configSecurityModel, setConfigSecurityModel] = useState("")
   const [backend, setBackend] = useState("")
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
+  const [securityOptions, setSecurityOptions] = useState<ModelOption[]>([])
   const [thinkingMode, setThinkingMode] = useState("off")
   const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
+  const [apiStyle, setApiStyle] = useState("chat")
+  const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
 
@@ -67,13 +72,18 @@ export function SettingsPage() {
     api.getModels().then((m) => {
       setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
       setReviewModel(m.review_source === "config" ? "" : m.review_model)
+      setSecurityModel(m.security_source === "config" ? "" : m.security_model)
       setConfigIndexingModel(m.config_indexing_model)
       setConfigReviewModel(m.config_review_model)
+      setConfigSecurityModel(m.config_security_model)
       setBackend(m.backend)
       setIndexingOptions(m.indexing_options)
       setReviewOptions(m.review_options)
+      setSecurityOptions(m.security_options)
       setThinkingMode(m.review_thinking_mode)
       setThinkingOptions(m.thinking_options)
+      setApiStyle(m.api_style ?? "chat")
+      setApiStyleOptions(m.api_style_options ?? [])
     })
     api.getGlobalSettings().then((s) => {
       setEffective(
@@ -99,7 +109,13 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels(indexingModel, reviewModel, thinkingMode)
+    await api.saveModels(
+      indexingModel,
+      reviewModel,
+      securityModel,
+      thinkingMode,
+      apiStyle
+    )
     setSavingModels(false)
     setModelsSaved(true)
     setTimeout(() => setModelsSaved(false), 2000)
@@ -355,7 +371,23 @@ export function SettingsPage() {
               </p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Review Thinking Mode</label>
+              <label className="text-sm font-medium">Security Model</label>
+              <ModelCombobox
+                value={securityModel}
+                onChange={setSecurityModel}
+                options={securityOptions}
+                configModel={configSecurityModel}
+              />
+              <p className="text-xs text-muted-foreground">
+                Used for the dedicated security pass. Defaults to the review
+                model — set a cheaper one only if you accept lower security
+                recall.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Review Thinking Mode
+              </label>
               <Select value={thinkingMode} onValueChange={setThinkingMode}>
                 <SelectTrigger>
                   <SelectValue />
@@ -371,10 +403,32 @@ export function SettingsPage() {
               <p className="text-xs text-muted-foreground">
                 Extended reasoning budget for reviews — improves depth on
                 capable models at the cost of latency and tokens. Works on
-                OpenRouter and Bedrock (Claude); on other endpoints it's
-                skipped automatically when unsupported.
+                OpenRouter and Bedrock (Claude); on other endpoints it's skipped
+                automatically when unsupported.
               </p>
             </div>
+            {backend !== "bedrock" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">API Protocol</label>
+                <Select value={apiStyle} onValueChange={setApiStyle}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {apiStyleOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Protocol used to talk to this endpoint. Responses API requires
+                  a server exposing /responses (OpenAI and compatible proxies);
+                  Chat Completions works everywhere.
+                </p>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <Button size="sm" onClick={saveModels} disabled={savingModels}>
                 {savingModels && (
@@ -464,9 +518,21 @@ export function SettingsPage() {
                 )}
                 {boolField(
                   "review",
+                  "dependency_overlap",
+                  "Duplicate dependency check",
+                  "Warns when a PR adds a dependency that duplicates an existing one (e.g. a second table or HTTP-client library)."
+                )}
+                {boolField(
+                  "review",
                   "auto_resolve_conversations",
                   "Auto-resolve conversations",
                   "Automatically resolve bot review threads the LLM verifies as fixed on each review. Turn off to leave comments open until a human resolves them."
+                )}
+                {boolField(
+                  "review",
+                  "review_on_synchronize",
+                  "Review on every push",
+                  "When enabled, Mira reviews every new commit pushed to a PR. Disable to only review on PR open or manual @bot_name review."
                 )}
                 {numField(
                   "review",

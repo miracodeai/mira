@@ -12,20 +12,8 @@ recognises the pattern.
 
 from __future__ import annotations
 
+from mira.core.file_types import language_from_path
 from mira.models import FileDiff
-
-_EXT_TO_LANG = {
-    "py": "python",
-    "js": "javascript",
-    "jsx": "javascript",
-    "ts": "typescript",
-    "tsx": "typescript",
-    "go": "go",
-    "rb": "ruby",
-    "java": "java",
-    "kt": "kotlin",
-    "rs": "rust",
-}
 
 # Each language's footguns is a list of bullet rules. Keep concise — the
 # model just needs the recognition trigger, not paragraphs of context.
@@ -157,8 +145,7 @@ def _primary_language(files: list[FileDiff]) -> str | None:
     """
     score: dict[str, int] = {}
     for f in files:
-        ext = f.path.rsplit(".", 1)[-1].lower() if "." in f.path else ""
-        lang = _EXT_TO_LANG.get(ext)
+        lang = language_from_path(f.path)
         if not lang:
             continue
         score[lang] = score.get(lang, 0) + f.total_changes
@@ -185,8 +172,7 @@ def get_footguns_for_files(files: list[FileDiff], primary_only: bool = True) -> 
     else:
         seen: set[str] = set()
         for f in files:
-            ext = f.path.rsplit(".", 1)[-1].lower() if "." in f.path else ""
-            lang = _EXT_TO_LANG.get(ext)
+            lang = language_from_path(f.path)
             if lang:
                 seen.add(lang)
         langs = sorted(seen)

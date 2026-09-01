@@ -200,6 +200,7 @@ def review(
 
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
+    security_llm = create_llm(llm_config_for("security", config.llm))
 
     git_token = token or github_token
     github_provider = None
@@ -228,7 +229,12 @@ def review(
             ) from err
 
     engine = ReviewEngine(
-        config=config, llm=llm, provider=github_provider, dry_run=dry_run, indexing_llm=indexing_llm
+        config=config,
+        llm=llm,
+        provider=github_provider,
+        dry_run=dry_run,
+        indexing_llm=indexing_llm,
+        security_llm=security_llm,
     )
 
     try:

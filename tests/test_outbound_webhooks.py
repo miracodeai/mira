@@ -7,6 +7,7 @@ endpoints (mirroring the fixture pattern in test_admin_settings.py).
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +27,19 @@ from mira.dashboard.routers.admin import (
     update_webhook,
 )
 from mira.dashboard.routers.admin import test_webhook as run_webhook_test
+
+
+def _resolves_to(ip: str):
+    """A getaddrinfo stub that maps any host to a single address."""
+    fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    return lambda host, *a, **k: [(fam, socket.SOCK_STREAM, 0, "", (ip, 0))]
+
+
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch: pytest.MonkeyPatch):
+    """Named hosts resolve to a public IP by default so delivery tests never hit
+    the network. SSRF-resolution tests override this."""
+    monkeypatch.setattr(nf.socket, "getaddrinfo", _resolves_to("93.184.216.34"))
 
 
 @pytest.fixture
@@ -164,9 +178,9 @@ class TestDeliverOne:
         assert client.post.call_count == 0  # never even attempted
 
     def test_safe_url_helper(self):
+        # A public name (stubbed to a public IP) is allowed; literals to internal
+        # ranges are rejected without resolving.
         assert nf.is_safe_webhook_url("https://hooks.slack.com/x") is True
-        # Named internal hosts are allowed (not resolved); only IP literals blocked.
-        assert nf.is_safe_webhook_url("http://mattermost:8065/hooks/x") is True
         assert nf.is_safe_webhook_url("http://localhost/x") is False
         assert nf.is_safe_webhook_url("http://169.254.169.254/") is False
 
@@ -178,6 +192,42 @@ class TestDeliverOne:
             )
         assert ok is False
         assert "ConnectError" in detail
+
+
+class TestSsrfResolution:
+    def test_name_resolving_to_metadata_ip_blocked(self, monkeypatch: pytest.MonkeyPatch):
+        # The core bypass: a DNS name whose record points at the metadata IP.
+        monkeypatch.setattr(nf.socket, "getaddrinfo", _resolves_to("169.254.169.254"))
+        assert nf.is_safe_webhook_url("http://metadata.evil.test/latest") is False
+
+    def test_name_resolving_to_private_ip_blocked(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(nf.socket, "getaddrinfo", _resolves_to("10.0.0.5"))
+        assert nf.is_safe_webhook_url("http://internal.corp.test/") is False
+
+    def test_unresolvable_host_blocked(self, monkeypatch: pytest.MonkeyPatch):
+        def boom(*a, **k):
+            raise socket.gaierror("nxdomain")
+
+        monkeypatch.setattr(nf.socket, "getaddrinfo", boom)
+        assert nf.is_safe_webhook_url("http://does-not-exist.test/") is False
+
+    def test_allowlist_skips_resolution(self, monkeypatch: pytest.MonkeyPatch):
+        # A named internal host is only usable when explicitly trusted.
+        monkeypatch.setattr(nf.socket, "getaddrinfo", _resolves_to("10.1.2.3"))
+        assert nf.is_safe_webhook_url("http://mattermost:8065/hooks/x") is False
+        monkeypatch.setenv("MIRA_WEBHOOK_ALLOWED_HOSTS", "mattermost, teams.internal")
+        assert nf.is_safe_webhook_url("http://mattermost:8065/hooks/x") is True
+
+    async def test_delivery_blocked_for_rebinding_name(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(nf.socket, "getaddrinfo", _resolves_to("169.254.169.254"))
+        factory, client = _mock_httpx(status=200)
+        with patch("mira.outbound_webhooks.httpx.AsyncClient", factory):
+            ok, detail = await nf.deliver_one(
+                {"url": "http://metadata.evil.test/"}, nf.REVIEW_COMPLETED, {}
+            )
+        assert ok is False
+        assert "private or internal" in detail
+        assert client.post.call_count == 0
 
 
 class TestDispatch:

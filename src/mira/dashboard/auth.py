@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -17,7 +18,8 @@ SESSION_COOKIE = "mira_session"
 
 # Routes that don't require auth
 _PUBLIC_PATHS = {"/api/auth/login", "/docs", "/openapi.json", "/redoc"}
-_PUBLIC_PREFIXES = ("/api/repos/",)  # SVG endpoints need to be public for GitHub image embedding
+# The badge SVG must be public so GitHub can embed it as an image
+_PUBLIC_SVG = re.compile(r"/api/repos/[^/]+/[^/]+/blast-radius\.svg")
 
 
 class LoginRequest(BaseModel):
@@ -56,7 +58,7 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
     @router.post("/login")
-    def login(body: LoginRequest, response: Response) -> dict:
+    def login(body: LoginRequest, request: Request, response: Response) -> dict:
         user = db.authenticate(body.username, body.password)
         if not user:
             return JSONResponse(status_code=401, content={"error": "Invalid credentials"})
@@ -67,6 +69,10 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
             token,
             httponly=True,
             samesite="lax",
+            # Secure when served over HTTPS. Behind a TLS-terminating proxy this
+            # relies on uvicorn honoring X-Forwarded-Proto (trusted from
+            # 127.0.0.1 by default; see the deployment docs for other setups).
+            secure=request.url.scheme == "https",
             max_age=86400 * 7,
         )
         return {
@@ -186,8 +192,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
-        # Allow SVG endpoints for GitHub image embedding
-        if request.url.path.endswith(".svg"):
+        # Allow the badge SVG for GitHub image embedding
+        if _PUBLIC_SVG.fullmatch(request.url.path):
             return await call_next(request)
         # Non-API paths (frontend assets) don't need auth
         if not request.url.path.startswith("/api/"):

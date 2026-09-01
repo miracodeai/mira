@@ -225,13 +225,16 @@ def create_app(
 
         index_html = ui_dist / "index.html"
 
+        ui_root = ui_dist.resolve()
+
         @app.get("/{full_path:path}")
         async def spa_fallback(full_path: str) -> Response:
             # Don't let the SPA shell swallow misspelled API/webhook paths.
             if full_path.startswith("api/") or full_path in {"webhook", "health"}:
                 raise HTTPException(status_code=404)
-            file_path = ui_dist / full_path
-            if file_path.is_file():
+            file_path = (ui_dist / full_path).resolve()
+            # Keep `..` traversal from escaping the dist dir into arbitrary files.
+            if file_path.is_relative_to(ui_root) and file_path.is_file():
                 return FileResponse(file_path)
             return FileResponse(index_html)
 

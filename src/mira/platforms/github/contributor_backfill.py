@@ -90,9 +90,12 @@ def _maybe_wait_for_rate_limit(gh: Github) -> None:
 
     Rate-limit lookups don't count against the budget, so this is safe to call
     periodically.
+
+    PyGithub >=2.7 returns ``RateLimitOverview``; core REST budget is
+    ``.resources.core`` (was ``.core`` on the old ``RateLimit`` return type).
     """
     try:
-        core = gh.get_rate_limit().core
+        core = gh.get_rate_limit().resources.core
     except GithubException:
         return
     if core.remaining >= _RATE_LIMIT_FLOOR:

@@ -205,7 +205,9 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
 
     for repo_record in repos:
         try:
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            store = IndexStore.open(
+                repo_record.owner, repo_record.repo, platform=repo_record.platform
+            )
             total_files += len(store.all_paths())
             stats = store.get_review_stats(since=since)
             agg_stats["total_reviews"] += stats["total_reviews"]
@@ -258,7 +260,9 @@ def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
 
     for repo_record in _api._app_db.list_repos():
         try:
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            store = IndexStore.open(
+                repo_record.owner, repo_record.repo, platform=repo_record.platform
+            )
             for e in store.list_review_events(limit=500):
                 all_events.append(
                     {

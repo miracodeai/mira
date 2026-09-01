@@ -32,6 +32,21 @@ THINKING_MODES: list[dict[str, str]] = [
 ]
 THINKING_MODE_VALUES = {m["value"] for m in THINKING_MODES}
 
+# API-protocol options for the Models page. Single source for the dropdown
+# and validation, mirroring THINKING_MODES.
+API_STYLES: list[dict[str, str]] = [
+    {"value": "chat", "label": "Chat Completions"},
+    {"value": "responses", "label": "Responses API"},
+]
+API_STYLE_VALUES = {m["value"] for m in API_STYLES}
+
+
+def resolve_api_style(config: LLMConfig, db_value: str | None = None) -> str:
+    """Resolve the API protocol: DB → config.api_style → "chat"."""
+    if db_value and db_value in API_STYLE_VALUES:
+        return db_value
+    return config.api_style if config.api_style in API_STYLE_VALUES else "chat"
+
 
 def estimate_indexing_cost(file_count: int, model: str) -> dict:
     """Estimate cost of indexing N files with the given model.
@@ -85,6 +100,28 @@ def get_review_model(config: LLMConfig, db_value: str | None = None) -> str:
     return config.model
 
 
+def get_security_model(
+    config: LLMConfig,
+    db_value: str | None = None,
+    db_review_model: str | None = None,
+) -> str:
+    """Resolve the security-pass model: DB → config.security_model → review tier.
+
+    The review-tier fallback includes the dashboard's review_model setting
+    (``db_review_model``) — without it, an instance whose review model lives
+    only in the DB silently falls all the way back to ``config.model``.
+
+    Never falls back to ``indexing_model`` — the security sweep is the
+    highest-stakes cheap pass, and silently downgrading it to the indexing
+    tier trades security recall for indexing cost savings.
+    """
+    if db_value:
+        return db_value
+    if config.security_model:
+        return config.security_model
+    return get_review_model(config, db_review_model)
+
+
 def get_review_thinking_mode(config: LLMConfig, db_value: str | None = None) -> str | None:
     """Resolve the review thinking mode: DB → config.review_reasoning_effort → None.
 
@@ -108,6 +145,8 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     """
     db_model: str | None = None
     db_thinking: str | None = None
+    db_review: str | None = None
+    db_style: str | None = None
     try:
         from mira.dashboard.api import _app_db
 
@@ -117,21 +156,33 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
             elif purpose == "review":
                 db_model = _app_db.get_setting("review_model")
                 db_thinking = _app_db.get_setting("review_thinking_mode")
+            elif purpose == "security":
+                db_model = _app_db.get_setting("security_model")
+                db_thinking = _app_db.get_setting("review_thinking_mode")
+                db_review = _app_db.get_setting("review_model")
+            db_style = _app_db.get_setting("api_style")
     except Exception:
         pass  # DB not available — resolve from config fields alone
 
     # Thinking mode only applies to reviews; other purposes leave it off.
     thinking_mode: str | None = None
+    resolved_style = resolve_api_style(base, db_style)
     if purpose == "indexing":
         resolved = get_indexing_model(base, db_model)
         config_model = base.indexing_model
+    elif purpose == "security":
+        resolved = get_security_model(base, db_model, db_review)
+        config_model = base.security_model or base.review_model
+        thinking_mode = get_review_thinking_mode(base, db_thinking)
     elif purpose == "review":
         resolved = get_review_model(base, db_model)
         config_model = base.review_model
         thinking_mode = get_review_thinking_mode(base, db_thinking)
     else:
-        return base.model_copy(update={"reasoning_effort": None})
+        return base.model_copy(update={"reasoning_effort": None, "api_style": resolved_style})
 
     source = "dashboard setting" if db_model else ("mira.yaml" if config_model else "default")
     logger.info("%s model: %s (source: %s)", purpose.capitalize(), resolved, source)
-    return base.model_copy(update={"model": resolved, "reasoning_effort": thinking_mode})
+    return base.model_copy(
+        update={"model": resolved, "reasoning_effort": thinking_mode, "api_style": resolved_style}
+    )

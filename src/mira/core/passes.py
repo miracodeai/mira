@@ -7,15 +7,20 @@ the heavyweight review model isn't paying for verification work.
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import logging
+from collections.abc import Callable
 
 from mira.config import load_config
 from mira.dashboard.models_config import llm_config_for
 from mira.exceptions import ResponseParseError
 from mira.llm import create_llm
 from mira.llm.base import LLMProviderProtocol
-from mira.llm.prompts.review import build_security_review_prompt
+from mira.llm.prompts.review import (
+    build_dependency_review_prompt,
+    build_security_review_prompt,
+)
 from mira.llm.response_parser import (
     convert_to_review_comments,
     loads_lenient,
@@ -47,7 +52,7 @@ async def agentic_review_loop(
     if convo and convo[0].get("role") == "system":
         convo[0]["content"] = (
             convo[0]["content"] + "\n\n## Tools\n\n"
-            "This repo isn't indexed, so you have two helpers for "
+            "You have two helpers for "
             "cross-file checks: `read_file(path)` and "
             "`grep_repo(pattern, path_glob?, path_only?)`. Use them when, "
             "and ONLY when, you need to verify a cross-file claim before "
@@ -118,14 +123,23 @@ def _indexing_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
         return fallback
 
 
+def _security_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
+    """Build a security-tier provider, falling back to ``fallback`` on error."""
+    try:
+        return create_llm(llm_config_for("security", load_config().llm))
+    except Exception:
+        return fallback
+
+
 async def security_review_pass(
     llm: LLMProviderProtocol,
     files: list,
     narrowed: list,
     pr_title: str = "",
-    indexing_llm: LLMProviderProtocol | None = None,
+    security_llm: LLMProviderProtocol | None = None,
+    agentic_executor_factory: Callable[[], object] | None = None,
 ) -> list[ReviewComment]:
-    """Dedicated security review on the configured indexing model.
+    """Dedicated security review on the security tier (``security_model`` → review model).
 
     Runs in parallel with the main review. Returns ``[]`` on any failure
     so a transient LLM/API error doesn't kill the main review.
@@ -133,32 +147,103 @@ async def security_review_pass(
     `narrowed` is `files` with migrations/lockfiles/specs stripped (caller
     decides what counts); falls back to `files` if `narrowed` is empty.
 
-    `indexing_llm`, when passed, is the caller's already-built indexing-tier
+    `security_llm`, when passed, is the caller's already-built security-tier
     provider; otherwise one is constructed from ``load_config()``.
+
+    `agentic_executor_factory`, when passed, builds one fresh tool executor
+    per chunk so the pass can run the agentic read_file/grep_repo loop
+    (falling back to the one-shot call when the loop bails).
     """
     if not files:
         return []
 
     target_files = narrowed or files
+    if not target_files:
+        return []
+    sec_llm = security_llm or _security_llm(llm)
 
-    security_llm = indexing_llm or _indexing_llm(llm)
+    budget = int(load_config().llm.max_context_tokens * 0.75)
+    from mira.core.chunker import chunk_files
 
-    messages = build_security_review_prompt(files=target_files, pr_title=pr_title)
-    try:
-        raw = await security_llm.complete_with_tools(
-            messages=messages,
-            tools=[SUBMIT_REVIEW_TOOL],
-            temperature=0.0,
+    chunks = chunk_files(
+        target_files,
+        budget,
+        provider=sec_llm if hasattr(sec_llm, "count_tokens") else None,
+    )
+    if len(chunks) <= 1:
+        return await _security_scan_once(
+            sec_llm,
+            llm,
+            target_files,
+            pr_title,
+            executor=agentic_executor_factory() if agentic_executor_factory else None,
         )
+
+    logger.info(
+        "Security pass: splitting %d files into %d chunks (single-call budget %d tokens)",
+        len(target_files),
+        len(chunks),
+        budget,
+    )
+    sem = asyncio.Semaphore(load_config().review.max_concurrent_chunks)
+
+    async def _bounded(chunk_files_list: list) -> list[ReviewComment]:
+        async with sem:
+            return await _security_scan_once(
+                sec_llm,
+                llm,
+                chunk_files_list,
+                pr_title,
+                executor=agentic_executor_factory() if agentic_executor_factory else None,
+            )
+
+    results = await asyncio.gather(*[_bounded(c.files) for c in chunks])
+    return [c for chunk_comments in results for c in chunk_comments]
+
+
+async def _security_scan_once(
+    sec_llm: LLMProviderProtocol,
+    fallback_llm: LLMProviderProtocol,
+    files: list,
+    pr_title: str,
+    executor: object | None = None,
+) -> list[ReviewComment]:
+    """Run the security scan on a single chunk of files.
+
+    When ``executor`` is given, the agentic tool-use loop runs first on the
+    security-tier provider. Whether it bails (returns "") or raises
+    (executor bug, uncaught tool error), the one-shot call below is the
+    floor; the existing ``except`` path then retries on ``fallback_llm``,
+    so the pass still returns ``[]`` on total failure rather than
+    propagating into the main review.
+    """
+    messages = build_security_review_prompt(files=files, pr_title=pr_title)
+    raw = ""
+    if executor is not None:
+        try:
+            raw = await agentic_review_loop(sec_llm, messages, executor)
+        except Exception as exc:
+            logger.warning(
+                "Security pass agentic loop failed (%s); falling back to one-shot",
+                exc,
+            )
+            raw = ""
+    try:
+        if not raw:
+            raw = await sec_llm.complete_with_tools(
+                messages=messages,
+                tools=[SUBMIT_REVIEW_TOOL],
+                temperature=0.0,
+            )
     except Exception as exc:
         # Retry on the main LLM rather than drop the security pass entirely.
-        if security_llm is not llm:
-            logger.debug(
-                "Security pass on indexing tier failed (%s); retrying on review LLM",
+        if sec_llm is not fallback_llm:
+            logger.warning(
+                "Security pass on security tier failed (%s); retrying on review LLM",
                 exc,
             )
             try:
-                raw = await llm.complete_with_tools(
+                raw = await fallback_llm.complete_with_tools(
                     messages=messages,
                     tools=[SUBMIT_REVIEW_TOOL],
                     temperature=0.0,
@@ -186,6 +271,76 @@ async def security_review_pass(
         c.source_pass = "security"
     if comments:
         logger.info("Security pass produced %d candidate comment(s)", len(comments))
+    return comments
+
+
+async def dependency_review_pass(
+    llm: LLMProviderProtocol,
+    manifest_files: list,
+    existing_packages: list[str] | None = None,
+    pr_title: str = "",
+    indexing_llm: LLMProviderProtocol | None = None,
+) -> list[ReviewComment]:
+    """Flag newly-added dependencies that duplicate an existing one.
+
+    Runs in parallel with the main review over only the changed manifest files
+    (caller filters those out). ``existing_packages`` is the set of dependency
+    names already declared in the repo (from the index) so the model can spot a
+    new package that overlaps one already present.
+
+    Returns ``[]`` when no manifest changed or on any failure, so a transient
+    LLM/API error doesn't kill the main review. Mirrors ``security_review_pass``.
+    """
+    if not manifest_files:
+        return []
+
+    dep_llm = indexing_llm or _indexing_llm(llm)
+
+    messages = build_dependency_review_prompt(
+        files=manifest_files,
+        existing_packages=existing_packages,
+        pr_title=pr_title,
+    )
+    try:
+        raw = await dep_llm.complete_with_tools(
+            messages=messages,
+            tools=[SUBMIT_REVIEW_TOOL],
+            temperature=0.0,
+        )
+    except Exception as exc:
+        # Retry on the main LLM rather than drop the pass entirely.
+        if dep_llm is not llm:
+            logger.warning(
+                "Dependency pass on indexing tier failed (%s); retrying on review LLM",
+                exc,
+            )
+            try:
+                raw = await llm.complete_with_tools(
+                    messages=messages,
+                    tools=[SUBMIT_REVIEW_TOOL],
+                    temperature=0.0,
+                )
+            except Exception as exc2:
+                logger.warning("Dependency review pass failed: %s", exc2)
+                return []
+        else:
+            logger.warning("Dependency review pass failed: %s", exc)
+            return []
+
+    try:
+        parsed = parse_llm_response(raw)
+        comments = convert_to_review_comments(parsed, diff_files=manifest_files)
+    except ResponseParseError as exc:
+        logger.warning("Dependency review pass parse error: %s", exc)
+        return []
+    except Exception as exc:
+        logger.warning("Dependency review pass conversion failed: %s", exc)
+        return []
+
+    for c in comments:
+        c.category = "dependency"
+    if comments:
+        logger.info("Dependency pass produced %d candidate comment(s)", len(comments))
     return comments
 
 

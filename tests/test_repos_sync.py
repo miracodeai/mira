@@ -15,6 +15,13 @@ from mira.dashboard.routers.admin import complete_setup
 from mira.dashboard.routers.repos import sync_repos
 
 
+def _admin_req():
+    from types import SimpleNamespace
+
+    user = SimpleNamespace(is_admin=True)
+    return SimpleNamespace(state=SimpleNamespace(user=user))
+
+
 @pytest.fixture
 def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppDatabase:
     monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
@@ -39,7 +46,7 @@ async def test_sync_prunes_stale_github_but_leaves_gitlab(db: AppDatabase) -> No
         patch("mira.platforms.github.auth.GitHubAppAuth", return_value=auth),
         patch("mira.platforms.github.webhook._count_files_for_repos", new=AsyncMock()),
     ):
-        result = await sync_repos()
+        result = await sync_repos(_admin_req())
 
     assert result["removed"] == 1
     remaining = {(r.platform, r.owner, r.repo) for r in db.list_repos()}
@@ -59,7 +66,8 @@ async def test_complete_setup_writes_to_platform_rows(db: AppDatabase) -> None:
                     {"owner": "grp", "repo": "proj", "platform": "gitlab", "enabled": False},
                 ],
                 index_mode="full",
-            )
+            ),
+            _admin_req(),
         )
 
     gh = db.get_repo("acme", "web")

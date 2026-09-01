@@ -6,7 +6,7 @@ import json
 import logging
 import re
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from mira.core.context import extract_hunk_lines
 from mira.exceptions import ResponseParseError
@@ -317,6 +317,65 @@ def _try_load_json(text: str) -> object | None:
         return None
 
 
+_ARG_KEY_VALUE_RE = re.compile(
+    r"<arg_key>\s*([^<]+?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*</arg_value>",
+    re.S,
+)
+
+# Nested object fields occasionally arrive as leaked tool-arg XML fragments
+# instead of objects (``"effort": "level</arg_key><arg_value>2"``). Rebuild
+# what we can; drop the field otherwise — both are optional with defaults,
+# so one bad field shouldn't skip the whole walkthrough (issue #162).
+_WALKTHROUGH_FIELD_MODELS = {
+    "effort": LLMWalkthroughEffort,
+    "confidence_score": LLMWalkthroughConfidenceScore,
+}
+
+
+def _coerce_xml_value(raw: str) -> object:
+    """Coerce an XML-argument value string to a JSON-ish scalar."""
+    if raw == "null":
+        return None
+    if raw in ("true", "false"):
+        return raw == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+def _salvage_arg_xml_fragment(text: str) -> dict | None:
+    """Rebuild a dict from leaked Anthropic-style tool-arg XML.
+
+    Some models emit nested-object fields as an ``<arg_key>k</arg_key>
+    <arg_value>v</arg_value>`` fragment *inside* a quoted JSON string
+    (observed on ``effort``/``confidence_score`` via OpenRouter), e.g.
+    ``"effort": "level</arg_key><arg_value>2"``. The transport may drop the
+    opening ``<arg_key>`` / trailing ``</arg_value>`` tags, so normalize before
+    matching. Returns ``None`` when the string isn't a key/value fragment.
+    """
+    fragment = text.strip()
+    if not fragment.startswith("<arg_key>"):
+        fragment = "<arg_key>" + fragment
+    if not fragment.endswith("</arg_value>"):
+        fragment = fragment + "</arg_value>"
+    pairs = _ARG_KEY_VALUE_RE.findall(fragment)
+    if not pairs:
+        return None
+    result: dict = {}
+    for key, raw in pairs:
+        key = key.strip()
+        if key in result:
+            return None
+        result[key] = _coerce_xml_value(raw.strip())
+    return result
+
+
 def _validate_change_groups(raw_groups: list) -> list[LLMWalkthroughChangeGroup]:
     """Validate change groups one at a time, skipping malformed entries.
 
@@ -356,21 +415,58 @@ def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
     cleaned = strip_think_blocks(raw_text)
     cleaned = strip_code_fences(cleaned)
 
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        raise ResponseParseError(f"Walkthrough response is not valid JSON: {e}") from e
-
+    # Some models leak Anthropic-style tool-call XML around/inside the JSON
+    # arguments (e.g. a trailing ``</parameter></invoke>``). Use the lenient
+    # loader the review path uses so an external leak truncates cleanly instead
+    # of killing the walkthrough.
+    data = loads_lenient(cleaned)
+    if data is None:
+        raise ResponseParseError("Walkthrough response is not valid JSON")
     if not isinstance(data, dict):
         raise ResponseParseError(f"Expected JSON object, got {type(data).__name__}")
 
     data = _unstring_nested_json(data)
+
+    # Rebuild any fields that arrived as leaked XML fragments (issue #162)
+    for key, model in _WALKTHROUGH_FIELD_MODELS.items():
+        value = data.get(key)
+        if isinstance(value, dict):
+            try:
+                if hasattr(model, "model_validate"):
+                    model.model_validate(value)
+                elif hasattr(model, "parse_obj"):
+                    model.parse_obj(value)
+                else:
+                    model(**value)
+            except ValidationError as exc:
+                logger.warning("Dropping malformed walkthrough %s field: %s", key, exc)
+                data.pop(key, None)
+            continue
+
+        rebuilt = _salvage_arg_xml_fragment(value) if isinstance(value, str) else None
+        if rebuilt is not None:
+            try:
+                if hasattr(model, "model_validate"):
+                    model.model_validate(rebuilt)
+                elif hasattr(model, "parse_obj"):
+                    model.parse_obj(rebuilt)
+                else:
+                    model(**rebuilt)
+            except ValidationError as exc:
+                logger.warning("Dropping malformed walkthrough %s field: %s", key, exc)
+                data.pop(key, None)
+                continue
+            data[key] = rebuilt
+        elif value is not None:
+            logger.warning("Dropping malformed walkthrough %s field: %r", key, value)
+            data.pop(key)
 
     raw_groups = data.pop("change_groups", None)
 
     try:
         response = LLMWalkthroughResponse.model_validate(data)
     except Exception as e:
+        logger.debug("Raw walkthrough response: %s", raw_text)
         raise ResponseParseError(f"Walkthrough response validation failed: {e}") from e
 
     if isinstance(raw_groups, list):

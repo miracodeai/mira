@@ -42,7 +42,7 @@ export function SetupPage() {
 
   const handleSave = async () => {
     setSaving(true)
-    await api.saveModels(indexingModel, reviewModel)
+    await api.saveModels(indexingModel, reviewModel, "")
     navigate("/")
   }
 
