@@ -30,9 +30,11 @@ _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def active_backend(config: LLMConfig) -> str:
-    """Return "bedrock", "openrouter", or "openai-compatible"."""
+    """Return the model-catalog backend for the deployment."""
     if config.provider == "bedrock":
         return "bedrock"
+    if config.provider in {"codex-cli", "codex_cli", "codex"}:
+        return "codex-cli"
     profile = profiles.resolve(config.base_url)
     return "openrouter" if profile.get("name") == "openrouter" else "openai-compatible"
 
@@ -99,6 +101,8 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
     backend = active_backend(config)
     if backend == "bedrock":
         cache_key = f"bedrock:{config.region}:{config.aws_profile or ''}"
+    elif backend == "codex-cli":
+        return None
     else:
         cache_key = config.base_url
 
@@ -141,10 +145,14 @@ def build_options(backend: str, dynamic: list[dict] | None, purpose: str) -> lis
         options.sort(key=lambda m: m["label"].lower())
         return options
 
-    wants_bedrock = backend == "bedrock"
     options = []
     for model_id, info in registry.all_models().items():
-        if (info.get("provider") == "bedrock") != wants_bedrock:
+        provider = info.get("provider")
+        if backend == "bedrock" and provider != "bedrock":
+            continue
+        if backend == "codex-cli" and provider != "codex-cli":
+            continue
+        if backend not in {"bedrock", "codex-cli"} and provider in {"bedrock", "codex-cli"}:
             continue
         if purpose not in (info.get("purposes") or []):
             continue

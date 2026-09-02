@@ -16,6 +16,11 @@ def create_llm(config: LLMConfig) -> LLMProviderProtocol:
 
         return BedrockProvider(config)
 
+    if config.provider in {"codex-cli", "codex_cli", "codex"}:
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        return CodexCLIProvider(config)
+
     if config.api_style == "responses":
         from mira.llm.responses import ResponsesProvider
 

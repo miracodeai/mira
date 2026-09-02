@@ -90,6 +90,39 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Bedrock model returned neither tool call nor content",
         safe="Bedrock model returned neither tool call nor content",
     ),
+    # Codex CLI provider errors
+    "codex_auth_file_missing": ErrorMessage(
+        full="Codex auth file not found: {path}",
+        safe="Codex auth file not found",
+    ),
+    "codex_command_not_found": ErrorMessage(
+        full="Codex CLI command not found: {command!r}. Install @openai/codex or set llm.codex_command.",
+        safe="Codex CLI command not found — install @openai/codex or set llm.codex_command",
+    ),
+    "codex_timeout": ErrorMessage(
+        full="Codex CLI timed out after {seconds}s",
+        safe="Codex CLI timed out",
+    ),
+    "codex_exit_failed": ErrorMessage(
+        full="Codex CLI failed with exit {exit_code}: {detail}",
+        safe="Codex CLI failed",
+    ),
+    "codex_empty_response": ErrorMessage(
+        full="Codex CLI returned an empty response",
+        safe="Codex CLI returned an empty response",
+    ),
+    "codex_non_object_json": ErrorMessage(
+        full="Codex CLI response must be a JSON object, got {type}",
+        safe="Codex CLI response must be a JSON object",
+    ),
+    "codex_malformed_json": ErrorMessage(
+        full="Codex CLI returned malformed JSON: {error}: {excerpt}",
+        safe="Codex CLI returned malformed JSON",
+    ),
+    "codex_no_json_object": ErrorMessage(
+        full="Codex CLI response did not contain a JSON object: {excerpt}",
+        safe="Codex CLI response did not contain a JSON object",
+    ),
 }
 
 

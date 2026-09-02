@@ -25,6 +25,9 @@ class TestActiveBackend:
     def test_bedrock_provider(self):
         assert active_backend(LLMConfig(provider="bedrock")) == "bedrock"
 
+    def test_codex_cli_provider(self):
+        assert active_backend(LLMConfig(provider="codex-cli")) == "codex-cli"
+
     def test_generic_endpoint(self):
         assert (
             active_backend(LLMConfig(base_url="http://localhost:11434/v1")) == "openai-compatible"
@@ -39,6 +42,14 @@ class TestBuildOptions:
         assert "us.anthropic.claude-sonnet-4-6-v1:0" not in openrouter
         assert "us.anthropic.claude-sonnet-4-6-v1:0" in bedrock
         assert "anthropic/claude-sonnet-4-6" not in bedrock
+
+    def test_codex_backend_only_offers_codex_models(self):
+        values = [m["value"] for m in build_options("codex-cli", None, "review")]
+        assert values == ["codex-default"]
+
+    def test_openrouter_does_not_offer_codex_models(self):
+        values = [m["value"] for m in build_options("openrouter", None, "review")]
+        assert "codex-default" not in values
 
     def test_dynamic_merged_and_deduped_against_registry(self):
         dynamic = [

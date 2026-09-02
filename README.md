@@ -111,6 +111,48 @@ docker run -p 8000:8000 --env-file .env \
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 
+### Codex CLI
+
+If you already use OpenAI Codex locally, Mira can run reviews through the
+Codex CLI instead of an HTTP API key. Authentication stays inside Codex via
+`CODEX_HOME/auth.json`, created by `codex login`:
+
+```yaml
+# mira.yaml
+llm:
+  provider: "codex-cli"
+  model: "codex-default"      # use the Codex CLI default model
+  codex_home: "/run/codex"    # optional; defaults to CODEX_HOME
+  codex_sandbox: "read-only"  # the only accepted sandbox policy
+  codex_timeout_seconds: 900  # optional
+```
+
+The official Mira image includes a pinned Codex CLI. Mount a Codex login read-only:
+
+```bash
+docker run -p 8000:8000 --env-file .env \
+  -e CODEX_HOME=/run/codex \
+  -v "$HOME/.codex:/run/codex:ro" \
+  -v "$(pwd)/mira.yaml:/app/mira.yaml:ro" \
+  ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
+```
+
+This provider does not require `OPENROUTER_API_KEY`. Mira copies only `auth.json`
+from the read-only mount into a private, writable temporary Codex home for each
+invocation. It launches Codex in an empty temporary workspace with a minimal
+environment, disables inherited shell environment variables and user/project
+rules, and enforces the read-only sandbox.
+Provider choice, executable/auth paths, sandbox policy, and timeout are
+deployment-only settings; repository `.mira.yaml` files cannot override them.
+For one-shot `mira review` runs, `--config` is treated as untrusted by default.
+An operator-owned config may opt in with `--trust-execution-settings`; never use
+that flag with a repository-controlled file.
+
+Codex CLI does not expose Mira's temperature or hard output-token controls, so
+Mira disables ensemble sampling for this provider. The mounted OAuth session is
+still a sensitive deployment credential: use a dedicated Codex account/session
+and isolate the Mira container from unrelated host files and services.
+
 ## Configuration
 
 `mira.yaml` (loaded via `--config`) holds deployment-wide defaults. Drop a `.mira.yaml` in any repo — or use the dashboard — to override per-repo; both deep-merge over `mira.yaml` for that repo only:
