@@ -31,6 +31,23 @@ from mira.models import KeyIssue, ReviewComment, Severity
 
 logger = logging.getLogger(__name__)
 
+_MAX_REVIEW_SUMMARY_CHARS = 2_000
+_MAX_REVIEW_SUMMARY_TOKENS = 512
+_SUMMARY_TRUNCATION_MARKER = " … [summary truncated]"
+
+
+def cap_review_summary(text: str) -> str:
+    text = text.strip()
+    if len(text) <= _MAX_REVIEW_SUMMARY_CHARS:
+        return text
+
+    content_limit = _MAX_REVIEW_SUMMARY_CHARS - len(_SUMMARY_TRUNCATION_MARKER)
+    prefix = text[:content_limit].rstrip()
+    boundary = max(prefix.rfind(" "), prefix.rfind("\n"), prefix.rfind("\t"))
+    if boundary > 0:
+        prefix = prefix[:boundary].rstrip()
+    return prefix + _SUMMARY_TRUNCATION_MARKER
+
 
 async def agentic_review_loop(
     llm: LLMProviderProtocol,
@@ -569,10 +586,10 @@ async def regenerate_summary(
             messages=[{"role": "user", "content": prompt}],
             json_mode=False,
             temperature=0.0,
+            max_tokens=_MAX_REVIEW_SUMMARY_TOKENS,
         )
     except Exception as exc:
         logger.warning("Summary regen LLM call failed: %s", exc)
-        return fallback or "No issues found."
+        return cap_review_summary(fallback) or "No issues found."
 
-    text = (text or "").strip()
-    return text or fallback or "No issues found."
+    return cap_review_summary(text or "") or cap_review_summary(fallback) or "No issues found."

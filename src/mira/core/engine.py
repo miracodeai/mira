@@ -21,6 +21,7 @@ from mira.core.file_filter import filter_files
 from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
     agentic_review_loop,
+    cap_review_summary,
     dependency_review_pass,
     regenerate_summary,
     security_review_pass,
@@ -1568,6 +1569,7 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Summary regeneration failed, using original: %s", exc)
                 summary = original_summary or "No issues found."
+            summary = cap_review_summary(summary)
         else:
             summary = ""
 
