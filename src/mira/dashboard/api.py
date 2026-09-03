@@ -369,7 +369,7 @@ class ModelsResponse(BaseModel):
     indexing_options: list[ModelOption]
     review_options: list[ModelOption]
     security_options: list[ModelOption]
-    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high").
+    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max").
     review_thinking_mode: str
     thinking_options: list[ModelOption]
     # Protocol dialect for the OpenAI-compatible endpoint ("chat"/"responses"),

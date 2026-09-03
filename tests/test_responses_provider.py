@@ -664,6 +664,15 @@ class TestApplyReasoning:
         assert body["reasoning"] == {"effort": "high"}
 
     @pytest.mark.asyncio
+    async def test_apply_reasoning_xhigh(self, config: LLMConfig):
+        """xhigh passes through verbatim on non-OpenRouter OpenAI-compatible hosts."""
+        config.reasoning_effort = "xhigh"
+        provider = ResponsesProvider(config)
+        body = {"model": "gpt-4o"}
+        provider._apply_reasoning(body)
+        assert body["reasoning"] == {"effort": "xhigh"}
+
+    @pytest.mark.asyncio
     async def test_apply_reasoning_skips_when_off(self, config: LLMConfig):
         """_apply_reasoning is a no-op when reasoning effort is off or None."""
         provider = ResponsesProvider(config)
