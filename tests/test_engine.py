@@ -2049,6 +2049,43 @@ class TestRegenerateSummary:
         )
         assert out == "fallback"
 
+    @pytest.mark.asyncio
+    async def test_caps_generated_summary_and_output_tokens(self, monkeypatch):
+        """Runaway model output is bounded before it can reach a provider."""
+        from mira.core.passes import regenerate_summary
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
+            assert max_tokens == 512
+            return "word " * 1_000
+
+        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
+
+        out = await regenerate_summary(
+            AsyncMock(), [self._comment()], [], "t", "d", fallback="fallback"
+        )
+
+        assert len(out) <= 2_000
+        assert out.endswith("… [summary truncated]")
+
+    @pytest.mark.asyncio
+    async def test_caps_fallback_after_llm_failure(self, monkeypatch):
+        """The fallback path has the same hard character limit."""
+        from mira.core.passes import regenerate_summary
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
+            raise RuntimeError("LLM down")
+
+        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
+
+        out = await regenerate_summary(
+            AsyncMock(), [self._comment()], [], "t", "d", fallback="fallback " * 1_000
+        )
+
+        assert len(out) <= 2_000
+        assert out.endswith("… [summary truncated]")
+
 
 class TestDropOrphanKeyIssues:
     """Key Issues table must stay in sync with surviving inline comments."""
