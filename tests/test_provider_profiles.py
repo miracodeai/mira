@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 
+from mira.config import LLMConfig
 from mira.llm import provider_profiles as profiles
+from mira.llm.base import _get_api_key, _strip_model_prefix
 
 
 class TestResolve:
@@ -17,6 +19,22 @@ class TestResolve:
 
     def test_trailing_slash_insensitive(self):
         assert profiles.resolve("https://openrouter.ai/api/v1/")["name"] == "openrouter"
+
+    def test_matches_atlascloud_by_base_url(self):
+        p = profiles.resolve("https://api.atlascloud.ai/v1")
+        assert p["name"] == "atlascloud"
+        assert p["api_key_env"] == "ATLASCLOUD_API_KEY"
+        assert p["model_prefix"] == "keep"
+
+    def test_atlascloud_preserves_vendor_model_prefix(self):
+        model = "deepseek-ai/deepseek-v4-pro"
+        assert _strip_model_prefix(model, "https://api.atlascloud.ai/v1") == model
+
+    def test_atlascloud_profile_resolves_api_key(self, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.setenv("ATLASCLOUD_API_KEY", "atlas-test-key")
+        config = LLMConfig(base_url="https://api.atlascloud.ai/v1")
+        assert _get_api_key(config, profiles.resolve(config.base_url)) == "atlas-test-key"
 
     def test_unknown_url_returns_portable_default(self):
         p = profiles.resolve("https://some-new-llm.example/v1")
