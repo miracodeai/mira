@@ -87,8 +87,10 @@ async def test_handle_pr_event(
 
     await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
 
-    mock_app_auth.get_installation_token.assert_awaited_once_with(1)
-    mock_provider_cls.assert_called_once_with("github", "ghs_test_token")
+    mock_provider_cls.assert_called_once()
+    name, supplier = mock_provider_cls.call_args[0]
+    assert name == "github"
+    assert await supplier() == "ghs_test_token"
     mock_engine.review_pr.assert_awaited_once_with("https://github.com/testowner/testrepo/pull/42")
 
 
@@ -337,12 +339,14 @@ async def test_handle_comment_formats_reply_with_attribution(
     assert "O(n^2)" in posted_body
 
 
+@patch(
+    "mira.platforms.github.webhook.run_pr_review", new=AsyncMock(side_effect=RuntimeError("boom"))
+)
+@patch("mira.platforms.github.webhook.create_provider", return_value=MagicMock())
 async def test_handler_exception_logged_not_raised(
     mock_app_auth: AsyncMock, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Exceptions in handlers are logged, not propagated."""
-    mock_app_auth.get_installation_token = AsyncMock(side_effect=RuntimeError("boom"))
-
     with caplog.at_level(logging.ERROR):
         # Should not raise
         await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
@@ -449,11 +453,16 @@ async def test_handle_thread_reject_resolve_failure_posts_reply(
     assert "couldn't dismiss" in posted_body
 
 
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_thread_reject_exception_logged_not_raised(
-    mock_app_auth: AsyncMock, caplog: pytest.LogCaptureFixture
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Exceptions in reject handler are logged, not propagated."""
-    mock_app_auth.get_installation_token = AsyncMock(side_effect=RuntimeError("boom"))
+    mock_provider_cls.return_value.get_thread_id_for_comment = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
 
     with caplog.at_level(logging.ERROR):
         await handle_thread_reject(
@@ -523,10 +532,13 @@ async def test_handle_resume_removes_label_and_posts_comment(
     assert "resumed" in posted_body.lower()
 
 
+@patch("mira.platforms.github.webhook.create_provider")
 async def test_handle_pause_exception_logged_not_raised(
-    mock_app_auth: AsyncMock, caplog: pytest.LogCaptureFixture
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    mock_app_auth.get_installation_token = AsyncMock(side_effect=RuntimeError("boom"))
+    mock_provider_cls.return_value.add_label = AsyncMock(side_effect=RuntimeError("boom"))
 
     with caplog.at_level(logging.ERROR):
         await handle_pause_resume(_make_pause_comment_payload(), mock_app_auth, "mira-bot", "pause")

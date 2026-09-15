@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -15,6 +16,7 @@ from mira.models import FileChangeType, PRInfo, ReviewComment, ReviewResult, Sev
 from mira.providers.github import (
     _CATEGORY_DISPLAY,
     GitHubProvider,
+    _async_constant,
     _format_comment_body,
     parse_pr_url,
 )
@@ -81,7 +83,7 @@ class TestGitHubRetry:
     async def test_get_pr_info_retries_on_transient_error(self):
         """get_pr_info retries and succeeds on the second attempt."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         call_count = 0
         mock_pr = MagicMock()
@@ -105,9 +107,9 @@ class TestGitHubRetry:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        result = await provider.get_pr_info("https://github.com/o/r/pull/1")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            result = await provider.get_pr_info("https://github.com/o/r/pull/1")
         assert result.title == "PR"
         assert call_count == 2
 
@@ -115,16 +117,18 @@ class TestGitHubRetry:
     async def test_get_pr_info_exhausts_retries(self):
         """get_pr_info raises ProviderError after all retries fail."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         mock_repo = MagicMock()
         mock_repo.get_pull.side_effect = ConnectionError("always fails")
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        with pytest.raises(ProviderError, match="Failed to fetch PR info"):
+        with (
+            patch("mira.providers.github.Github", return_value=mock_gh),
+            pytest.raises(ProviderError, match="Failed to fetch PR info"),
+        ):
             await provider.get_pr_info("https://github.com/o/r/pull/1")
 
         assert mock_repo.get_pull.call_count == 3
@@ -133,7 +137,7 @@ class TestGitHubRetry:
     async def test_get_pr_diff_retries_on_transient_error(self):
         """get_pr_diff retries transient HTTP errors."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         call_count = 0
         pr_info = _make_pr_info()
@@ -159,7 +163,7 @@ class TestGitHubRetry:
     async def test_get_pr_diff_exhausts_retries(self):
         """get_pr_diff raises ProviderError after all retries fail."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
         pr_info = _make_pr_info()
 
         call_count = 0
@@ -181,7 +185,7 @@ class TestGitHubRetry:
     async def test_post_review_retries_on_transient_error(self):
         """post_review retries and succeeds on the second attempt."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
         result = ReviewResult(
@@ -218,9 +222,9 @@ class TestGitHubRetry:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.post_review(pr_info, result)
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.post_review(pr_info, result)
         assert call_count == 2
         mock_pr.create_review.assert_called_once()
 
@@ -228,7 +232,7 @@ class TestGitHubRetry:
     async def test_post_review_no_commits_not_retried(self):
         """ProviderError('PR has no commits') is permanent and should not be retried."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
         result = ReviewResult(
@@ -255,9 +259,11 @@ class TestGitHubRetry:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        with pytest.raises(ProviderError, match="PR has no commits"):
+        with (
+            patch("mira.providers.github.Github", return_value=mock_gh),
+            pytest.raises(ProviderError, match="PR has no commits"),
+        ):
             await provider.post_review(pr_info, result)
 
         # Should have been called only once — no retries for ProviderError
@@ -276,7 +282,7 @@ class TestPostReviewGracefulDegradation:
     async def test_individual_failures_still_post_summary(self):
         """All inline comments 422 → summary still gets posted on its own."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
         result = ReviewResult(
@@ -319,9 +325,9 @@ class TestPostReviewGracefulDegradation:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.post_review(pr_info, result)
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.post_review(pr_info, result)
 
         # 1 batch /reviews call + 1 individual /comments call + 1 summary-
         # only /reviews call.
@@ -336,7 +342,7 @@ class TestPostReviewGracefulDegradation:
     async def test_partial_individual_success(self):
         """One bad line, one good line — the good one still posts."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
         result = ReviewResult(
@@ -387,9 +393,9 @@ class TestPostReviewGracefulDegradation:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.post_review(pr_info, result)
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.post_review(pr_info, result)
 
         # 1 batch (failed) + 2 individual /comments calls.
         # No summary-only fallback because b.py posted.
@@ -517,7 +523,7 @@ class TestPostComment:
     @pytest.mark.asyncio
     async def test_post_comment_calls_create_comment(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -527,9 +533,9 @@ class TestPostComment:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.post_comment(pr_info, "Hello world")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.post_comment(pr_info, "Hello world")
 
         mock_repo.get_issue.assert_called_once_with(1)
         mock_issue.create_comment.assert_called_once_with("Hello world")
@@ -537,7 +543,7 @@ class TestPostComment:
     @pytest.mark.asyncio
     async def test_post_comment_retries_on_transient_error(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -556,9 +562,9 @@ class TestPostComment:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.post_comment(pr_info, "Hello")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.post_comment(pr_info, "Hello")
         assert call_count == 2
         mock_issue.create_comment.assert_called_once_with("Hello")
 
@@ -567,7 +573,7 @@ class TestFindBotComment:
     @pytest.mark.asyncio
     async def test_find_bot_comment_found(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -586,15 +592,15 @@ class TestFindBotComment:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
         assert result == 42
 
     @pytest.mark.asyncio
     async def test_find_bot_comment_not_found(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -609,15 +615,15 @@ class TestFindBotComment:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_find_bot_comment_empty_comments(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -628,9 +634,9 @@ class TestFindBotComment:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            result = await provider.find_bot_comment(pr_info, "<!-- mira-walkthrough -->")
         assert result is None
 
 
@@ -638,7 +644,7 @@ class TestUpdateComment:
     @pytest.mark.asyncio
     async def test_update_comment_calls_edit(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -650,9 +656,9 @@ class TestUpdateComment:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.update_comment(pr_info, 42, "new body")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.update_comment(pr_info, 42, "new body")
 
         mock_issue.get_comment.assert_called_once_with(42)
         mock_comment.edit.assert_called_once_with("new body")
@@ -719,8 +725,7 @@ class TestResolveOutdatedReviewThreads:
 
     def _make_provider(self) -> GitHubProvider:
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
-        provider._github = MagicMock()
+        provider._token_supplier = _async_constant("test-token")
         return provider
 
     @pytest.mark.asyncio
@@ -902,7 +907,7 @@ class TestGetUnresolvedBotThreads:
     async def test_returns_all_unresolved_bot_threads(self):
         """Returns all unresolved threads authored by the bot, regardless of isOutdated."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         nodes = [
             _make_thread_node("T1", author_login="mira[bot]"),  # outdated — matches
@@ -940,7 +945,7 @@ class TestGetUnresolvedBotThreads:
     async def test_handles_pagination(self):
         """Paginates through multiple pages of review threads."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         call_count = 0
 
@@ -976,7 +981,7 @@ class TestGetUnresolvedBotThreads:
     async def test_returns_empty_when_no_matches(self):
         """Returns empty list when all threads are resolved or by other authors."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         nodes = [
             _make_thread_node("T1", is_resolved=True),
@@ -1000,7 +1005,7 @@ class TestGetUnresolvedBotThreads:
     async def test_matches_author_without_bot_suffix(self):
         """Matches when viewer is 'app[bot]' but comment author is 'app' (GitHub App quirk)."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         nodes = [
             _make_thread_node("T1", author_login="miracodeai"),
@@ -1026,7 +1031,7 @@ class TestResolveThreads:
     async def test_resolves_given_ids(self):
         """Resolves each thread and returns count."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         async def _mock_post(self, url, **kwargs):
             return httpx.Response(
@@ -1047,7 +1052,7 @@ class TestResolveThreads:
     async def test_handles_per_thread_failures(self):
         """Per-thread failures are logged but don't block others."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         async def _mock_post(self, url, **kwargs):
             body = kwargs.get("json", {})
@@ -1075,7 +1080,7 @@ class TestGetFileContent:
     async def test_returns_decoded_content(self):
         """Returns base64-decoded file content."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         file_text = "def hello():\n    return 'world'\n"
         encoded = base64.b64encode(file_text.encode()).decode()
@@ -1097,8 +1102,7 @@ class TestGetFileContent:
 class TestGetThreadIdForComment:
     def _make_provider(self) -> GitHubProvider:
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
-        provider._github = MagicMock()
+        provider._token_supplier = _async_constant("test-token")
         return provider
 
     def _pr_info(self) -> PRInfo:
@@ -1239,7 +1243,7 @@ class TestAddLabel:
     @pytest.mark.asyncio
     async def test_add_label_calls_issue_add_to_labels(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -1249,9 +1253,9 @@ class TestAddLabel:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.add_label(pr_info, "mira-paused")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.add_label(pr_info, "mira-paused")
 
         mock_repo.get_issue.assert_called_once_with(1)
         mock_issue.add_to_labels.assert_called_once_with("mira-paused")
@@ -1261,7 +1265,7 @@ class TestRemoveLabel:
     @pytest.mark.asyncio
     async def test_remove_label_calls_issue_remove_from_labels(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -1271,9 +1275,9 @@ class TestRemoveLabel:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
-        await provider.remove_label(pr_info, "mira-paused")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.remove_label(pr_info, "mira-paused")
 
         mock_repo.get_issue.assert_called_once_with(1)
         mock_issue.remove_from_labels.assert_called_once_with("mira-paused")
@@ -1281,7 +1285,7 @@ class TestRemoveLabel:
     @pytest.mark.asyncio
     async def test_remove_label_silently_handles_404(self):
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
 
         pr_info = _make_pr_info()
 
@@ -1293,10 +1297,10 @@ class TestRemoveLabel:
 
         mock_gh = MagicMock()
         mock_gh.get_repo.return_value = mock_repo
-        provider._github = mock_gh
 
         # Should not raise
-        await provider.remove_label(pr_info, "mira-paused")
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.remove_label(pr_info, "mira-paused")
 
 
 class TestGetPRDiff406Fallback:
@@ -1306,7 +1310,7 @@ class TestGetPRDiff406Fallback:
     async def test_406_fallback_with_patch_and_skipped_file(self):
         """406 triggers files-API fallback; files without patch are skipped."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
         pr_info = _make_pr_info()
 
         call_count = 0
@@ -1359,7 +1363,7 @@ class TestGetPRDiff406Fallback:
     async def test_406_fallback_pagination(self):
         """Pagination across multiple pages yields all files."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
         pr_info = _make_pr_info()
 
         call_count = 0
@@ -1423,7 +1427,7 @@ class TestGetPRDiff406Fallback:
     async def test_406_fallback_rename_synthesis(self):
         """Renames produce rename from/to headers parseable as RENAMED."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
         pr_info = _make_pr_info()
 
         call_count = 0
@@ -1466,7 +1470,7 @@ class TestGetPRDiff406Fallback:
     async def test_406_fallback_all_statuses_parse(self):
         """Each file status round-trips through parse_diff with correct change_type."""
         provider = GitHubProvider.__new__(GitHubProvider)
-        provider._token = "test-token"
+        provider._token_supplier = _async_constant("test-token")
         pr_info = _make_pr_info()
 
         call_count = 0
@@ -1528,3 +1532,120 @@ class TestGetPRDiff406Fallback:
         assert len(renamed) == 1
         assert renamed[0].old_path == "old.py"
         assert renamed[0].path == "renamed.py"
+
+
+class TestTokenRefresh:
+    """Regression: the provider must resolve a fresh token per API call so a
+    long-running review never outlives its installation token (401 incident)."""
+
+    @pytest.fixture
+    def rsa_private_key(self) -> str:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        return key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode()
+
+    @pytest.mark.asyncio
+    async def test_pygithub_client_uses_fresh_token_per_call(self):
+        tokens = iter(["tok-A", "tok-B"])
+
+        async def supplier() -> str:
+            return next(tokens)
+
+        provider = GitHubProvider(supplier)
+        mock_pr = MagicMock()
+        mock_pr.title = "PR"
+        mock_pr.body = "desc"
+        mock_pr.base.ref = "main"
+        mock_pr.head.ref = "feat"
+        mock_pr.html_url = "https://github.com/o/r/pull/1"
+        mock_pr.number = 1
+        mock_pr.head.sha = "abc123"
+        mock_pr.user.login = "alice"
+        mock_pr.user.avatar_url = ""
+        mock_repo = MagicMock()
+        mock_repo.get_pull.return_value = mock_pr
+        calls = []
+        with patch(
+            "mira.providers.github.Github",
+            side_effect=lambda t: (calls.append(t), MagicMock())[1],
+        ) as gh_cls:
+            gh_cls.return_value.get_repo.return_value = mock_repo
+            await provider.get_pr_info("https://github.com/o/r/pull/1")
+            await provider.get_pr_info("https://github.com/o/r/pull/1")
+        assert calls == ["tok-A", "tok-B"]
+        assert gh_cls.call_count == 2  # fresh client per call, no cached client
+
+    @pytest.mark.asyncio
+    async def test_httpx_headers_use_fresh_token_per_call(self):
+        tokens = iter(["tok-A", "tok-B"])
+
+        async def supplier() -> str:
+            return next(tokens)
+
+        provider = GitHubProvider(supplier)
+        seen: list[str] = []
+
+        async def _mock_get(self, url, **kwargs):
+            seen.append(kwargs["headers"]["Authorization"])
+            return httpx.Response(200, text="diff", request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            await provider.get_pr_diff(_make_pr_info())
+            await provider.get_pr_diff(_make_pr_info())
+        assert seen == ["token tok-A", "token tok-B"]
+
+    @pytest.mark.asyncio
+    async def test_provider_picks_up_reminted_token(self, rsa_private_key, monkeypatch):
+        from functools import partial
+
+        from mira.platforms.github import auth as auth_mod
+        from mira.platforms.github.auth import GitHubAppAuth
+
+        monkeypatch.setattr(auth_mod, "_TOKEN_TTL", 1)
+        monkeypatch.setattr(auth_mod, "_TOKEN_MIN_REMAINING", 0)
+        app_auth = GitHubAppAuth(app_id="12345", private_key=rsa_private_key)
+
+        mint_count = 0
+
+        async def _mock_post(self, url, **kwargs):
+            nonlocal mint_count
+            mint_count += 1
+
+            class Resp:
+                status_code = 201
+
+                def json(self):
+                    return {"token": f"ghs_{mint_count}"}
+
+            return Resp()
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", _mock_post)
+
+        provider = GitHubProvider(partial(app_auth.get_installation_token, 999))
+        seen: list[str] = []
+
+        async def _mock_get(self, url, **kwargs):
+            seen.append(kwargs["headers"]["Authorization"])
+            return httpx.Response(200, text="diff", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", _mock_get)
+
+        await provider.get_pr_diff(_make_pr_info())
+        # Simulate wall time passing past the 1-minute TTL.
+        _real_now = time.time()
+        monkeypatch.setattr(time, "time", lambda: _real_now + 10)
+        await provider.get_pr_diff(_make_pr_info())
+
+        assert seen == ["token ghs_1", "token ghs_2"]
+
+    @pytest.mark.asyncio
+    async def test_static_str_token(self):
+        provider = GitHubProvider("static-tok")
+        assert await provider._resolve_token() == "static-tok"
+        assert await provider._resolve_token() == "static-tok"

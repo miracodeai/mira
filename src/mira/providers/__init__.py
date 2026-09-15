@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Awaitable, Callable
 
 from mira.providers.base import BaseProvider
 
@@ -21,7 +22,7 @@ def get_available_providers() -> list[str]:
     return sorted(_REGISTRY)
 
 
-def create_provider(name: str, token: str) -> BaseProvider:
+def create_provider(name: str, token: str | Callable[[], Awaitable[str]]) -> BaseProvider:
     """Instantiate a registered provider by name."""
     with _LOCK:
         if name not in _REGISTRY:
