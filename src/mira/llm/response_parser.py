@@ -474,35 +474,6 @@ def parse_walkthrough_response(raw_text: str) -> LLMWalkthroughResponse:
     return response
 
 
-_MERMAID_LABEL_RE = re.compile(r"\[([^\[\]]+)\]")
-
-
-def _sanitize_mermaid(diagram: str) -> str:
-    """Repair nested-quote labels that break Mermaid's parser.
-
-    LLMs occasionally produce ``engine["core/"engine.py""]`` even when
-    the prompt explicitly forbids it. The nested ``"`` closes the label
-    early and Mermaid bails. We rewrite each ``[...]`` group whose
-    content has malformed quotes — strip every ``"`` inside, leave one
-    pair around the cleaned text — and pass through well-formed groups
-    untouched.
-    """
-    if not diagram or '"' not in diagram:
-        return diagram
-
-    def fix(match: re.Match[str]) -> str:
-        content = match.group(1)
-        if '"' not in content:
-            return match.group(0)
-        # Well-formed: starts and ends with ", no internal " marks.
-        if content.startswith('"') and content.endswith('"') and content.count('"') == 2:
-            return match.group(0)
-        cleaned = content.replace('"', "").strip()
-        return f'["{cleaned}"]'
-
-    return _MERMAID_LABEL_RE.sub(fix, diagram)
-
-
 def convert_to_walkthrough_result(response: LLMWalkthroughResponse) -> WalkthroughResult:
     """Convert an LLM walkthrough response to a WalkthroughResult model."""
     entries: list[WalkthroughFileEntry] = []
@@ -536,7 +507,5 @@ def convert_to_walkthrough_result(response: LLMWalkthroughResponse) -> Walkthrou
         file_changes=entries,
         effort=effort,
         confidence_score=confidence_score,
-        sequence_diagram=_sanitize_mermaid(response.sequence_diagram)
-        if response.sequence_diagram
-        else None,
+        sequence_diagram=response.sequence_diagram,
     )
