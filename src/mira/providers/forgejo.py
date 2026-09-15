@@ -479,6 +479,13 @@ class ForgejoProvider(BaseProvider):
 
     # ── labels ──────────────────────────────────────────────────────
 
+    async def get_pr_description(self, pr_info: PRInfo) -> str:
+        resp = await self._request("GET", self._pr(pr_info))
+        return (resp.json() or {}).get("body") or ""
+
+    async def update_pr_description(self, pr_info: PRInfo, body: str) -> None:
+        await self._request("PATCH", self._pr(pr_info), json={"body": body})
+
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         await self._request(
             "POST",

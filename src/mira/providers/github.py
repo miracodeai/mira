@@ -800,6 +800,32 @@ class GitHubProvider(BaseProvider):
         )
         return threads
 
+    async def get_pr_description(self, pr_info: PRInfo) -> str:
+        @_retry_transient
+        def _fetch() -> str:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            return gh_repo.get_pull(pr_info.number).body or ""
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch PR description: {e}") from e
+
+    async def update_pr_description(self, pr_info: PRInfo, body: str) -> None:
+        @_retry_transient
+        def _edit() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo.get_pull(pr_info.number).edit(body=body)
+
+        try:
+            await asyncio.to_thread(_edit)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to update PR description: {e}") from e
+
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         @_retry_transient
         def _add() -> None:

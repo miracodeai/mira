@@ -77,6 +77,14 @@ class BaseProvider(abc.ABC):
         """Look up the review thread for a comment. Returns thread ID or None."""
         return None
 
+    async def get_pr_description(self, pr_info: PRInfo) -> str:
+        """Fetch the current PR/MR description body. Default: return cached pr_info.description."""
+        return pr_info.description
+
+    async def update_pr_description(self, pr_info: PRInfo, body: str) -> None:
+        """Replace the PR/MR description body. No-op default; providers override."""
+        return
+
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         """Add a label to a pull request."""
         return

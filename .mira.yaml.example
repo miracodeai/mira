@@ -72,3 +72,7 @@ review:
   walkthrough: true
   # Include a Mermaid sequence diagram in the walkthrough
   walkthrough_sequence_diagram: true
+  # Write an AI-generated "Summary by Mira" block into the PR/MR description body.
+  # disable (default) = off; append = add/update the marked block, preserving the
+  #   author's description; replace = set the entire body to the summary block.
+  # pr_summary: "disable"

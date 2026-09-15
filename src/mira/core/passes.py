@@ -27,7 +27,7 @@ from mira.llm.response_parser import (
     parse_llm_response,
 )
 from mira.llm.tool_schemas import SUBMIT_CRITIQUE_TOOL, SUBMIT_REVIEW_TOOL
-from mira.models import KeyIssue, ReviewComment, Severity
+from mira.models import KeyIssue, ReviewComment, Severity, WalkthroughResult
 
 logger = logging.getLogger(__name__)
 
@@ -593,3 +593,55 @@ async def regenerate_summary(
         return cap_review_summary(fallback) or "No issues found."
 
     return cap_review_summary(text or "") or cap_review_summary(fallback) or "No issues found."
+
+
+async def generate_pr_summary(
+    llm: LLMProviderProtocol,
+    walkthrough: WalkthroughResult | None,
+    pr_title: str,
+    pr_description: str,
+    indexing_llm: LLMProviderProtocol | None = None,
+) -> str:
+    """Generate release-notes-style grouped bullet summary for the PR description.
+
+    Consumes the walkthrough's per-file analysis (already grounded in the diff).
+    Returns "" when no walkthrough is available (walkthrough disabled or failed)
+    or on LLM error — caller then skips the description write.
+    """
+    if walkthrough is None or not walkthrough.summary:
+        return ""
+
+    change_lines: list[str] = []
+    for fc in walkthrough.file_changes:
+        grp = fc.group or "General"
+        change_lines.append(f"- [{grp}] {fc.path} ({fc.change_type.name}): {fc.description}")
+
+    title_line = f"PR title: {pr_title}\n" if pr_title else ""
+    desc_line = f"PR description: {pr_description[:400]}\n" if pr_description else ""
+    prompt = (
+        "Write release notes for this pull request, grouped by change type. "
+        "Use ONLY the changes described below — do NOT invent, speculate, or mention "
+        "anything not listed. Group bullets under bold headings chosen from: "
+        "**New Features**, **Bug Fixes**, **Refactor**, **Performance**, **Tests**, "
+        "**Documentation**, **Chores** — use only the headings that apply, omit empty "
+        "groups. 1-4 concise bullets per group; each bullet is a single sentence "
+        "describing one user-facing or code-level change (not a per-file list). Plain "
+        "markdown bullets only, no HTML, no code fences.\n\n"
+        f"{title_line}{desc_line}"
+        f"Walkthrough summary: {walkthrough.summary}\n\n"
+        "## Changes\n\n"
+        + "\n".join(change_lines)
+        + "\n\nReturn just the grouped bullets — no preamble, no quotes."
+    )
+
+    summary_llm = indexing_llm or _indexing_llm(llm)
+    try:
+        text = await summary_llm.complete(
+            messages=[{"role": "user", "content": prompt}],
+            json_mode=False,
+            temperature=0.0,
+        )
+    except Exception as exc:
+        logger.warning("PR summary generation failed: %s", exc)
+        return ""
+    return (text or "").strip()

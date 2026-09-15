@@ -23,6 +23,7 @@ from mira.core.passes import (
     agentic_review_loop,
     cap_review_summary,
     dependency_review_pass,
+    generate_pr_summary,
     regenerate_summary,
     security_review_pass,
     self_critique,
@@ -44,6 +45,8 @@ from mira.llm.response_parser import (
     parse_walkthrough_response,
 )
 from mira.models import (
+    PR_SUMMARY_END,
+    PR_SUMMARY_START,
     WALKTHROUGH_MARKER,
     FileChangeType,
     KeyIssue,
@@ -83,6 +86,35 @@ def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> No
     """Record comments present before a stage but gone after it (identity-based)."""
     kept = {id(c) for c in after}
     audit.extend(_audit_drop(c, stage) for c in before if id(c) not in kept)
+
+
+def compose_pr_description(current_body: str, summary_block: str, mode: str) -> str:
+    """Build the new PR/MR description body from the summary block and mode.
+
+    append: preserve existing body; insert/replace the marked summary block
+            (idempotent across re-reviews — only the block between the markers
+            is swapped, author content before/after is kept).
+    replace: the summary block becomes the entire body.
+    """
+    if mode == "replace":
+        return summary_block
+    # append
+    # Only treat the markers as a block boundary when START exists and a
+    # following END terminates it. A lone START or a lone/orphan END (e.g.
+    # END authored before START) falls back to append-at-end, keeping
+    # re-reviews idempotent.
+    start_pos = current_body.find(PR_SUMMARY_START)
+    end_pos = current_body.find(PR_SUMMARY_END, start_pos) if start_pos != -1 else -1
+    if end_pos != -1:
+        before = current_body[:start_pos]
+        after = current_body[end_pos + len(PR_SUMMARY_END) :]
+        rebuilt = before.rstrip() + "\n\n" + summary_block
+        if after.strip():
+            rebuilt += "\n\n" + after.strip()
+        return rebuilt.strip()
+    if current_body.strip():
+        return current_body.rstrip() + "\n\n" + summary_block
+    return summary_block
 
 
 def _clamp_confidence_to_findings(
@@ -859,6 +891,24 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
+        if (
+            self.config.review.pr_summary != "disable"
+            and not self.dry_run
+            and result.pr_summary_block
+        ):
+            try:
+                block = (
+                    f"{PR_SUMMARY_START}\n## Summary by Mira\n\n"
+                    f"{result.pr_summary_block}\n{PR_SUMMARY_END}"
+                )
+                current_body = await self.provider.get_pr_description(pr_info)
+                new_body = compose_pr_description(
+                    current_body, block, self.config.review.pr_summary
+                )
+                await self.provider.update_pr_description(pr_info, new_body)
+            except Exception as exc:
+                logger.warning("Failed to update PR description summary: %s", exc)
+
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",
             pr_info.url,
@@ -1575,10 +1625,33 @@ class ReviewEngine:
 
         walkthrough = await walkthrough_task
 
+        pr_summary_block = ""
+        # Only generate when the result can actually be posted: the dry-run
+        # and stdin (no-provider) paths never write the description, so the
+        # indexing-tier LLM call would be discarded.
+        if (
+            self.config.review.pr_summary != "disable"
+            and walkthrough is not None
+            and not self.dry_run
+            and self.provider is not None
+        ):
+            try:
+                pr_summary_block = await generate_pr_summary(
+                    self.llm,
+                    walkthrough,
+                    pr_title,
+                    pr_description,
+                    indexing_llm=self.indexing_llm,
+                )
+            except Exception as exc:
+                logger.warning("PR summary generation failed: %s", exc)
+                pr_summary_block = ""
+
         return ReviewResult(
             comments=final_comments,
             key_issues=all_key_issues,
             summary=summary,
+            pr_summary_block=pr_summary_block,
             reviewed_files=len(filtered),
             token_usage=self.llm.usage,
             walkthrough=walkthrough,

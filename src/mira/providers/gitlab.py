@@ -483,6 +483,13 @@ class GitLabProvider(BaseProvider):
 
     # ── labels ──────────────────────────────────────────────────────
 
+    async def get_pr_description(self, pr_info: PRInfo) -> str:
+        resp = await self._request("GET", self._mr(pr_info))
+        return (resp.json() or {}).get("description") or ""
+
+    async def update_pr_description(self, pr_info: PRInfo, body: str) -> None:
+        await self._request("PUT", self._mr(pr_info), data={"description": body})
+
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         await self._request("PUT", self._mr(pr_info), data={"add_labels": label})
 

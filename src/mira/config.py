@@ -187,6 +187,12 @@ class ReviewConfig(BaseModel):
     focus_only_on_problems: bool = False
     walkthrough: bool = True
     walkthrough_sequence_diagram: bool = True
+    # Write an AI-generated "Summary by Mira" release-notes block into the
+    # PR/MR description body. "disable" (default) = off; "append" = add/update the
+    # marked block preserving the author's description; "replace" = set the entire
+    # body to the summary block. Requires review.walkthrough: true (content derives
+    # from the walkthrough's per-file analysis).
+    pr_summary: Literal["disable", "append", "replace"] = "disable"
     code_context: bool = True
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)

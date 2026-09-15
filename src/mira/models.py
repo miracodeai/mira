@@ -6,6 +6,8 @@ import enum
 from dataclasses import dataclass, field
 
 WALKTHROUGH_MARKER = "<!-- mira-walkthrough -->"
+PR_SUMMARY_START = "<!-- mira-pr-summary-start -->"
+PR_SUMMARY_END = "<!-- mira-pr-summary-end -->"
 
 
 class FileChangeType(enum.Enum):
@@ -386,6 +388,7 @@ class ReviewResult:
     comments: list[ReviewComment] = field(default_factory=list)
     key_issues: list[KeyIssue] = field(default_factory=list)
     summary: str = ""
+    pr_summary_block: str = ""
     reviewed_files: int = 0
     skipped_reason: str | None = None
     token_usage: dict[str, int] = field(default_factory=dict)
