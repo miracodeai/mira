@@ -90,6 +90,28 @@ class TestBuildReviewPrompt:
         assert "Add feature X" in system
         assert "This PR adds feature X" in system
 
+    def test_includes_linked_issue_context(self):
+        files = [
+            FileDiff(
+                path="test.py",
+                change_type=FileChangeType.MODIFIED,
+                hunks=[HunkInfo(1, 1, 1, 1, "+changed")],
+                added_lines=1,
+                deleted_lines=0,
+            )
+        ]
+
+        messages = build_review_prompt(
+            files,
+            MiraConfig(),
+            linked_issue_context="EPIC-123 requires expired cards to be rejected",
+        )
+
+        system = messages[0]["content"]
+        assert "Linked issue requirements" in system
+        assert "EPIC-123 requires expired cards to be rejected" in system
+        assert "product data" in system
+
     def test_user_message_contains_diffs(self):
         files = [
             FileDiff(
