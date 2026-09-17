@@ -11,7 +11,14 @@ from __future__ import annotations
 import html
 import re
 
-from mira.models import KeyIssue, ReviewComment, Severity
+from mira.models import (
+    KeyIssue,
+    PRInfo,
+    ReviewComment,
+    ReviewResult,
+    Severity,
+    build_review_stats,
+)
 
 _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
     "bug": ("\U0001f41b", "Bug"),
@@ -123,6 +130,190 @@ def format_key_issues(key_issues: list[KeyIssue]) -> str:
     for ki in key_issues:
         lines.append(f"| :red_circle: | {ki.issue} | `{ki.path}:{ki.line}` |")
     return "\n".join(lines)
+
+
+def _table_cell(value: object) -> str:
+    """Keep model-provided text from breaking the summary tables."""
+    return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _format_key_issues_section(key_issues: list[KeyIssue]) -> str:
+    """Render key issues in the standard collapsed review section."""
+    ordered = sorted(key_issues, key=lambda issue: (issue.path, issue.line, issue.issue))
+    lines = [
+        "<details>",
+        f"<summary>📌 Key issues ({len(ordered)})</summary>",
+        "",
+        "| | Issue | Location |",
+        "|---|---|---|",
+    ]
+    for issue in ordered:
+        lines.append(
+            f"| 🔴 | {_table_cell(issue.issue)} | `{_table_cell(issue.path)}:{issue.line}` |"
+        )
+    lines.extend(["", "</details>"])
+    return "\n".join(lines)
+
+
+def _format_severity_counts(stats: dict[Severity, int]) -> str:
+    """Format the compact icon/count line shown beside the review title."""
+    labels = {
+        Severity.BLOCKER: "blocker",
+        Severity.WARNING: "warning",
+        Severity.SUGGESTION: "suggestion",
+        Severity.NITPICK: "nitpick",
+    }
+    parts = []
+    for severity in (Severity.BLOCKER, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK):
+        count = stats.get(severity, 0)
+        if count:
+            label = labels[severity] + ("s" if count != 1 else "")
+            parts.append(f"{severity.emoji} {count} {label}")
+    return f" · {' · '.join(parts)}" if parts else ""
+
+
+def _review_scope(result: ReviewResult) -> tuple[int, int]:
+    """Return reviewed/total file counts while supporting older result payloads."""
+    reviewed = len(result.reviewed_paths) if result.reviewed_paths else result.reviewed_files
+    total = len(result.total_paths) if result.total_paths else reviewed + len(result.skipped_paths)
+    return reviewed, total
+
+
+def format_review_summary(
+    result: ReviewResult,
+    bot_name: str = "miracodeai",
+    pr_info: PRInfo | None = None,
+) -> str:
+    """Render the provider-neutral, CodeRabbit-style top-level review body.
+
+    The individual findings remain inline comments. This body is deliberately
+    deterministic: sections, severity order, checks, and file lists render in
+    the same order on GitHub, GitLab, and Forgejo.
+    """
+    stats = build_review_stats(result.comments)
+    actionable = len(result.comments)
+    reviewed, total = _review_scope(result)
+    suggestions = sum(1 for comment in result.comments if comment.suggestion)
+
+    parts = [
+        "<!-- mira-review-summary -->",
+        "## Mira Review Summary",
+        "",
+        f"**Actionable comments posted: {actionable}**{_format_severity_counts(stats)}",
+        "",
+    ]
+    if actionable == 0:
+        parts.append("✅ No actionable comments found.")
+        parts.append("")
+
+    parts.extend(
+        [
+            "<details>",
+            "<summary>🤖 Prompt for all review comments with AI agents</summary>",
+            "",
+            f"Reply to an inline finding with `@{bot_name}` to continue that finding's "
+            "conversation. Any comment that supports agent assistance includes its "
+            "scoped prompt below the recommendation.",
+            "",
+            "</details>",
+            "",
+            "<details>",
+            "<summary>🪄 Autofix</summary>",
+            "",
+            (
+                f"{suggestions} inline finding{'s' if suggestions != 1 else ''} "
+                "include a GitHub suggestion block. Apply those blocks from the "
+                "corresponding inline comments."
+                if suggestions
+                else "No code suggestions were generated for this review."
+            ),
+            "",
+            "</details>",
+            "",
+            "---",
+            "",
+            "<details open>",
+            "<summary>ℹ️ Review info</summary>",
+            "",
+            "| Check | Result |",
+            "|---|---|",
+            f"| Actionable findings | {'⚠️' if actionable else '✅'} {actionable} |",
+            f"| Blocking findings | {'🛑' if stats.get(Severity.BLOCKER, 0) else '✅'} "
+            f"{stats.get(Severity.BLOCKER, 0)} |",
+            f"| Warnings | {'⚠️' if stats.get(Severity.WARNING, 0) else '✅'} "
+            f"{stats.get(Severity.WARNING, 0)} |",
+            f"| Suggestions | {'💡' if stats.get(Severity.SUGGESTION, 0) else '✅'} "
+            f"{stats.get(Severity.SUGGESTION, 0)} |",
+            f"| Nitpicks | {'💬' if stats.get(Severity.NITPICK, 0) else '✅'} "
+            f"{stats.get(Severity.NITPICK, 0)} |",
+            (
+                f"| Review scope | {'⚠️' if result.skipped_paths else '✅'} "
+                f"{reviewed} of {total} files processed |"
+                if total
+                else "| Review scope | ℹ️ File scope not reported |"
+            ),
+            "",
+            "</details>",
+            "",
+            "<details>",
+            "<summary>⚙️ Run configuration</summary>",
+            "",
+            "- Reviewer: `Mira`",
+            f"- Bot: `@{bot_name}`",
+        ]
+    )
+    if pr_info:
+        if pr_info.base_branch or pr_info.head_branch:
+            parts.append(f"- Branches: `{pr_info.base_branch}` ← `{pr_info.head_branch}`")
+        if pr_info.head_sha:
+            parts.append(f"- Reviewed commit: `{pr_info.head_sha[:8]}`")
+    parts.extend(["", "</details>", ""])
+
+    if result.summary:
+        parts.extend(
+            [
+                "<details open>",
+                "<summary>📝 Review summary</summary>",
+                "",
+                result.summary.strip(),
+                "",
+                "</details>",
+                "",
+            ]
+        )
+
+    selected_paths = sorted(set(result.reviewed_paths))
+    parts.extend(
+        [
+            "<details>",
+            f"<summary>📁 Files selected for processing ({reviewed})</summary>",
+            "",
+        ]
+    )
+    if selected_paths:
+        parts.extend(f"- `{path}`" for path in selected_paths)
+    else:
+        parts.append("- File manifest not reported by this review.")
+    parts.extend(["", "</details>"])
+
+    if result.skipped_paths:
+        skipped_paths = sorted(set(result.skipped_paths))
+        parts.extend(
+            [
+                "",
+                "<details>",
+                f"<summary>⏭️ Files skipped from review ({len(skipped_paths)})</summary>",
+                "",
+                *[f"- `{path}`" for path in skipped_paths],
+                "",
+                "</details>",
+            ]
+        )
+
+    if result.key_issues:
+        parts.extend(["", _format_key_issues_section(result.key_issues)])
+
+    return "\n".join(parts)
 
 
 _FENCE_RE = re.compile(r"^(`{3,})")

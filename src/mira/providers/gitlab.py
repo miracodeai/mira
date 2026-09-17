@@ -27,7 +27,7 @@ from mira.models import (
 )
 from mira.platforms import profiles
 from mira.providers.base import BaseProvider
-from mira.providers.formatting import format_comment_body, format_key_issues
+from mira.providers.formatting import format_comment_body, format_review_summary
 
 logger = logging.getLogger(__name__)
 
@@ -268,13 +268,13 @@ class GitLabProvider(BaseProvider):
     async def post_review(
         self, pr_info: PRInfo, result: ReviewResult, bot_name: str = "miracodeai"
     ) -> None:
-        if not result.comments:
-            return
-        try:
-            data = await self._changes(pr_info)
-        except Exception as e:
-            raise ProviderError(f"Failed to load MR diff_refs: {e}") from e
-        diff_refs = data.get("diff_refs") or {}
+        diff_refs = {}
+        if result.comments:
+            try:
+                data = await self._changes(pr_info)
+            except Exception as e:
+                raise ProviderError(f"Failed to load MR diff_refs: {e}") from e
+            diff_refs = data.get("diff_refs") or {}
 
         posted = 0
         for comment in result.comments:
@@ -313,11 +313,7 @@ class GitLabProvider(BaseProvider):
                 except ProviderError:
                     logger.warning("Plain-note fallback also failed for %s:%s", comment.path, line)
 
-        review_body = ""
-        if result.summary:
-            review_body = f"**Mira Review Summary**\n\n{result.summary}"
-        if result.key_issues:
-            review_body += format_key_issues(result.key_issues)
+        review_body = format_review_summary(result, bot_name=bot_name, pr_info=pr_info)
         if review_body:
             try:
                 await self.post_comment(pr_info, review_body)

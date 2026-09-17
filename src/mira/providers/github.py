@@ -38,7 +38,7 @@ from mira.providers.formatting import (
     format_comment_body as _format_comment_body,
 )
 from mira.providers.formatting import (
-    format_key_issues as _format_key_issues,
+    format_review_summary as _format_review_summary,
 )
 
 # Transient errors worth retrying — network issues and GitHub server errors.
@@ -437,9 +437,6 @@ class GitHubProvider(BaseProvider):
         result: ReviewResult,
         bot_name: str = "miracodeai",
     ) -> list[int]:
-        if not result.comments:
-            return []
-
         # The line GitHub anchors a comment to (the end line for multi-line).
         def _anchor(c: ReviewComment) -> int:
             return c.end_line if (c.end_line and c.end_line > c.line) else c.line
@@ -459,11 +456,7 @@ class GitHubProvider(BaseProvider):
 
             review_comments.append(rc)
 
-        review_body = ""
-        if result.summary:
-            review_body = f"**Mira Review Summary**\n\n{result.summary}"
-        if result.key_issues:
-            review_body += _format_key_issues(result.key_issues)
+        review_body = _format_review_summary(result, bot_name=bot_name, pr_info=pr_info)
 
         token = await self._resolve_token()
         gh = self._make_client(token)

@@ -32,7 +32,7 @@ from mira.models import (
 )
 from mira.platforms import profiles
 from mira.providers.base import BaseProvider
-from mira.providers.formatting import format_comment_body, format_key_issues
+from mira.providers.formatting import format_comment_body, format_review_summary
 
 logger = logging.getLogger(__name__)
 
@@ -271,14 +271,7 @@ class ForgejoProvider(BaseProvider):
     async def post_review(
         self, pr_info: PRInfo, result: ReviewResult, bot_name: str = "miracodeai"
     ) -> None:
-        if not result.comments:
-            return
-
-        summary_text = ""
-        if result.summary:
-            summary_text = f"**Mira Review Summary**\n\n{result.summary}"
-        if result.key_issues:
-            summary_text += format_key_issues(result.key_issues)
+        summary_text = format_review_summary(result, bot_name=bot_name, pr_info=pr_info)
 
         review_body = {
             "event": "COMMENT",
