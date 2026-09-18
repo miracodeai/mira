@@ -18,6 +18,7 @@ import { toast } from "@/components/ui/sonner"
 import { useDocumentTitle } from "@/lib/hooks"
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { normalizeRepoOwner, splitRepoKey } from "@/lib/repo-key"
 
 function parseDetail(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e)
@@ -40,7 +41,10 @@ export function LearningFormPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
 
-  const editOwner = params.get("owner") ?? ""
+  // Old dashboard builds leaked the Postgres storage prefix into edit URLs.
+  // Normalize it so an already-open/bookmarked form starts working after an
+  // upgrade instead of requiring the user to return to the list first.
+  const editOwner = normalizeRepoOwner(params.get("owner") ?? "")
   const editRepo = params.get("repo") ?? ""
   const editId = params.get("id")
   const isEdit = Boolean(editId)
@@ -101,7 +105,12 @@ export function LearningFormPage() {
       setError("Pick a repo and enter the rule text.")
       return
     }
-    const [owner, repo] = repoKey.split("/")
+    const repoParts = splitRepoKey(repoKey)
+    if (!repoParts) {
+      setError("Invalid repository key.")
+      return
+    }
+    const [owner, repo] = repoParts
     const body = {
       rule_text: ruleText.trim(),
       category: category.trim() || "other",

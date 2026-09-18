@@ -305,6 +305,22 @@ def _pg_cursor(url: str) -> Iterator[Any]:
         yield cur
 
 
+def _registry_owner(storage_owner: str) -> str:
+    """Translate the Postgres storage namespace back to the registry owner.
+
+    Non-GitHub repositories are stored under a synthetic ``_{platform}/``
+    prefix so equal owner/repo pairs from different providers cannot collide.
+    Dashboard responses must never expose that implementation detail: callers
+    use the clean owner to resolve the repository and ``IndexStore.open`` adds
+    the storage prefix again after determining its platform.
+    """
+    for platform in ("gitlab", "forgejo"):
+        prefix = f"_{platform}/"
+        if storage_owner.startswith(prefix):
+            return storage_owner[len(prefix) :]
+    return storage_owner
+
+
 def list_learned_rules_org_wide(
     url: str, limit: int = 1000, status: str | None = None
 ) -> list[dict]:
@@ -326,7 +342,7 @@ def list_learned_rules_org_wide(
     return [
         {
             "id": r[0],
-            "owner": r[1],
+            "owner": _registry_owner(r[1]),
             "repo": r[2],
             "rule_text": r[3],
             "source_signal": r[4],
@@ -368,7 +384,7 @@ def list_vulnerabilities_org_wide(url: str, limit: int = 1000) -> list[dict]:
         rows = cur.fetchall()
     return [
         {
-            "owner": r[0],
+            "owner": _registry_owner(r[0]),
             "repo": r[1],
             "package_name": r[2],
             "ecosystem": r[3],
@@ -397,6 +413,8 @@ def list_packages_org_wide(url: str) -> list[dict]:
         rows = cur.fetchall()
     return [
         {
+            # The vulnerability poller opens PgIndexStore directly, so this
+            # internal helper must retain the storage-scoped owner.
             "owner": r[0],
             "repo": r[1],
             "kind": r[2],
@@ -454,7 +472,7 @@ def search_packages_org_wide(
 
     return [
         {
-            "owner": r[0],
+            "owner": _registry_owner(r[0]),
             "repo": r[1],
             "name": r[2],
             "kind": r[3],

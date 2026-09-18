@@ -21,8 +21,8 @@ PROTECTED = [
     ("/api/uninstalls/{installation_id}/delete", "POST", {"installation_id": 1}),
     ("/api/setup/complete", "POST", {"body": None}),
     ("/api/repos/sync", "POST", {}),
-    ("/api/repos/{owner}/{repo}/index", "POST", {"owner": "o", "repo": "r"}),
-    ("/api/repos/{owner}/{repo}/index", "DELETE", {"owner": "o", "repo": "r"}),
+    ("/api/repos/{owner:path}/{repo}/index", "POST", {"owner": "o", "repo": "r"}),
+    ("/api/repos/{owner:path}/{repo}/index", "DELETE", {"owner": "o", "repo": "r"}),
 ]
 
 

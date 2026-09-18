@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
-from mira.dashboard.db import AppDatabase
+from mira.dashboard.db import AppDatabase, RepoRecord
 from mira.index.relationships import RelationshipStore
 from mira.index.store import IndexStore
 
@@ -62,7 +62,7 @@ def _get_index_dir() -> str:
 _PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2}
 
 
-def _pick_platform_record(records: list) -> object:
+def _pick_platform_record(records: list[RepoRecord]) -> RepoRecord:
     """Return the highest-priority record from a cross-platform list."""
     return min(records, key=lambda r: _PLATFORM_ORDER.get(r.platform, 99))
 
@@ -1280,13 +1280,16 @@ class TimeSeriesPoint(BaseModel):
 
 # Importing the router modules runs their @router decorators, populating
 # `router` before it's wired onto the app below. Side-effect imports (the
-# submodule form avoids binding names that collide with locals here).
+# submodule form avoids binding names that collide with locals here). Keep
+# repos last because its nested-owner detail route is the catch-all fallback.
+# isort: off
 import mira.dashboard.routers.admin  # noqa: E402,F401
 import mira.dashboard.routers.core  # noqa: E402,F401
 import mira.dashboard.routers.relationships  # noqa: E402,F401
-import mira.dashboard.routers.repos  # noqa: E402,F401
 import mira.dashboard.routers.rules  # noqa: E402,F401
 import mira.dashboard.routers.vulnerabilities  # noqa: E402,F401
+import mira.dashboard.routers.repos  # noqa: E402,F401
+# isort: on
 
 
 @router.get("/api/activity/{owner}/{repo}/{pr_number}", response_model=ActivityDetailModel)

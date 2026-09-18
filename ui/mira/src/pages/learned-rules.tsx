@@ -146,8 +146,14 @@ export function LearnedRulesPage() {
   )
   const [selected, setSelected] = useState<OrgLearnedRuleModel | null>(null)
 
-  const editHref = (r: OrgLearnedRuleModel) =>
-    `/learnings/edit?owner=${r.owner}&repo=${r.repo}&id=${r.id}`
+  const editHref = (r: OrgLearnedRuleModel) => {
+    const query = new URLSearchParams({
+      owner: r.owner,
+      repo: r.repo,
+      id: String(r.id),
+    })
+    return `/learnings/edit?${query.toString()}`
+  }
   const [panelOpen, setPanelOpen] = useState(false)
 
   const openDetail = (r: OrgLearnedRuleModel) => {
