@@ -10,7 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mira.exceptions import ConfigError
 
@@ -35,6 +35,8 @@ def _is_local_host(host: str) -> bool:
 
 
 class LLMConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model: str = "anthropic/claude-sonnet-4-6"
     fallback_model: str | None = None
     # Optional per-purpose overrides. Fall back to `model` if not set.
@@ -101,6 +103,8 @@ class LLMConfig(BaseModel):
 
 
 class FilterConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     # Per-category floors layered over confidence_threshold (the higher wins).
     # Lets noisy categories (e.g. "security" from the cheap-model pass) be
@@ -153,10 +157,12 @@ class OverlapConfig(BaseModel):
     """Cross-PR overlap detection ("stepping on each other's toes").
 
     While reviewing a PR, Mira compares it against other open PRs in the repo
-    and flags ones that touch the same code (merge-conflict risk) or pursue the
-    same goal (duplicate effort). A cheap deterministic pre-filter runs first;
-    only the survivors cost an LLM call.
+    and flags ones that touch the same code (merge-conflict risk) or pursue
+    the same goal (duplicate effort). A cheap deterministic pre-filter runs first,
+    so only the survivors cost an LLM call.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     # Cap on how many recently-updated open PRs to compare against, to bound
@@ -170,6 +176,8 @@ class OverlapConfig(BaseModel):
 
 
 class ReviewConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     context_lines: int = Field(default=3, ge=0)
     # Total diff size cap. Above this, the diff is *not* truncated arbitrarily —
     # files are ranked by priority and the lowest-priority files are skipped
@@ -286,6 +294,8 @@ class ReviewConfig(BaseModel):
 
 
 class IndexConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     # Skip indexing any file larger than this (bytes). Generated SDKs, vendored
     # bundles and large test fixtures burn indexing tokens for little value.
     # Defaults to the previous hard-coded tarball cap (1 MB) so it's a no-op
@@ -294,10 +304,14 @@ class IndexConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     type: str = "github"
 
 
 class DatabaseConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     url: str = ""  # empty = SQLite fallback. "postgresql://user:pass@host:5432/mira"
     admin_password: str = (
         ""  # initial admin password; empty = generated on first start, written to a 0600 file
@@ -305,6 +319,8 @@ class DatabaseConfig(BaseModel):
 
 
 class MiraConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     llm: LLMConfig = Field(default_factory=LLMConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
