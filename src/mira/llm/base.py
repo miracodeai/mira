@@ -142,6 +142,9 @@ class OpenAICompatibleProvider:
         self.total_completion_tokens = 0
         self._no_forced_tool_choice: set[str] = set()
         self._no_reasoning: set[str] = set()
+        # Per-model output-budget escalations applied after a reasoning model
+        # exhausts max_tokens while thinking (see provider._call_llm_with_tools).
+        self._max_tokens_override: dict[str, int] = {}
 
         # Apply retry decorator imperatively so it reads config values
         # (max_retries, retry_min_wait, retry_max_wait) at instance time.
