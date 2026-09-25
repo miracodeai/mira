@@ -169,6 +169,40 @@ class TestFetchCatalog:
         assert values == ["claude-sonnet-4-6", "openai/gpt-4o-mini"]
         assert seen_auth == ["Bearer rqsty-test", "Bearer rqsty-test"]
 
+    @pytest.mark.asyncio
+    async def test_requesty_keeps_managed_list_when_models_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url).endswith("/models/managed"):
+                data = [{"id": "claude-sonnet-4-6", "api": "chat", "supports_tool_calling": True}]
+                return httpx.Response(200, json={"object": "list", "data": data})
+            return httpx.Response(503)
+
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            model_catalog.httpx,
+            "AsyncClient",
+            lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        )
+        config = LLMConfig(base_url="https://router.requesty.ai/v1", api_key_env="REQUESTY_API_KEY")
+        values = [m["value"] for m in await model_catalog._fetch_requesty(config)]
+        assert values == ["claude-sonnet-4-6"]
+
+    @pytest.mark.asyncio
+    async def test_requesty_raises_when_both_listings_fail(self, monkeypatch: pytest.MonkeyPatch):
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            model_catalog.httpx,
+            "AsyncClient",
+            lambda **kw: real_client(
+                transport=httpx.MockTransport(lambda r: httpx.Response(503)), **kw
+            ),
+        )
+        config = LLMConfig(base_url="https://router.requesty.ai/v1", api_key_env="REQUESTY_API_KEY")
+        with pytest.raises(httpx.HTTPStatusError):
+            await model_catalog._fetch_requesty(config)
+
     def test_bedrock_cache_key_includes_profile(self):
         # Switching aws_profile must not serve the previous account's catalog.
         a = LLMConfig(provider="bedrock", aws_profile="account-a")
