@@ -89,9 +89,14 @@ async def _fetch_requesty(config: LLMConfig) -> list[dict]:
             models += resp.json().get("data", [])
         except httpx.HTTPError as exc:
             logger.warning("Requesty managed models fetch failed: %s", exc)
-        resp = await client.get(f"{base}/models", headers=headers)
-    resp.raise_for_status()
-    models += resp.json().get("data", [])
+        try:
+            resp = await client.get(f"{base}/models", headers=headers)
+            resp.raise_for_status()
+            models += resp.json().get("data", [])
+        except httpx.HTTPError as exc:
+            if not models:
+                raise
+            logger.warning("Requesty models fetch failed, using managed list only: %s", exc)
     out, seen = [], set()
     for m in models:
         if m.get("api", "chat") != "chat" or not m.get("supports_tool_calling"):
