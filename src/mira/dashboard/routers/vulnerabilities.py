@@ -15,7 +15,7 @@ from mira.dashboard.api import (
 
 
 @router.get(
-    "/api/repos/{owner}/{repo}/vulnerabilities",
+    "/api/repos/{owner:path}/{repo}/vulnerabilities",
     response_model=list[VulnerabilityModel],
 )
 def get_repo_vulnerabilities(owner: str, repo: str) -> list[VulnerabilityModel]:

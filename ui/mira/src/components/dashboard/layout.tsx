@@ -111,7 +111,18 @@ const PAGE_LABELS: Record<string, string> = {
 
 function AppBreadcrumb() {
   const location = useLocation()
-  const parts = location.pathname.split("/").filter(Boolean)
+  const pathParts = location.pathname.split("/").filter(Boolean)
+  // A repository owner can itself contain slashes (GitLab nested groups).
+  // Present it as one breadcrumb segment instead of generating links to
+  // non-existent intermediate repository routes.
+  const parts =
+    pathParts[0] === "repos" && pathParts.length >= 3
+      ? [
+          pathParts[0]!,
+          pathParts.slice(1, -1).join("/"),
+          pathParts[pathParts.length - 1]!,
+        ]
+      : pathParts
 
   // The /settings/webhooks/{id} segment is an opaque id — resolve it to the
   // webhook's name so the breadcrumb reads "Webhooks / #eng-reviews", not a
@@ -149,8 +160,8 @@ function AppBreadcrumb() {
     return PAGE_LABELS[part] || decodeURIComponent(part)
   }
 
-  // /repos/{owner}/{repo} doesn't have a real /repos/{owner} route, so the
-  // owner segment links back to the repos list with that owner pre-filtered.
+  // /repos/{owner...}/{repo} doesn't have a real owner-only route, so the
+  // complete owner namespace links back to the list with that owner filtered.
   const hrefFor = (i: number) => {
     if (parts[0] === "repos" && i === 1 && parts.length >= 3) {
       return `/repos?owner=${encodeURIComponent(parts[1])}`

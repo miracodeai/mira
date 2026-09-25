@@ -203,7 +203,7 @@ export function App() {
           <Route index element={<DashboardPage />} />
           <Route path="activity" element={<ActivityPage />} />
           <Route path="repos" element={<ReposPage />} />
-          <Route path="repos/:owner/:repo" element={<RepoDetailPage />} />
+          <Route path="repos/*" element={<RepoDetailPage />} />
           <Route path="contributors" element={<ContributorsPage />} />
           <Route path="contributors/:login" element={<ContributorDetailPage />} />
           <Route path="packages" element={<PackagesPage />} />
