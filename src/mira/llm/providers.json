@@ -15,6 +15,17 @@
     "prompt_caching": "anthropic"
   },
 
+  "requesty": {
+    "base_url": "https://router.requesty.ai/v1",
+    "api_key_env": "REQUESTY_API_KEY",
+    "model_prefix": "keep",
+    "extra_headers": {
+      "HTTP-Referer": "https://github.com/miracodeai/mira",
+      "X-Title": "Mira Code Reviewer"
+    },
+    "reasoning_effort_map": {}
+  },
+
   "deepseek": {
     "base_url": "https://api.deepseek.com/v1",
     "api_key_env": "DEEPSEEK_API_KEY",

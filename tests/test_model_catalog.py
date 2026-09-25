@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from mira.config import LLMConfig
@@ -27,6 +28,9 @@ class TestActiveBackend:
 
     def test_codex_cli_provider(self):
         assert active_backend(LLMConfig(provider="codex-cli")) == "codex-cli"
+
+    def test_requesty_endpoint(self):
+        assert active_backend(LLMConfig(base_url="https://router.requesty.ai/v1")) == "requesty"
 
     def test_generic_endpoint(self):
         assert (
@@ -67,6 +71,16 @@ class TestBuildOptions:
         dynamic = [{"value": "llama-3.3-70b", "label": "llama-3.3-70b"}]
         values = [m["value"] for m in build_options("openai-compatible", dynamic, "review")]
         assert values == ["llama-3.3-70b"]
+
+    def test_requesty_uses_dynamic_only(self):
+        dynamic = [{"value": "claude-sonnet-4-6", "label": "claude-sonnet-4-6"}]
+        values = [m["value"] for m in build_options("requesty", dynamic, "review")]
+        assert values == ["claude-sonnet-4-6"]
+
+    def test_requesty_falls_back_to_registry(self):
+        values = [m["value"] for m in build_options("requesty", None, "review")]
+        assert "anthropic/claude-sonnet-4-6" in values
+        assert "us.anthropic.claude-sonnet-4-6-v1:0" not in values
 
     def test_generic_endpoint_falls_back_to_registry(self):
         values = [m["value"] for m in build_options("openai-compatible", None, "review")]
@@ -121,6 +135,39 @@ class TestFetchCatalog:
         results = await asyncio.gather(*(fetch_catalog(LLMConfig()) for _ in range(5)))
         assert all(r == [{"value": "m", "label": "m"}] for r in results)
         assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_requesty_lists_managed_first_and_tool_models_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("REQUESTY_API_KEY", "rqsty-test")
+        pages = {
+            "https://router.requesty.ai/v1/models/managed": [
+                {"id": "claude-sonnet-4-6", "api": "chat", "supports_tool_calling": True},
+            ],
+            "https://router.requesty.ai/v1/models": [
+                {"id": "openai/gpt-4o-mini", "api": "chat", "supports_tool_calling": True},
+                {"id": "claude-sonnet-4-6", "api": "chat", "supports_tool_calling": True},
+                {"id": "openai/text-embedding-3-small", "api": "embedding"},
+                {"id": "vendor/no-tools", "api": "chat", "supports_tool_calling": False},
+            ],
+        }
+        seen_auth = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_auth.append(request.headers.get("Authorization"))
+            return httpx.Response(200, json={"object": "list", "data": pages[str(request.url)]})
+
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            model_catalog.httpx,
+            "AsyncClient",
+            lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        )
+        config = LLMConfig(base_url="https://router.requesty.ai/v1", api_key_env="REQUESTY_API_KEY")
+        values = [m["value"] for m in await fetch_catalog(config) or []]
+        assert values == ["claude-sonnet-4-6", "openai/gpt-4o-mini"]
+        assert seen_auth == ["Bearer rqsty-test", "Bearer rqsty-test"]
 
     def test_bedrock_cache_key_includes_profile(self):
         # Switching aws_profile must not serve the previous account's catalog.
