@@ -556,6 +556,18 @@ class TestStripModelPrefix:
         result = _strip_model_prefix("gpt-4o", "https://openrouter.ai/api/v1")
         assert result == "gpt-4o"
 
+    def test_requesty_url_strips_requesty_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("requesty/openai/gpt-4o-mini", "https://router.requesty.ai/v1")
+        assert result == "openai/gpt-4o-mini"
+
+    def test_requesty_url_preserves_vendor_prefix(self):
+        from mira.llm.provider import _strip_model_prefix
+
+        result = _strip_model_prefix("anthropic/claude-sonnet-4-6", "https://router.requesty.ai/v1")
+        assert result == "anthropic/claude-sonnet-4-6"
+
     def test_non_openrouter_url_strips_provider_prefix(self):
         from mira.llm.provider import _strip_model_prefix
 
@@ -586,6 +598,12 @@ class TestProfileHeaders:
 
     def test_openrouter_adds_ranking_headers(self):
         provider = LLMProvider(LLMConfig(model="m"))  # default base_url = openrouter
+        headers = provider._build_headers()
+        assert headers["HTTP-Referer"] == "https://github.com/miracodeai/mira"
+        assert headers["X-Title"] == "Mira Code Reviewer"
+
+    def test_requesty_adds_ranking_headers(self):
+        provider = LLMProvider(LLMConfig(model="m", base_url="https://router.requesty.ai/v1"))
         headers = provider._build_headers()
         assert headers["HTTP-Referer"] == "https://github.com/miracodeai/mira"
         assert headers["X-Title"] == "Mira Code Reviewer"

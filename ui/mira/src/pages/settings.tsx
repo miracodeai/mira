@@ -337,9 +337,11 @@ export function SettingsPage() {
               Choose models for indexing and PR reviews
               {backend &&
                 ` — listed from ${
-                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
-                    backend
-                  ] ?? "your configured endpoint"
+                  {
+                    openrouter: "OpenRouter",
+                    requesty: "Requesty",
+                    bedrock: "AWS Bedrock",
+                  }[backend] ?? "your configured endpoint"
                 }`}
             </CardDescription>
           </CardHeader>
