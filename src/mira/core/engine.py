@@ -34,6 +34,7 @@ from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
+from mira.integrations.linear import fetch_linear_context
 from mira.llm.prompts.review import (
     build_review_prompt,
     build_walkthrough_prompt,
@@ -572,9 +573,10 @@ class ReviewEngine:
                 logger.warning("Thread resolution failed, continuing: %s", exc)
                 return 0, 0, [], []
 
-        thread_result, diff_text = await _asyncio.gather(
+        thread_result, diff_text, linked_issue_context = await _asyncio.gather(
             _resolve_threads(),
             self.provider.get_pr_diff(pr_info),
+            fetch_linear_context(pr_info),
         )
 
         threads_checked, llm_resolved, unresolved_threads, thread_decisions = thread_result
@@ -719,6 +721,7 @@ class ReviewEngine:
                 review_round=review_round,
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
+                linked_issue_context=linked_issue_context,
             )
         except BaseException as exc:
             if overlap_task is not None:
@@ -1060,6 +1063,7 @@ class ReviewEngine:
         review_round: int = 1,
         resolved_threads: list[dict] | None = None,
         team_conventions: str = "",
+        linked_issue_context: str = "",
     ) -> ReviewResult:
         """Core review pipeline.
 
@@ -1133,6 +1137,7 @@ class ReviewEngine:
                     config=self.config,
                     pr_title=pr_title,
                     pr_description=pr_description,
+                    linked_issue_context=linked_issue_context,
                 )
                 wt_raw = await self.llm.walkthrough(wt_messages)
                 wt_parsed = parse_walkthrough_response(wt_raw)
@@ -1346,6 +1351,7 @@ class ReviewEngine:
                         review_round=review_round,
                         resolved_threads=resolved_threads,
                         team_conventions=team_conventions,
+                        linked_issue_context=linked_issue_context,
                     )
 
                     def _parse(raw: str) -> tuple[list[ReviewComment], list[KeyIssue], str]:
