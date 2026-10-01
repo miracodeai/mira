@@ -26,7 +26,7 @@ Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https
 
 ## Why Teams Choose Mira
 
-- **Model agnostic** — Run Claude, GPT, Gemini, DeepSeek, Llama, or any OpenAI-compatible endpoint: OpenRouter, vLLM, Ollama, Together, Groq, Fireworks, or AWS Bedrock direct. Per-provider quirks are config, not code, so adding a provider is a one-line entry.
+- **Model agnostic** — Run Claude, GPT, Gemini, DeepSeek, Llama, or any OpenAI-compatible endpoint: OpenRouter, Requesty, vLLM, Ollama, Together, Groq, Fireworks, or AWS Bedrock direct. Per-provider quirks are config, not code, so adding a provider is a one-line entry.
 - **Zero markup on LLM costs** — Bring your own key. You pay the model provider directly; Mira never proxies your spend or adds a multiplier. The dashboard shows real per-repo, per-model cost — not estimates.
 - **Learns from your context** — Mira synthesizes rules from your merged PRs: rejected comments and human review patterns become team rules that shape future reviews.
 - **You set the rules** — Define custom and org-wide review rules in plain language, per-repo via `.mira.yaml` or from the dashboard.
@@ -110,6 +110,25 @@ docker run -p 8000:8000 --env-file .env \
 **2. Install the app** on your repos — every PR gets reviewed.
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
+
+### Requesty
+
+Mira can also use [Requesty](https://requesty.ai) as its LLM router. Point
+`base_url` at it and use any model id from the Requesty catalog; the settings
+page lists Requesty's managed models and its full tool-capable catalog:
+
+```yaml
+# mira.yaml
+llm:
+  base_url: "https://router.requesty.ai/v1"
+  api_key_env: "REQUESTY_API_KEY"
+  model: "anthropic/claude-sonnet-4-6"
+  indexing_model: "anthropic/claude-haiku-4-5"
+```
+
+```bash
+REQUESTY_API_KEY=rqsty-...   # https://app.requesty.ai/api-keys
+```
 
 ### Codex CLI
 
