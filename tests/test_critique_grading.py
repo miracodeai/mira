@@ -84,6 +84,54 @@ class TestHunkEvidence:
 
 class TestEvidenceGradedCritique:
     @pytest.mark.asyncio
+    async def test_verdicts_without_index_follow_input_order(self, monkeypatch):
+        comments = [_comment(title="real bug"), _comment(title="bogus", severity=Severity.BLOCKER)]
+        response = json.dumps({"verdicts": [{"evidence": "proven"}, {"evidence": "unsupported"}]})
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete_with_tools(self, messages, tools, temperature=None):
+            return response
+
+        monkeypatch.setattr(
+            provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
+        )
+
+        kept = await self_critique(AsyncMock(), comments)
+
+        assert [c.title for c in kept] == ["real bug"]
+
+    @pytest.mark.asyncio
+    async def test_verdicts_without_index_ignored_when_count_differs(self, monkeypatch):
+        comments = [_comment(title="a"), _comment(title="b"), _comment(title="c")]
+        response = json.dumps({"verdicts": [{"evidence": "proven"}, {"evidence": "proven"}]})
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete_with_tools(self, messages, tools, temperature=None):
+            return response
+
+        monkeypatch.setattr(
+            provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
+        )
+
+        assert await self_critique(AsyncMock(), comments) == []
+
+    @pytest.mark.asyncio
+    async def test_mixed_indexed_verdicts_skip_positional_fallback(self, monkeypatch):
+        comments = [_comment(title="a"), _comment(title="b")]
+        verdicts = [{"index": 1, "evidence": "proven"}, {"evidence": "proven"}]
+        response = json.dumps({"verdicts": verdicts})
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete_with_tools(self, messages, tools, temperature=None):
+            return response
+
+        monkeypatch.setattr(
+            provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
+        )
+
+        assert [c.title for c in await self_critique(AsyncMock(), comments)] == ["b"]
+
+    @pytest.mark.asyncio
     async def test_grades_applied_through_llm_flow(self, monkeypatch):
         comments = [
             _comment(title="proven bug"),
