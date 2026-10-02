@@ -48,6 +48,10 @@ serve = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.28",
     "PyJWT[crypto]>=2.8",
+    # Encrypts saved subscription / provider credentials (llm/credential_store.py).
+    "cryptography>=42.0",
+    # Lint pass (core/lint_pass.py) runs ruff's bug-only rules on changed Python files.
+    "ruff>=0.4",
     # Postgres driver — used when DATABASE_URL is set. Optional at runtime
     # (SQLite is the default), but bundled so the Docker image works with
     # either backend out of the box.

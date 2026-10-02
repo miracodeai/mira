@@ -18,6 +18,7 @@ from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
 from mira.core.ensemble import merge_ensemble_runs
 from mira.core.file_filter import filter_files
+from mira.core.lint_pass import lint_pass
 from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
     agentic_review_loop,
@@ -25,6 +26,7 @@ from mira.core.passes import (
     dependency_review_pass,
     generate_pr_summary,
     regenerate_summary,
+    second_opinion_llms,
     security_review_pass,
     self_critique,
 )
@@ -49,6 +51,7 @@ from mira.models import (
     PR_SUMMARY_START,
     WALKTHROUGH_MARKER,
     FileChangeType,
+    FileDiff,
     KeyIssue,
     OverlapFinding,
     PRFingerprint,
@@ -229,6 +232,36 @@ def _security_relevant_files(files: list) -> list:
             continue
         keep.append(f)
     return keep
+
+
+_TEST_NAME_FORMS = ("test_{}", "{}_test", "{}_spec", "{}.test", "{}.spec", "{}Test", "{}Tests")
+_TESTABLE_EXTS = {"py", "go", "rb", "js", "jsx", "ts", "tsx", "java", "kt"}
+
+
+def _untouched_tests_note(chunk_paths: list[str], changed: set[str], tree: list[str]) -> str:
+    """Prompt note listing changed source files whose existing test file this PR leaves alone."""
+    by_name: dict[str, list[str]] = {}
+    for path in tree:
+        by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    lines = []
+    for path in chunk_paths:
+        name = path.rsplit("/", 1)[-1]
+        stem, _, ext = name.rpartition(".")
+        if ext not in _TESTABLE_EXTS or name.lower().endswith(_SECURITY_TEST_SUFFIXES):
+            continue
+        tests = [
+            t for form in _TEST_NAME_FORMS for t in by_name.get(f"{form.format(stem)}.{ext}", [])
+        ]
+        if not tests or any(t in changed for t in tests):
+            continue
+        lines.append(f"- {path} (tests: {', '.join(sorted(tests)[:2])})")
+    if not lines:
+        return ""
+    return (
+        "\n\n## Existing tests this PR does not update\n"
+        "If a change below alters behavior these tests cover, say which test needs updating "
+        "(one comment, not one per file).\n" + "\n".join(lines[:10])
+    )
 
 
 def _manifest_files(files: list) -> list:
@@ -423,6 +456,7 @@ class ReviewEngine:
         self.llm = llm
         self.indexing_llm = indexing_llm or llm
         self.security_llm = security_llm or llm
+        self._second_opinions: list[LLMProviderProtocol] | None = None
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
@@ -1050,6 +1084,316 @@ class ReviewEngine:
         """Review a diff from stdin — no provider needed."""
         return await self._review_diff_internal(diff_text)
 
+    async def _generate_walkthrough(
+        self, filtered: list[FileDiff], pr_title: str, pr_description: str
+    ) -> WalkthroughResult | None:
+        if not self.config.review.walkthrough:
+            return None
+        try:
+            wt_messages = build_walkthrough_prompt(
+                files=filtered,
+                config=self.config,
+                pr_title=pr_title,
+                pr_description=pr_description,
+            )
+            wt_raw = await self.llm.walkthrough(wt_messages)
+            wt_parsed = parse_walkthrough_response(wt_raw)
+            return convert_to_walkthrough_result(wt_parsed)
+        except Exception as exc:
+            logger.warning("Walkthrough generation failed, skipping: %s", exc)
+            return None
+
+    async def _build_code_context(self, filtered: list[FileDiff]) -> str:
+        if not self.config.review.code_context:
+            return ""
+        try:
+            pr_info = getattr(self, "_pr_info", None)
+            if pr_info is not None:
+                store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
+                source_fetcher = None
+                if self.provider and pr_info:
+                    from mira.index.context import ProviderSourceFetcher
+
+                    source_fetcher = ProviderSourceFetcher(
+                        self.provider, pr_info, pr_info.head_branch
+                    )
+                changed_paths = [f.path for f in filtered]
+                ctx = await build_code_context(
+                    changed_paths=changed_paths,
+                    store=store,
+                    token_budget=self.config.review.context_token_budget,
+                    source_fetcher=source_fetcher,
+                )
+                doc_context = store.get_all_review_context_text()
+                if doc_context:
+                    ctx = ctx + "\n\n" + doc_context
+
+                # `_jit_needed` and `_index_was_empty` aren't the same signal —
+                # see the field comments in __init__ before changing this.
+                index_has_data_for_changed = bool(store.get_summaries(changed_paths))
+                self._jit_needed = not index_has_data_for_changed
+                self._index_was_empty = not bool(store.all_paths())
+
+                # Hoisted: agentic fetcher/tree setup runs whenever a source fetcher exists
+                # (indexed or not), so the reviewer tools are available on indexed repos too.
+                tree_paths: set[str] | None = None
+                if source_fetcher is not None and (
+                    self.config.review.agentic_tools or not index_has_data_for_changed
+                ):
+                    self._agentic_source_fetcher = source_fetcher
+                    if hasattr(self.provider, "get_repo_tree"):
+                        try:
+                            tree_paths = set(
+                                await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
+                            )
+                        except Exception as exc:
+                            logger.debug("Repo tree fetch failed: %s", exc)
+                    self._agentic_repo_tree = sorted(tree_paths) if tree_paths else []
+
+                if not index_has_data_for_changed and source_fetcher is not None:
+                    try:
+                        from mira.index.jit_context import (
+                            build_jit_cross_file_context,
+                        )
+
+                        jit = await build_jit_cross_file_context(
+                            changed_files=filtered,
+                            source_fetcher=source_fetcher,
+                            repo_tree=tree_paths,
+                            char_budget=(self.config.review.context_token_budget * 4),
+                            enable_java_go=self.config.review.jit_java_go,
+                        )
+                        if jit:
+                            ctx = ctx + "\n\n" + jit
+                    except Exception as exc:
+                        logger.debug("JIT context build failed: %s", exc)
+
+                try:
+                    from mira.index.relationships import RelationshipStore
+
+                    rs = RelationshipStore()
+                    full_name = f"{pr_info.owner}/{pr_info.repo}"
+                    edges = rs.resolve_edges()
+                    cross_parts: list[str] = []
+                    for e in edges:
+                        if e.target_repo == full_name and e.refs:
+                            ref_details = []
+                            for r in e.refs[:5]:
+                                ref_details.append(f"`{r.file_path}` ({r.kind})")
+                            cross_parts.append(
+                                f"- **{e.source_repo}** — {len(e.refs)} reference(s): "
+                                + ", ".join(ref_details)
+                            )
+                    if cross_parts:
+                        ctx += "\n\n### Cross-Repo Impact\n"
+                        ctx += "Other repositories depend on code in this repo. "
+                        ctx += "Breaking changes here may affect:\n"
+                        ctx += "\n".join(cross_parts)
+                        ctx += "\n"
+                    rs.close()
+                except Exception as exc:
+                    logger.debug("Cross-repo context lookup failed: %s", exc)
+
+                store.close()
+                return ctx
+        except Exception as exc:
+            logger.warning("Code context lookup failed, continuing without: %s", exc)
+        return ""
+
+    async def _fetch_file_history(self, filtered: list[FileDiff]) -> dict:
+        pr_info = getattr(self, "_pr_info", None)
+        if pr_info is None or self.provider is None:
+            return {}
+        if not getattr(self.provider, "get_file_history", None):
+            return {}
+        try:
+            paths = [f.path for f in filtered]
+            history = await self.provider.get_file_history(pr_info, paths, max_per_file=5)
+            return history
+        except Exception as exc:
+            logger.debug("File history fetch failed: %s", exc)
+            return {}
+
+    def _load_rules(self) -> tuple[list[str], list[dict[str, str]]]:
+        """Learned + custom (repo and global) rules for the review and critic prompts."""
+        learned_rules: list[str] = []
+        custom_rules: list[dict[str, str]] = []
+        try:
+            pr_info = getattr(self, "_pr_info", None)
+            if pr_info is not None:
+                _rules_store = IndexStore.open(
+                    pr_info.owner, pr_info.repo, platform=pr_info.platform
+                )
+
+                learned_rules = _rules_store.get_learned_rules_text()
+
+                for ctx in _rules_store.list_review_context():
+                    custom_rules.append({"title": ctx.title, "content": ctx.content})
+
+                _rules_store.close()
+
+                try:
+                    from mira.dashboard.api import _app_db
+
+                    if _app_db is not None:
+                        for rule_text in _app_db.get_global_rules_text():
+                            parts = rule_text.split(": ", 1)
+                            title = parts[0] if len(parts) > 1 else "Global Rule"
+                            content = parts[1] if len(parts) > 1 else rule_text
+                            custom_rules.insert(0, {"title": title, "content": content})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return learned_rules, custom_rules
+
+    async def _vote_on_comments(
+        self,
+        idx: int,
+        messages: list[dict[str, str]],
+        comments: list[ReviewComment],
+        parse: Callable[[str], tuple[list[ReviewComment], list[KeyIssue], str]],
+        audit: list[dict],
+    ) -> list[ReviewComment]:
+        import asyncio as _asyncio
+
+        _parse = parse
+        # Ensemble: fire the extra runs in parallel and keep
+        # majority-vote findings. The agentic loop (if any) only
+        # runs once; extras sample the plain review path.
+        n_runs = self.config.review.ensemble_runs
+        if self._second_opinions is None:
+            self._second_opinions = second_opinion_llms(self.config.llm)
+        if self._second_opinions:
+            n_runs = 1  # other models vote instead of same-model reruns
+        if n_runs > 1 and not getattr(self.llm, "supports_temperature", True):
+            logger.warning(
+                "Provider does not support temperature controls; disabling ensemble runs"
+            )
+            n_runs = 1
+        extra_calls = [other.review(messages) for other in self._second_opinions] + [
+            self.llm.review(messages, temperature=self.config.review.ensemble_temperature)
+            for _ in range(n_runs - 1)
+        ]
+        if extra_calls:
+            extra_raws = await _asyncio.gather(*extra_calls, return_exceptions=True)
+            runs = [comments]
+            for raw in extra_raws:
+                if isinstance(raw, BaseException):
+                    logger.warning("Ensemble run failed: %s", raw)
+                    continue
+                try:
+                    extra_comments, _, _ = _parse(raw)
+                    runs.append(extra_comments)
+                except ResponseParseError as exc:
+                    logger.warning("Ensemble run failed to parse: %s", exc)
+            if len(runs) > 1:
+                before = sum(len(r) for r in runs)
+                comments = merge_ensemble_runs(runs)
+                audit.append(
+                    {
+                        "stage": "ensemble_vote",
+                        "chunk": idx,
+                        "runs": len(runs),
+                        "drafted": before,
+                        "kept": len(comments),
+                    }
+                )
+                logger.info(
+                    "Ensemble chunk %d: %d comments across %d runs -> %d consensus",
+                    idx + 1,
+                    before,
+                    len(runs),
+                    len(comments),
+                )
+        return comments
+
+    def _existing_packages(self) -> list[str]:
+        """Package names already in the repo index (empty on an unindexed repo)."""
+        pr_info = getattr(self, "_pr_info", None)
+        if pr_info is None:
+            return []
+        try:
+            store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
+            try:
+                return sorted({p.name for p in store.list_manifest_packages()})
+            finally:
+                store.close()
+        except Exception as exc:
+            logger.debug("Manifest package lookup failed: %s", exc)
+            return []
+
+    def _pr_source_fetcher(self):  # type: ignore[no-untyped-def]
+        """Fetcher for file contents at the PR head, or None without a provider."""
+        pr_info = getattr(self, "_pr_info", None)
+        if pr_info is None or self.provider is None:
+            return None
+        from mira.index.context import ProviderSourceFetcher
+
+        return ProviderSourceFetcher(self.provider, pr_info, pr_info.head_branch)
+
+    async def _filter_and_critique(
+        self,
+        all_comments: list[ReviewComment],
+        *,
+        filtered: list[FileDiff],
+        manifest_candidates: list[FileDiff],
+        existing_comments: list[UnresolvedThread] | None,
+        review_round: int,
+        learned_rules: list[str],
+        custom_rules: list[dict[str, str]],
+        audit: list[dict],
+    ) -> list[ReviewComment]:
+        """Severity, noise filter, already-posted dedupe, then self-critique."""
+        all_comments = [classify_severity(c) for c in all_comments]
+
+        final_comments = filter_noise(
+            all_comments,
+            self.config.filter,
+            review_round=review_round,
+        )
+        _audit_stage(audit, "noise_filter", all_comments, final_comments)
+
+        # Dedupe against still-open threads before self-critique, so we don't
+        # spend critique calls on comments we'd discard anyway.
+        if existing_comments:
+            before_drop = final_comments
+            final_comments = drop_already_posted(final_comments, existing_comments)
+            _audit_stage(audit, "already_posted", before_drop, final_comments)
+            if len(before_drop) != len(final_comments):
+                logger.info(
+                    "Dropped %d comment(s) duplicating existing open threads",
+                    len(before_drop) - len(final_comments),
+                )
+
+        # Self-critique catches confident-but-wrong claims that the noise
+        # filter can't, since confidence scores are LLM-generated too. Pass
+        # the team's documented preferences so the critic doesn't strip
+        # findings that enforce them as "style nits".
+        if final_comments and self.config.review.self_critique:
+            # A dependency finding can land on a manifest that lost the size
+            # cull and so isn't in `filtered`. The critic grades on the hunk
+            # covering a comment; with no hunk it reads as "unsupported" and
+            # drops the finding. Add those manifests back as evidence only.
+            _selected = {f.path for f in filtered}
+            critique_files = filtered + [f for f in manifest_candidates if f.path not in _selected]
+            try:
+                # Lint findings come from running ruff, so the critic has nothing to grade.
+                linted = [c for c in final_comments if c.source_pass == "lint"]
+                final_comments = linted + await self_critique(
+                    self.llm,
+                    [c for c in final_comments if c.source_pass != "lint"],
+                    learned_rules=learned_rules or None,
+                    custom_rules=custom_rules or None,
+                    indexing_llm=self.indexing_llm,
+                    diff_files=critique_files,
+                    audit=audit,
+                    llm_config=self.config.llm,
+                )
+            except Exception as exc:
+                logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
+        return final_comments
+
     async def _review_diff_internal(
         self,
         diff_text: str,
@@ -1124,122 +1468,10 @@ class ReviewEngine:
 
         filtered = selected
 
-        async def _generate_walkthrough() -> WalkthroughResult | None:
-            if not self.config.review.walkthrough:
-                return None
-            try:
-                wt_messages = build_walkthrough_prompt(
-                    files=filtered,
-                    config=self.config,
-                    pr_title=pr_title,
-                    pr_description=pr_description,
-                )
-                wt_raw = await self.llm.walkthrough(wt_messages)
-                wt_parsed = parse_walkthrough_response(wt_raw)
-                return convert_to_walkthrough_result(wt_parsed)
-            except Exception as exc:
-                logger.warning("Walkthrough generation failed, skipping: %s", exc)
-                return None
-
-        async def _build_context() -> str:
-            if not self.config.review.code_context:
-                return ""
-            try:
-                pr_info = getattr(self, "_pr_info", None)
-                if pr_info is not None:
-                    store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
-                    source_fetcher = None
-                    if self.provider and pr_info:
-                        from mira.index.context import ProviderSourceFetcher
-
-                        source_fetcher = ProviderSourceFetcher(
-                            self.provider, pr_info, pr_info.head_branch
-                        )
-                    changed_paths = [f.path for f in filtered]
-                    ctx = await build_code_context(
-                        changed_paths=changed_paths,
-                        store=store,
-                        token_budget=self.config.review.context_token_budget,
-                        source_fetcher=source_fetcher,
-                    )
-                    doc_context = store.get_all_review_context_text()
-                    if doc_context:
-                        ctx = ctx + "\n\n" + doc_context
-
-                    # `_jit_needed` and `_index_was_empty` aren't the same signal —
-                    # see the field comments in __init__ before changing this.
-                    index_has_data_for_changed = bool(store.get_summaries(changed_paths))
-                    self._jit_needed = not index_has_data_for_changed
-                    self._index_was_empty = not bool(store.all_paths())
-
-                    # Hoisted: agentic fetcher/tree setup runs whenever a source fetcher exists
-                    # (indexed or not), so the reviewer tools are available on indexed repos too.
-                    tree_paths: set[str] | None = None
-                    if source_fetcher is not None and (
-                        self.config.review.agentic_tools or not index_has_data_for_changed
-                    ):
-                        self._agentic_source_fetcher = source_fetcher
-                        if hasattr(self.provider, "get_repo_tree"):
-                            try:
-                                tree_paths = set(
-                                    await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
-                                )
-                            except Exception as exc:
-                                logger.debug("Repo tree fetch failed: %s", exc)
-                        self._agentic_repo_tree = sorted(tree_paths) if tree_paths else []
-
-                    if not index_has_data_for_changed and source_fetcher is not None:
-                        try:
-                            from mira.index.jit_context import (
-                                build_jit_cross_file_context,
-                            )
-
-                            jit = await build_jit_cross_file_context(
-                                changed_files=filtered,
-                                source_fetcher=source_fetcher,
-                                repo_tree=tree_paths,
-                                char_budget=(self.config.review.context_token_budget * 4),
-                                enable_java_go=self.config.review.jit_java_go,
-                            )
-                            if jit:
-                                ctx = ctx + "\n\n" + jit
-                        except Exception as exc:
-                            logger.debug("JIT context build failed: %s", exc)
-
-                    try:
-                        from mira.index.relationships import RelationshipStore
-
-                        rs = RelationshipStore()
-                        full_name = f"{pr_info.owner}/{pr_info.repo}"
-                        edges = rs.resolve_edges()
-                        cross_parts: list[str] = []
-                        for e in edges:
-                            if e.target_repo == full_name and e.refs:
-                                ref_details = []
-                                for r in e.refs[:5]:
-                                    ref_details.append(f"`{r.file_path}` ({r.kind})")
-                                cross_parts.append(
-                                    f"- **{e.source_repo}** — {len(e.refs)} reference(s): "
-                                    + ", ".join(ref_details)
-                                )
-                        if cross_parts:
-                            ctx += "\n\n### Cross-Repo Impact\n"
-                            ctx += "Other repositories depend on code in this repo. "
-                            ctx += "Breaking changes here may affect:\n"
-                            ctx += "\n".join(cross_parts)
-                            ctx += "\n"
-                        rs.close()
-                    except Exception as exc:
-                        logger.debug("Cross-repo context lookup failed: %s", exc)
-
-                    store.close()
-                    return ctx
-            except Exception as exc:
-                logger.warning("Code context lookup failed, continuing without: %s", exc)
-            return ""
-
         # Fire walkthrough early so review_pr can post it before chunk review finishes.
-        walkthrough_task = _asyncio.create_task(_generate_walkthrough())
+        walkthrough_task = _asyncio.create_task(
+            self._generate_walkthrough(filtered, pr_title, pr_description)
+        )
 
         # `_walkthrough_notify_task` exposed on self so review_pr can await it
         # before its own final write — otherwise the in-progress update can land
@@ -1256,23 +1488,9 @@ class ReviewEngine:
 
             self._walkthrough_notify_task = _asyncio.create_task(_notify_caller())
 
-        async def _fetch_file_history() -> dict:
-            pr_info = getattr(self, "_pr_info", None)
-            if pr_info is None or self.provider is None:
-                return {}
-            if not getattr(self.provider, "get_file_history", None):
-                return {}
-            try:
-                paths = [f.path for f in filtered]
-                history = await self.provider.get_file_history(pr_info, paths, max_per_file=5)
-                return history
-            except Exception as exc:
-                logger.debug("File history fetch failed: %s", exc)
-                return {}
-
         code_context_block, file_history = await _asyncio.gather(
-            _build_context(),
-            _fetch_file_history(),
+            self._build_code_context(filtered),
+            self._fetch_file_history(filtered),
         )
 
         expanded = expand_context(filtered, self.config.review.context_lines)
@@ -1283,35 +1501,7 @@ class ReviewEngine:
             provider=self.llm,
         )
 
-        learned_rules: list[str] = []
-        custom_rules: list[dict[str, str]] = []
-        try:
-            pr_info = getattr(self, "_pr_info", None)
-            if pr_info is not None:
-                _rules_store = IndexStore.open(
-                    pr_info.owner, pr_info.repo, platform=pr_info.platform
-                )
-
-                learned_rules = _rules_store.get_learned_rules_text()
-
-                for ctx in _rules_store.list_review_context():
-                    custom_rules.append({"title": ctx.title, "content": ctx.content})
-
-                _rules_store.close()
-
-                try:
-                    from mira.dashboard.api import _app_db
-
-                    if _app_db is not None:
-                        for rule_text in _app_db.get_global_rules_text():
-                            parts = rule_text.split(": ", 1)
-                            title = parts[0] if len(parts) > 1 else "Global Rule"
-                            content = parts[1] if len(parts) > 1 else rule_text
-                            custom_rules.insert(0, {"title": title, "content": content})
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        learned_rules, custom_rules = self._load_rules()
 
         valid_paths = {f.path for f in filtered}
         base_existing = list(existing_comments) if existing_comments else []
@@ -1339,7 +1529,12 @@ class ReviewEngine:
                         pr_title=pr_title,
                         pr_description=pr_description,
                         existing_comments=base_existing or None,
-                        code_context=code_context_block,
+                        code_context=(code_context_block or "")
+                        + _untouched_tests_note(
+                            [f.path for f in chunk.files],
+                            set(all_paths),
+                            self._agentic_repo_tree,
+                        ),
                         learned_rules=learned_rules or None,
                         custom_rules=custom_rules or None,
                         file_history=chunk_history or None,
@@ -1381,56 +1576,7 @@ class ReviewEngine:
                         raw_response = await self.llm.review(messages)
                     comments, key_issues, summary_text = _parse(raw_response)
 
-                    # Ensemble: fire the extra runs in parallel and keep
-                    # majority-vote findings. The agentic loop (if any) only
-                    # runs once; extras sample the plain review path.
-                    n_runs = self.config.review.ensemble_runs
-                    if n_runs > 1 and not getattr(self.llm, "supports_temperature", True):
-                        logger.warning(
-                            "Provider does not support temperature controls; "
-                            "disabling ensemble runs"
-                        )
-                        n_runs = 1
-                    if n_runs > 1:
-                        extra_raws = await _asyncio.gather(
-                            *[
-                                self.llm.review(
-                                    messages,
-                                    temperature=self.config.review.ensemble_temperature,
-                                )
-                                for _ in range(n_runs - 1)
-                            ],
-                            return_exceptions=True,
-                        )
-                        runs = [comments]
-                        for raw in extra_raws:
-                            if isinstance(raw, BaseException):
-                                logger.warning("Ensemble run failed: %s", raw)
-                                continue
-                            try:
-                                extra_comments, _, _ = _parse(raw)
-                                runs.append(extra_comments)
-                            except ResponseParseError as exc:
-                                logger.warning("Ensemble run failed to parse: %s", exc)
-                        if len(runs) > 1:
-                            before = sum(len(r) for r in runs)
-                            comments = merge_ensemble_runs(runs)
-                            audit.append(
-                                {
-                                    "stage": "ensemble_vote",
-                                    "chunk": idx,
-                                    "runs": len(runs),
-                                    "drafted": before,
-                                    "kept": len(comments),
-                                }
-                            )
-                            logger.info(
-                                "Ensemble chunk %d: %d comments across %d runs -> %d consensus",
-                                idx + 1,
-                                before,
-                                len(runs),
-                                len(comments),
-                            )
+                    comments = await self._vote_on_comments(idx, messages, comments, _parse, audit)
 
                     return comments, key_issues, summary_text
                 except ResponseParseError as exc:
@@ -1478,29 +1624,8 @@ class ReviewEngine:
         # names from the index so the pass can spot a duplicate of one already
         # present (empty list on an unindexed repo — pass falls back to the diff).
         manifest_files = manifest_candidates
-        existing_packages: list[str] = []
-        pr_source_fetcher = None
-        if manifest_files:
-            pr_info = getattr(self, "_pr_info", None)
-            if pr_info is not None:
-                try:
-                    _pkg_store = IndexStore.open(
-                        pr_info.owner, pr_info.repo, platform=pr_info.platform
-                    )
-                    try:
-                        existing_packages = sorted(
-                            {p.name for p in _pkg_store.list_manifest_packages()}
-                        )
-                    finally:
-                        _pkg_store.close()
-                except Exception as exc:
-                    logger.debug("Manifest package lookup failed: %s", exc)
-                if self.provider is not None:
-                    from mira.index.context import ProviderSourceFetcher
-
-                    pr_source_fetcher = ProviderSourceFetcher(
-                        self.provider, pr_info, pr_info.head_branch
-                    )
+        existing_packages = self._existing_packages() if manifest_files else []
+        pr_source_fetcher = self._pr_source_fetcher()
         dependency_task = _asyncio.create_task(
             dependency_review_pass(
                 self.llm,
@@ -1526,6 +1651,11 @@ class ReviewEngine:
             if filtered and self.config.review.secrets_scan
             else _asyncio.sleep(0, result=[])
         )
+        lint_task = _asyncio.create_task(
+            lint_pass(filtered, pr_source_fetcher)
+            if filtered and self.config.review.lint_pass
+            else _asyncio.sleep(0, result=[])
+        )
 
         (
             chunk_results,
@@ -1533,8 +1663,9 @@ class ReviewEngine:
             dependency_comments,
             osv_comments,
             secrets_comments,
+            lint_comments,
         ) = await _asyncio.gather(
-            review_task, security_task, dependency_task, osv_task, secrets_task
+            review_task, security_task, dependency_task, osv_task, secrets_task, lint_task
         )
 
         all_comments: list[ReviewComment] = []
@@ -1554,51 +1685,19 @@ class ReviewEngine:
         all_comments.extend(osv_comments)
         audit.append({"stage": "drafted", "chunk": "secrets", "count": len(secrets_comments)})
         all_comments.extend(secrets_comments)
+        audit.append({"stage": "drafted", "chunk": "lint", "count": len(lint_comments)})
+        all_comments.extend(lint_comments)
 
-        all_comments = [classify_severity(c) for c in all_comments]
-
-        final_comments = filter_noise(
+        final_comments = await self._filter_and_critique(
             all_comments,
-            self.config.filter,
+            filtered=filtered,
+            manifest_candidates=manifest_candidates,
+            existing_comments=existing_comments,
             review_round=review_round,
+            learned_rules=learned_rules,
+            custom_rules=custom_rules,
+            audit=audit,
         )
-        _audit_stage(audit, "noise_filter", all_comments, final_comments)
-
-        # Dedupe against still-open threads before self-critique, so we don't
-        # spend critique calls on comments we'd discard anyway.
-        if existing_comments:
-            before_drop = final_comments
-            final_comments = drop_already_posted(final_comments, existing_comments)
-            _audit_stage(audit, "already_posted", before_drop, final_comments)
-            if len(before_drop) != len(final_comments):
-                logger.info(
-                    "Dropped %d comment(s) duplicating existing open threads",
-                    len(before_drop) - len(final_comments),
-                )
-
-        # Self-critique catches confident-but-wrong claims that the noise
-        # filter can't, since confidence scores are LLM-generated too. Pass
-        # the team's documented preferences so the critic doesn't strip
-        # findings that enforce them as "style nits".
-        if final_comments and self.config.review.self_critique:
-            # A dependency finding can land on a manifest that lost the size
-            # cull and so isn't in `filtered`. The critic grades on the hunk
-            # covering a comment; with no hunk it reads as "unsupported" and
-            # drops the finding. Add those manifests back as evidence only.
-            _selected = {f.path for f in filtered}
-            critique_files = filtered + [f for f in manifest_candidates if f.path not in _selected]
-            try:
-                final_comments = await self_critique(
-                    self.llm,
-                    final_comments,
-                    learned_rules=learned_rules or None,
-                    custom_rules=custom_rules or None,
-                    indexing_llm=self.indexing_llm,
-                    diff_files=critique_files,
-                    audit=audit,
-                )
-            except Exception as exc:
-                logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
 
         all_key_issues = _drop_orphan_key_issues(all_key_issues, final_comments)
 
@@ -1647,13 +1746,21 @@ class ReviewEngine:
                 logger.warning("PR summary generation failed: %s", exc)
                 pr_summary_block = ""
 
+        # Second-opinion models run on their own providers; count their tokens too.
+        usage = self.llm.usage
+        if self._second_opinions:
+            usage = dict(usage)
+            for other in self._second_opinions:
+                for key, value in other.usage.items():
+                    usage[key] = usage.get(key, 0) + value
+
         return ReviewResult(
             comments=final_comments,
             key_issues=all_key_issues,
             summary=summary,
             pr_summary_block=pr_summary_block,
             reviewed_files=len(filtered),
-            token_usage=self.llm.usage,
+            token_usage=usage,
             walkthrough=walkthrough,
             reviewed_paths=selected_paths,
             skipped_paths=skipped_paths_only,

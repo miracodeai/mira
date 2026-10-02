@@ -18,7 +18,9 @@ from pathlib import Path
 
 from mira.config import FilterConfig, LLMConfig, MiraConfig, ReviewConfig, load_config
 from mira.core.engine import ReviewEngine
-from mira.llm.provider import LLMProvider
+from mira.exceptions import LLMError, NonRetriableLLMError
+from mira.llm import create_llm
+from mira.llm.base import LLMProviderProtocol
 from mira.providers.github import GitHubProvider
 
 from .judge import JudgeResult, aggregate, judge_pr
@@ -74,20 +76,21 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def _judge_provider(judge_model: str) -> LLMProvider:
+def _judge_provider(judge_model: str) -> LLMProviderProtocol:
     # Fresh default config on purpose: judging must never inherit the
     # experiment's review/indexing/reasoning settings.
-    return LLMProvider(LLMConfig(model=judge_model, temperature=0.0))
+    return create_llm(LLMConfig(model=judge_model, temperature=0.0))
 
 
 async def _run_one(
     fixture: dict,
     config: MiraConfig,
-    judge_llm: LLMProvider,
+    judge_llm: LLMProviderProtocol,
     semaphore: asyncio.Semaphore,
 ) -> dict:
     async with semaphore:
-        llm = LLMProvider(config.llm)
+        # create_llm so subscription (chatgpt/, claude/) and fallback models work here too.
+        llm = create_llm(config.llm)
         provider = GitHubProvider(token=os.environ["GITHUB_TOKEN"])
         engine = ReviewEngine(config=config, llm=llm, provider=provider, dry_run=True)
 
@@ -106,10 +109,19 @@ async def _run_one(
             error = str(exc)
         duration_s = time.monotonic() - start
 
-        if error is None:
-            judgement = await judge_pr(fixture, comments, judge_llm)
-        else:
-            # A crashed review misses everything it was supposed to find.
+        judgement: JudgeResult | None = None
+        # A dropped judge stream shouldn't discard the (expensive) review it is grading.
+        for attempt in range(3 if error is None else 0):
+            try:
+                judgement = await judge_pr(fixture, comments, judge_llm)
+                break
+            except LLMError as exc:
+                logger.warning("Judge failed for %s: %s", fixture["pr_url"], exc)
+                if isinstance(exc, NonRetriableLLMError) or attempt == 2:
+                    error = f"Judge failed: {exc}"
+                    break
+        if judgement is None:
+            # A crashed review (or judge) misses everything it was supposed to find.
             judgement = JudgeResult(
                 fn=len(fixture["findings"]), missed=[f["id"] for f in fixture["findings"]]
             )

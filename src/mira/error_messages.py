@@ -123,6 +123,19 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Codex CLI response did not contain a JSON object: {excerpt}",
         safe="Codex CLI response did not contain a JSON object",
     ),
+    # Subscription OAuth (ChatGPT / Claude) errors
+    "oauth_not_signed_in": ErrorMessage(
+        full="Not signed in to {provider}. Add an account in Settings → Providers.",
+        safe="Not signed in to {provider}",
+    ),
+    "oauth_failed": ErrorMessage(
+        full="{provider} sign-in failed: {detail}",
+        safe="{provider} sign-in failed",
+    ),
+    "provider_not_connected": ErrorMessage(
+        full="Provider {provider} is not connected (Settings → Providers)",
+        safe="Provider {provider} is not connected",
+    ),
 }
 
 

@@ -22,6 +22,14 @@ from mira.models import (
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _reset_reasoning_rejections():
+    """Rejected-reasoning memory is process-wide; keep tests independent."""
+    from mira.llm import base
+
+    base._NO_REASONING.clear()
+
+
 @pytest.fixture
 def sample_diff_text() -> str:
     return (FIXTURES_DIR / "sample.diff").read_text()
