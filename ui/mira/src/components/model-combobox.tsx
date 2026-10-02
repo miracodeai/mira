@@ -43,18 +43,20 @@ function ComboboxItem({
 
 // Searchable model picker. Typing filters the backend's catalog; arrows +
 // Enter or click select; free-form ids commit via the "Use …" row. When
-// `configModel` is set, an "Inherit from deployment config" row is pinned
+// `configModel` is set, an inherit row (labeled by `inheritLabel`) is pinned
 // first and selecting it yields value "".
 export function ModelCombobox({
   value,
   onChange,
   options,
   configModel,
+  inheritLabel = "Inherit from deployment config",
 }: {
   value: string
   onChange: (v: string) => void
   options: ModelOption[]
   configModel?: string
+  inheritLabel?: string
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [open, setOpen] = useState(false)
@@ -63,7 +65,7 @@ export function ModelCombobox({
 
   const selected =
     value === "" && configModel !== undefined
-      ? `Inherit from deployment config (${configModel})`
+      ? `${inheritLabel} (${configModel})`
       : (options.find((o) => o.value === value)?.label ?? value)
   const q = query.trim().toLowerCase()
   const filtered = q
@@ -139,7 +141,7 @@ export function ModelCombobox({
               highlighted={highlight === 0}
               onHover={() => setHighlight(0)}
             >
-              Inherit from deployment config
+              {inheritLabel}
               <span className="ml-2 font-mono text-xs text-muted-foreground">
                 {configModel}
               </span>

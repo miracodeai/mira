@@ -28,7 +28,8 @@ RUN ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/
 # automatically and serves it at / with SPA fallback.
 COPY --from=ui-builder /ui/dist /app/ui_dist
 
-EXPOSE 8000
+# 54545: Claude OAuth sign-in callback (see README).
+EXPOSE 8000 54545
 # ENTRYPOINT (not CMD) so `docker run … image --config /app/mira.yaml`
 # appends the args to `mira serve` instead of replacing the command.
 ENTRYPOINT ["mira", "serve"]

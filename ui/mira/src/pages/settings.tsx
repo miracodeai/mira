@@ -1,7 +1,8 @@
-import { Loader2 } from "lucide-react"
+import { Loader2, X } from "lucide-react"
 import { useEffect, useState } from "react"
 
 import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
+import { ProvidersPanel } from "@/components/providers-panel"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -18,11 +19,55 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { useParams } from "react-router"
+import { Link, useParams } from "react-router"
 
 import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { useDocumentTitle } from "@/lib/hooks"
+
+// Ordered models tried when the one above fails (quota, outage); mixes providers freely.
+function FallbackList({
+  value,
+  onChange,
+  options,
+  title = "Fallbacks, tried in order when the model above fails.",
+  emptyHint,
+}: {
+  value: string[]
+  onChange: (v: string[]) => void
+  options: ModelOption[]
+  title?: string
+  emptyHint?: string
+}) {
+  const label = (id: string) => options.find((o) => o.value === id)?.label ?? id
+  return (
+    <div className="space-y-1.5 border-l pl-3">
+      <p className="text-xs text-muted-foreground">
+        {title}
+        {value.length === 0 && emptyHint ? ` ${emptyHint}` : ""}
+      </p>
+      {value.map((id, i) => (
+        <div key={id} className="flex items-center gap-2 text-sm">
+          <span className="w-4 text-xs text-muted-foreground">{i + 1}.</span>
+          <span className="flex-1 truncate">{label(id)}</span>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            aria-label={`Remove ${label(id)}`}
+            onClick={() => onChange(value.filter((m) => m !== id))}
+          >
+            <X />
+          </Button>
+        </div>
+      ))}
+      <ModelCombobox
+        value=""
+        onChange={(id) => id && !value.includes(id) && onChange([...value, id])}
+        options={options}
+      />
+    </div>
+  )
+}
 
 export function SettingsPage() {
   useDocumentTitle("Settings")
@@ -37,9 +82,17 @@ export function SettingsPage() {
   const [configReviewModel, setConfigReviewModel] = useState("")
   const [configSecurityModel, setConfigSecurityModel] = useState("")
   const [backend, setBackend] = useState("")
+  const [missingApiKey, setMissingApiKey] = useState("")
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
   const [securityOptions, setSecurityOptions] = useState<ModelOption[]>([])
+  const [fallbacks, setFallbacks] = useState({
+    indexing_fallbacks: [] as string[],
+    review_fallbacks: [] as string[],
+    security_fallbacks: [] as string[],
+  })
+  const [critiqueModel, setCritiqueModel] = useState("")
+  const [ensembleModels, setEnsembleModels] = useState<string[]>([])
   const [thinkingMode, setThinkingMode] = useState("off")
   const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
   const [apiStyle, setApiStyle] = useState("chat")
@@ -67,24 +120,37 @@ export function SettingsPage() {
   // bucket for non-field errors.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
-  useEffect(() => {
-    if (!currentUser?.is_admin) return
+  // Provider changes refresh only the catalog so unsaved picks survive.
+  const loadModels = (withSelections = true) =>
     api.getModels().then((m) => {
+      setBackend(m.backend)
+      setMissingApiKey(m.missing_api_key ?? "")
+      setIndexingOptions(m.indexing_options)
+      setReviewOptions(m.review_options)
+      setSecurityOptions(m.security_options)
+      if (!withSelections) return
       setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
       setReviewModel(m.review_source === "config" ? "" : m.review_model)
       setSecurityModel(m.security_source === "config" ? "" : m.security_model)
       setConfigIndexingModel(m.config_indexing_model)
       setConfigReviewModel(m.config_review_model)
       setConfigSecurityModel(m.config_security_model)
-      setBackend(m.backend)
-      setIndexingOptions(m.indexing_options)
-      setReviewOptions(m.review_options)
-      setSecurityOptions(m.security_options)
       setThinkingMode(m.review_thinking_mode)
       setThinkingOptions(m.thinking_options)
       setApiStyle(m.api_style ?? "chat")
       setApiStyleOptions(m.api_style_options ?? [])
+      setFallbacks({
+        indexing_fallbacks: m.indexing_fallbacks ?? [],
+        review_fallbacks: m.review_fallbacks ?? [],
+        security_fallbacks: m.security_fallbacks ?? [],
+      })
+      setCritiqueModel(m.critique_model ?? "")
+      setEnsembleModels(m.ensemble_models ?? [])
     })
+
+  useEffect(() => {
+    if (!currentUser?.is_admin) return
+    loadModels()
     api.getGlobalSettings().then((s) => {
       setEffective(
         (s.effective as {
@@ -114,7 +180,12 @@ export function SettingsPage() {
       reviewModel,
       securityModel,
       thinkingMode,
-      apiStyle
+      apiStyle,
+      {
+        ...fallbacks,
+        critique_model: critiqueModel,
+        ensemble_models: ensembleModels,
+      }
     )
     setSavingModels(false)
     setModelsSaved(true)
@@ -329,6 +400,10 @@ export function SettingsPage() {
         </p>
       </div>
 
+      {section === "providers" && (
+        <ProvidersPanel onChanged={() => loadModels(false)} />
+      )}
+
       {section === "models" && (
         <Card>
           <CardHeader>
@@ -336,14 +411,26 @@ export function SettingsPage() {
             <CardDescription>
               Choose models for indexing and PR reviews
               {backend &&
+                !missingApiKey &&
                 ` — listed from ${
-                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
-                    backend
-                  ] ?? "your configured endpoint"
-                }`}
+                  {
+                    openrouter: "OpenRouter",
+                    bedrock: "AWS Bedrock",
+                  }[backend] ?? "your configured endpoint"
+                } plus any subscriptions signed in under Providers`}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {missingApiKey && (
+              <p className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
+                Connect API-key or local providers under{" "}
+                <Link to="/settings/providers" className="underline">
+                  Providers
+                </Link>{" "}
+                to add their models. The server&apos;s default endpoint also
+                needs <code className="font-mono">{missingApiKey}</code>.
+              </p>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-medium">Indexing Model</label>
               <ModelCombobox
@@ -351,6 +438,13 @@ export function SettingsPage() {
                 onChange={setIndexingModel}
                 options={indexingOptions}
                 configModel={configIndexingModel}
+              />
+              <FallbackList
+                value={fallbacks.indexing_fallbacks}
+                onChange={(v) =>
+                  setFallbacks((f) => ({ ...f, indexing_fallbacks: v }))
+                }
+                options={indexingOptions}
               />
               <p className="text-xs text-muted-foreground">
                 Used to summarize files when building the code index. A cheaper
@@ -365,6 +459,13 @@ export function SettingsPage() {
                 options={reviewOptions}
                 configModel={configReviewModel}
               />
+              <FallbackList
+                value={fallbacks.review_fallbacks}
+                onChange={(v) =>
+                  setFallbacks((f) => ({ ...f, review_fallbacks: v }))
+                }
+                options={reviewOptions}
+              />
               <p className="text-xs text-muted-foreground">
                 Used to analyze PRs and post review comments. A more powerful
                 model gives better review quality.
@@ -378,10 +479,49 @@ export function SettingsPage() {
                 options={securityOptions}
                 configModel={configSecurityModel}
               />
+              <FallbackList
+                value={fallbacks.security_fallbacks}
+                onChange={(v) =>
+                  setFallbacks((f) => ({ ...f, security_fallbacks: v }))
+                }
+                options={securityOptions}
+                emptyHint="Uses the review fallbacks when empty."
+              />
               <p className="text-xs text-muted-foreground">
                 Used for the dedicated security pass. Defaults to the review
                 model — set a cheaper one only if you accept lower security
                 recall.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Critic Model</label>
+              <ModelCombobox
+                value={critiqueModel}
+                onChange={setCritiqueModel}
+                options={reviewOptions}
+                configModel={indexingModel || configIndexingModel}
+                inheritLabel="Use the indexing model"
+              />
+              <p className="text-xs text-muted-foreground">
+                Checks each drafted comment against the code and drops the
+                unsupported ones. A model from a different family than the
+                review model catches mistakes the reviewer keeps repeating.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Second-opinion Models
+              </label>
+              <FallbackList
+                value={ensembleModels}
+                onChange={setEnsembleModels}
+                options={reviewOptions}
+                title="Also review each PR with these; a finding is kept only when most models report it."
+              />
+              <p className="text-xs text-muted-foreground">
+                Posts fewer comments and adds one review per model. With one
+                extra model both must agree, which drops many real findings; use
+                two or more.
               </p>
             </div>
             <div className="space-y-2">
@@ -403,8 +543,8 @@ export function SettingsPage() {
               <p className="text-xs text-muted-foreground">
                 Extended reasoning budget for reviews — improves depth on
                 capable models at the cost of latency and tokens. Works on
-                OpenRouter and Bedrock (Claude); on other endpoints it's skipped
-                automatically when unsupported.
+                OpenRouter, Bedrock (Claude) and ChatGPT/Claude subscriptions;
+                on other endpoints it's skipped automatically when unsupported.
               </p>
             </div>
             {backend !== "bedrock" && (

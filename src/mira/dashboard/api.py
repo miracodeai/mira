@@ -376,6 +376,15 @@ class ModelsResponse(BaseModel):
     # resolved DB → config → default. Mirrors review_thinking_mode.
     api_style: str
     api_style_options: list[ModelOption]
+    # Ordered fallback model ids per tier (dashboard setting; security inherits review's).
+    indexing_fallbacks: list[str] = []
+    review_fallbacks: list[str] = []
+    security_fallbacks: list[str] = []
+    # Env var the API endpoint needs but isn't set ("" when ready); its models are then hidden.
+    missing_api_key: str = ""
+    # Critic for self-critique ("" = indexing model) and second-opinion review models.
+    critique_model: str = ""
+    ensemble_models: list[str] = []
 
 
 class ModelsUpdate(BaseModel):
@@ -384,6 +393,12 @@ class ModelsUpdate(BaseModel):
     security_model: str = ""
     review_thinking_mode: str = "off"
     api_style: str = "chat"
+    # None leaves the stored list untouched (the setup page saves models without them).
+    indexing_fallbacks: list[str] | None = None
+    review_fallbacks: list[str] | None = None
+    security_fallbacks: list[str] | None = None
+    critique_model: str | None = None
+    ensemble_models: list[str] | None = None
 
 
 class GlobalSettingsResponse(BaseModel):
@@ -1289,6 +1304,7 @@ import mira.dashboard.routers.relationships  # noqa: E402,F401
 import mira.dashboard.routers.rules  # noqa: E402,F401
 import mira.dashboard.routers.vulnerabilities  # noqa: E402,F401
 import mira.dashboard.routers.repos  # noqa: E402,F401
+import mira.dashboard.routers.llm_auth  # noqa: E402,F401
 # isort: on
 
 

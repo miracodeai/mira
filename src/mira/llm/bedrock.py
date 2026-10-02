@@ -409,9 +409,11 @@ class BedrockProvider:
 
         return openai_msg
 
-    async def review(self, messages: list[dict[str, str]]) -> str:
+    async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         """Submit a review using tool calling."""
-        return await self.complete_with_tools(messages, tools=[SUBMIT_REVIEW_TOOL])
+        return await self.complete_with_tools(
+            messages, tools=[SUBMIT_REVIEW_TOOL], temperature=temperature
+        )
 
     async def walkthrough(self, messages: list[dict[str, str]]) -> str:
         """Submit a walkthrough using tool calling."""

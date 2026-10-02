@@ -25,7 +25,7 @@ _DEFAULT_CONFIG_FILENAMES = (".mira.yaml", ".mira.yml")
 def _is_local_host(host: str) -> bool:
     """Loopback, private/link-local IP literals, and dotless hostnames
     (docker-compose services) — where a plain-http endpoint is legitimate."""
-    if host == "localhost" or "." not in host:
+    if host in ("localhost", "host.docker.internal") or "." not in host:
         return True
     try:
         ip = ipaddress.ip_address(host)
@@ -37,6 +37,9 @@ def _is_local_host(host: str) -> bool:
 class LLMConfig(BaseModel):
     model: str = "anthropic/claude-sonnet-4-6"
     fallback_model: str | None = None
+    # Ordered models to try when the primary fails (quota, outage). Each id may use a
+    # different provider, e.g. ["chatgpt/gpt-5.5", "anthropic/claude-sonnet-4-6"].
+    fallback_models: list[str] = Field(default_factory=list)
     # Optional per-purpose overrides. Fall back to `model` if not set.
     indexing_model: str | None = None
     review_model: str | None = None
@@ -45,6 +48,12 @@ class LLMConfig(BaseModel):
     # the security sweep is the highest-stakes pass and must not silently
     # downgrade to the indexing tier.
     security_model: str | None = None
+    # Optional critic for the self-critique pass (falls back to the indexing tier). A model
+    # from another family catches mistakes the reviewer's own family tends to repeat.
+    critique_model: str | None = None
+    # Extra review models whose findings vote with the review model's per chunk; a finding
+    # is kept when most models report it. Replaces same-model reruns (review.ensemble_runs).
+    ensemble_models: list[str] = Field(default_factory=list)
     # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max";
     # None/"off" = no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
     # `reasoning_effort` is the resolved value the provider reads (set by
@@ -68,6 +77,8 @@ class LLMConfig(BaseModel):
     # for local endpoints that don't require auth.
     base_url: str = "https://openrouter.ai/api/v1"
     api_key_env: str = "OPENROUTER_API_KEY"
+    # Key for a provider connected in Settings → Providers (set at routing time, never saved).
+    api_key: str | None = Field(default=None, repr=False, exclude=True)
     # AWS Bedrock settings. Auth uses the standard AWS credential chain
     # (env vars, instance profile, ECS task role, SSO).
     region: str = "us-east-1"
@@ -240,6 +251,14 @@ class ReviewConfig(BaseModel):
     # no network. Complements the LLM security pass (which has no key-format
     # rules).
     secrets_scan: bool = True
+
+    # Run ruff's bug-only rules (syntax errors, undefined names) on changed Python files
+    # and file what it finds on added lines. Deterministic; skipped when ruff is absent.
+    lint_pass: bool = True
+
+    # After the first review of a PR too large for one pass, keep reviewing the skipped
+    # files (like `@bot review-rest`) for up to this many extra rounds. 0 = only on request.
+    auto_review_rest_rounds: int = Field(default=2, ge=0, le=10)
 
     # Give the reviewer LLM tools (`read_file`, `grep_repo`) to fetch
     # cross-file context on demand. On unindexed repos this closes the

@@ -54,6 +54,18 @@ def _open_store(owner: str, repo: str, platform: str = "github") -> IndexStore:
     return IndexStore.open(owner, repo, platform=platform)
 
 
+def _review_engine(config: Any, provider: Any, bot_name: str) -> ReviewEngine:
+    """An engine with fresh providers, so each review records only its own token usage."""
+    return ReviewEngine(
+        config=config,
+        llm=create_llm(llm_config_for("review", config.llm)),
+        provider=provider,
+        bot_name=bot_name,
+        indexing_llm=create_llm(llm_config_for("indexing", config.llm)),
+        security_llm=create_llm(llm_config_for("security", config.llm)),
+    )
+
+
 def _help_message(bot_name: str) -> str:
     """Markdown help comment listing every command Mira understands."""
     return (
@@ -100,36 +112,43 @@ async def run_pr_review(
         logger.info("Review already in progress for %s, skipping", pr_url)
         return
 
-    config = load_config()
-    from mira.dashboard.models_config import llm_config_for
-
-    llm = create_llm(llm_config_for("review", config.llm))
-    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
-    security_llm = create_llm(llm_config_for("security", config.llm))
-    engine = ReviewEngine(
-        config=config,
-        llm=llm,
-        provider=provider,
-        bot_name=bot_name,
-        indexing_llm=indexing_llm,
-        security_llm=security_llm,
-    )
-
-    from mira.dashboard.api import _app_db
-
-    # Keep visibility current — the blast-radius filter relies on it to avoid
-    # naming private repos in a public repo's review.
     try:
-        _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
-    except sqlite3.OperationalError as exc:
-        logger.debug("set_repo_visibility failed (ignored): %s", exc)
+        config = load_config()
+        engine = _review_engine(config, provider, bot_name)
 
-    repo_record = _app_db.get_repo(owner, repo, platform=platform)
-    is_indexed = bool(repo_record and repo_record.status == "ready")
+        from mira.dashboard.api import _app_db
 
-    logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
-    try:
+        # Keep visibility current — the blast-radius filter relies on it to avoid
+        # naming private repos in a public repo's review.
+        try:
+            _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
+        except sqlite3.OperationalError as exc:
+            logger.debug("set_repo_visibility failed (ignored): %s", exc)
+
+        repo_record = _app_db.get_repo(owner, repo, platform=platform)
+        is_indexed = bool(repo_record and repo_record.status == "ready")
+
+        logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
         result = await engine.review_pr(pr_url)
+        comments = list(result.comments)
+        key_issues = len(result.key_issues)
+
+        # Large PRs: keep reviewing the files the first pass skipped, like `review-rest`,
+        # under the same tracker claim so no other review starts in between.
+        for _ in range(config.review.auto_review_rest_rounds):
+            progress = _app_db.get_pr_review_progress(owner, repo, number, platform=platform)
+            if not progress or not progress.skipped_paths:
+                break
+            rest = _review_engine(config, provider, bot_name)
+            rest._review_only_paths = set(progress.skipped_paths)  # type: ignore[attr-defined]
+            logger.info("Reviewing %d skipped file(s) on %s", len(progress.skipped_paths), pr_url)
+            try:
+                extra = await rest.review_pr(pr_url)
+            except Exception as exc:
+                logger.warning("Follow-up review of skipped files failed on %s: %s", pr_url, exc)
+                break
+            comments += extra.comments
+            key_issues += len(extra.key_issues)
         review_tracker.complete(repo_full, number)
     except Exception as exc:
         review_tracker.fail(repo_full, number, str(exc))
@@ -148,13 +167,13 @@ async def run_pr_review(
         dispatch_event,
     )
 
-    stats = build_review_stats(result.comments)
+    stats = build_review_stats(comments)
     event_data = {
         "repo": repo_full,
         "pr_url": pr_url,
         "number": number,
-        "comments": len(result.comments),
-        "key_issues": len(result.key_issues),
+        "comments": len(comments),
+        "key_issues": key_issues,
         "severities": {sev.name.lower(): n for sev, n in stats.items()},
     }
     await dispatch_event(REVIEW_COMPLETED, event_data)
