@@ -388,10 +388,14 @@ def _validate_change_groups(raw_groups: list) -> list[LLMWalkthroughChangeGroup]
         if not isinstance(item, dict):
             logger.warning("Skipping malformed walkthrough change group: %r", item)
             continue
+        # Models sometimes capitalize keys ("Label"); field names are lowercase.
+        item = {str(k).lower(): v for k, v in item.items()}
         raw_files = item.get("files")
         if isinstance(raw_files, list):
             files = []
             for f in raw_files:
+                if isinstance(f, dict):
+                    f = {str(k).lower(): v for k, v in f.items()}
                 try:
                     files.append(LLMWalkthroughFileChange.model_validate(f))
                 except Exception as exc:
