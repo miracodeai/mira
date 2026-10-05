@@ -53,6 +53,9 @@ class _FakeConn:
     def cursor(self):
         return _FakeCursor(self._conn)
 
+    def commit(self):
+        self._conn.commit()
+
 
 @pytest.fixture
 def fake_conn(monkeypatch):
@@ -201,3 +204,67 @@ def test_fingerprints_scoped_by_repo(fake_conn):
     assert [fp.pr_number for fp in a.list_pr_fingerprints()] == [1]
     assert [fp.pr_number for fp in b.list_pr_fingerprints()] == [1]
     assert b.list_pr_fingerprints()[0].updated_at < now - IndexStore._FINGERPRINT_TTL
+
+
+def _feedback(signal, pr_author):
+    return {
+        "pr_number": 1,
+        "pr_url": "",
+        "comment_path": "a.py",
+        "comment_line": 1,
+        "comment_category": "bug",
+        "comment_severity": "warning",
+        "comment_title": "t",
+        "signal": signal,
+        "actor": "maintainer",
+        "pr_author": pr_author,
+    }
+
+
+def test_review_quality_by_author(store):
+    store.record_review(1, "a", "", 3, 1, 2, author="alice", created_at=100.0)
+    store.record_review(2, "b", "", 1, 0, 1, suggestions=4, author="alice", created_at=200.0)
+    store.record_review(3, "c", "", 5, 5, 5, author="bob", created_at=200.0)
+    other = PgIndexStore("acme", "gadgets", "postgresql://fake")
+    other.record_review(4, "d", "", 9, 9, 9, author="alice", created_at=200.0)
+
+    assert store.get_review_quality_by_author("alice") == {
+        "reviews": 2,
+        "blockers": 1,
+        "warnings": 3,
+        "suggestions": 4,
+        "comments_posted": 4,
+    }
+    assert store.get_review_quality_by_author("alice", since=150.0)["reviews"] == 1
+    assert store.get_review_quality_by_author("nobody") == {
+        "reviews": 0,
+        "blockers": 0,
+        "warnings": 0,
+        "suggestions": 0,
+        "comments_posted": 0,
+    }
+
+
+def test_feedback_quality_by_author(store):
+    store.record_bulk_feedback(
+        [
+            _feedback("accepted", "alice"),
+            _feedback("accepted", "alice"),
+            _feedback("human_review", "alice"),
+            _feedback("rejected", "bob"),
+        ]
+    )
+    store.record_feedback(1, "", "a.py", 1, "bug", "warning", "t", "rejected", "x", "alice")
+    other = PgIndexStore("acme", "gadgets", "postgresql://fake")
+    other.record_bulk_feedback([_feedback("accepted", "alice")])
+
+    assert store.get_feedback_quality_by_author("alice") == {
+        "accepted": 2,
+        "rejected": 1,
+        "human_review": 1,
+    }
+    assert store.get_feedback_quality_by_author("nobody") == {
+        "accepted": 0,
+        "rejected": 0,
+        "human_review": 0,
+    }
