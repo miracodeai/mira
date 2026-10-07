@@ -371,6 +371,109 @@ class ForgejoRepoFetcher:
         return _strip_tarball(blob, max_file_size, f"{owner}/{repo}, indexable_paths")
 
 
+
+class OriginRepoFetcher:
+    """Fetches repo content via the Cursor Origin REST API (`/v1/origin`).
+
+    Uses ``Authorization: Bearer <token>``. Owner/repo are Origin namespace slug
+    + repo name (no nested groups).
+    """
+
+    def __init__(self, token: str, base_url: str = "https://api.cursor.com/v1/origin") -> None:
+        self._token = token
+        self._api = base_url.rstrip("/")
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token}"}
+
+    def _repo(self, owner: str, repo: str) -> str:
+        return f"{self._api}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+
+    async def default_branch(self, owner: str, repo: str) -> str:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    self._repo(owner, repo), headers=self._headers(), timeout=15
+                )
+                resp.raise_for_status()
+                return str(resp.json().get("defaultBranch", "main") or "main")
+        except Exception as exc:
+            logger.warning("Failed to fetch Origin default branch for %s/%s: %s", owner, repo, exc)
+            return "main"
+
+    async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
+        url = f"{self._repo(owner, repo)}/git/trees/{quote(branch, safe='')}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                url, headers=self._headers(), params={"recursive": "true"}, timeout=60
+            )
+            if resp.status_code in (404, 409):
+                raise EmptyRepoError(owner, repo)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            paths: list[str] = []
+            for item in data.get("tree") or []:
+                if item.get("type") == "blob" and item.get("path"):
+                    paths.append(item["path"])
+            return paths
+
+    async def file_content(
+        self, owner: str, repo: str, path: str, ref: str, semaphore=None
+    ) -> str | None:
+        import base64
+
+        url = f"{self._repo(owner, repo)}/contents"
+
+        async def _fetch() -> str | None:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        url,
+                        headers=self._headers(),
+                        params={"path": path, "ref": ref},
+                        timeout=30,
+                    )
+                    if resp.status_code == 404:
+                        return None
+                    resp.raise_for_status()
+                    data = resp.json() or {}
+                    if data.get("type") != "file":
+                        return None
+                    raw = data.get("content") or ""
+                    return base64.b64decode(raw).decode("utf-8")
+            except Exception as exc:
+                logger.warning("Failed to fetch Origin %s: %s", path, exc)
+                return None
+
+        if semaphore:
+            async with semaphore:
+                return await _fetch()
+        return await _fetch()
+
+    async def repo_tarball(
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        max_file_size: int = 1_048_576,
+        indexable_paths: set[str] | None = None,
+    ) -> dict[str, str] | None:
+        url = f"{self._repo(owner, repo)}/tarball/{quote(ref, safe='')}"
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+                resp = await client.get(url, headers=self._headers())
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Origin tarball fetch failed for %s/%s: %d", owner, repo, resp.status_code
+                    )
+                    return None
+                blob = resp.content
+        except Exception as exc:
+            logger.warning("Origin tarball fetch failed for %s/%s: %s", owner, repo, exc)
+            return None
+        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}", indexable_paths)
+
+
 def _next_link(link_header: str) -> str | None:
     """Extract the rel="next" URL from a Link header (GitLab keyset pagination)."""
     if not link_header:
@@ -389,4 +492,6 @@ def make_fetcher(platform: str, token: str) -> RepoFetcher:
         return GitLabRepoFetcher(token, api_url or "https://gitlab.com/api/v4")
     if platform == "forgejo":
         return ForgejoRepoFetcher(token, api_url or "https://codeberg.org/api/v1")
+    if platform == "origin":
+        return OriginRepoFetcher(token, api_url or "https://api.cursor.com/v1/origin")
     return GitHubRepoFetcher(token, api_url or "https://api.github.com")

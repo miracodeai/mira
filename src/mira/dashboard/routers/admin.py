@@ -18,6 +18,7 @@ from mira.dashboard.api import (
     ModelOption,
     ModelsResponse,
     ModelsUpdate,
+    OriginRepoRegister,
     PendingUninstallModel,
     SetupRequest,
     WebhookCreate,
@@ -147,6 +148,39 @@ async def register_forgejo_repo(body: ForgejoRepoRegister, request: Request) -> 
     """
     _require_admin(request)
     return await _register_and_index_repo("forgejo", "MIRA_FORGEJO_TOKEN", body)
+
+
+
+@router.post("/api/origin/sync")
+async def sync_origin_repos(request: Request) -> dict:
+    """Discover Origin repos accessible to MIRA_ORIGIN_TOKEN and register them.
+
+    Origin App installations also register repos via ``installation.created``
+    webhooks; this endpoint is for token-based / manual sync.
+    """
+    _require_admin(request)
+    from mira.platforms.origin.auth import OriginTokenAuth
+    from mira.platforms.origin.webhook import backfill_origin_repos
+
+    return await _sync_platform_repos(
+        "origin",
+        "MIRA_ORIGIN_TOKEN",
+        OriginTokenAuth,
+        backfill_origin_repos,
+        "https://api.cursor.com/v1/origin",
+        "MIRA_ORIGIN_API_URL",
+    )
+
+
+@router.post("/api/origin/repos")
+async def register_origin_repo(body: OriginRepoRegister, request: Request) -> dict:
+    """Register an Origin repo and index it in the background.
+
+    The access token comes from MIRA_ORIGIN_TOKEN; configure an Origin App
+    webhook at ``/origin/webhook`` for auto-review on new PRs.
+    """
+    _require_admin(request)
+    return await _register_and_index_repo("origin", "MIRA_ORIGIN_TOKEN", body)
 
 
 @router.get("/api/settings/models", response_model=ModelsResponse)
