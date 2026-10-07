@@ -399,7 +399,7 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
     # Resolve the repo's platform and build the matching fetcher.
     records = _api._app_db.get_repo_any_platform(owner, repo)
     # Same owner/repo can exist on multiple platforms; prefer
-    # github → gitlab → forgejo (the historical fallback order).
+    # github → gitlab → forgejo → origin (the historical fallback order).
     platform = _pick_platform_record(records).platform if records else "github"
 
     from mira.platforms.fetch import EmptyRepoError, make_fetcher
@@ -412,6 +412,10 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
         token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
         if not token:
             raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured.")
+    elif platform == "origin":
+        token = os.environ.get("MIRA_ORIGIN_TOKEN", "")
+        if not token:
+            raise HTTPException(status_code=400, detail="MIRA_ORIGIN_TOKEN is not configured.")
     else:
         token = os.environ.get("GITHUB_TOKEN", "")
         if not token:
