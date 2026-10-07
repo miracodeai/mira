@@ -471,9 +471,11 @@ class OriginProvider(BaseProvider):
 
     async def update_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
         sid = self._resolve_id(comment_id)
+        # Origin's by-id comment routes are repo-scoped (no PR segment):
+        # PATCH /repos/{owner}/{repo}/pulls/comments/{commentId}
         await self._request(
             "PATCH",
-            f"{self._pr(pr_info)}/comments/{quote(sid, safe='')}",
+            f"{self._repo(pr_info.owner, pr_info.repo)}/pulls/comments/{quote(sid, safe='')}",
             json={"body": body},
         )
 
@@ -484,7 +486,8 @@ class OriginProvider(BaseProvider):
             sid = str(comment_id)
         try:
             resp = await self._request(
-                "GET", f"{self._pr(pr_info)}/comments/{quote(sid, safe='')}"
+                "GET",
+                f"{self._repo(pr_info.owner, pr_info.repo)}/pulls/comments/{quote(sid, safe='')}",
             )
             return ((resp.json() or {}).get("body") or "")[:1500]
         except Exception:
@@ -552,9 +555,11 @@ class OriginProvider(BaseProvider):
         resolved = 0
         for tid in thread_ids:
             try:
+                # Origin's thread route is repo-scoped:
+                # PATCH /repos/{owner}/{repo}/pulls/threads/{threadId}
                 await self._request(
                     "PATCH",
-                    f"{self._pr(pr_info)}/threads/{quote(tid, safe='')}",
+                    f"{self._repo(pr_info.owner, pr_info.repo)}/pulls/threads/{quote(tid, safe='')}",
                     json={"resolved": True},
                 )
                 resolved += 1
@@ -571,7 +576,7 @@ class OriginProvider(BaseProvider):
         try:
             resp = await self._request(
                 "GET",
-                f"{self._pr(pr_info)}/comments/{quote(comment_node_id, safe='')}",
+                f"{self._repo(pr_info.owner, pr_info.repo)}/pulls/comments/{quote(comment_node_id, safe='')}",
                 ok=(200, 404),
             )
             if resp.status_code == 404:
