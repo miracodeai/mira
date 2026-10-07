@@ -385,9 +385,9 @@ def serve(
 
         from mira.config import set_global_defaults
         from mira.platforms.forgejo.auth import ForgejoTokenAuth
-        from mira.platforms.origin.auth import OriginAppAuth, OriginTokenAuth
         from mira.platforms.github.auth import GitHubAppAuth
         from mira.platforms.gitlab.auth import GitLabTokenAuth
+        from mira.platforms.origin.auth import OriginAppAuth, OriginTokenAuth
         from mira.platforms.server import create_app
     except ImportError as exc:
         raise click.ClickException(
@@ -453,11 +453,14 @@ def serve(
     if origin_configured:
         assert origin_app_id is not None
         assert origin_private_key is not None
-        origin_auth = OriginAppAuth(
-            origin_app_id,
-            origin_private_key,
-            origin_base_url or "https://api.cursor.com/v1/origin",
-        )
+        try:
+            origin_auth = OriginAppAuth(
+                origin_app_id,
+                origin_private_key,
+                origin_base_url or "https://api.cursor.com/v1/origin",
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
     elif origin_token:
         # Token-only: dashboard sync / review without webhook App auth.
         origin_auth = OriginTokenAuth(

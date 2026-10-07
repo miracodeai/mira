@@ -30,10 +30,26 @@ _TOKEN_MIN_REMAINING = 60
 
 
 def _resolve_private_key(value: str) -> str:
-    """Accept either raw PEM text or ``@path/to/key.pem`` and return PEM text."""
+    """Accept either raw PEM text or ``@path/to/key.pem`` and return PEM text.
+
+    The value comes from operator-controlled config (``--origin-private-key`` /
+    ``MIRA_ORIGIN_PRIVATE_KEY``), the same trust level as the GitHub App key.
+    Raises ``ValueError`` with a clear message when the file is missing or
+    unreadable, or when the result is not a PEM private key.
+    """
     if value.startswith("@"):
-        with open(value[1:]) as f:
-            return f.read()
+        key_path = value[1:]
+        try:
+            with open(key_path) as f:
+                value = f.read()
+        except FileNotFoundError:
+            raise ValueError(f"Origin private key file not found: {key_path}") from None
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(f"Could not read Origin private key file {key_path}: {exc}") from None
+    if "-----BEGIN" not in value or "PRIVATE KEY-----" not in value:
+        raise ValueError(
+            "Origin private key must be a PEM private key (raw PEM text or @path/to/key.pem)"
+        )
     return value
 
 
