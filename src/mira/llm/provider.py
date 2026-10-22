@@ -103,53 +103,90 @@ class LLMProvider(OpenAICompatibleProvider):
             # forced choice fall back to "auto" (handled on the 400 below).
             "tool_choice": "auto" if api_model in self._no_forced_tool_choice else forced_choice,
             "temperature": temperature if temperature is not None else self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": self._max_tokens_override.get(api_model, self.config.max_tokens),
         }
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
-            if (
-                resp.status_code == 400
-                and body["tool_choice"] != "auto"
-                and "tool_choice" in resp.text.lower()
-            ):
-                # Forced choice unsupported — remember it and let the model pick.
-                logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
-                self._no_forced_tool_choice.add(api_model)
-                body["tool_choice"] = "auto"
-                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
-            if resp.status_code == 400 and "reasoning" in body and "reasoning" in resp.text.lower():
-                # Reasoning effort unsupported on this model/endpoint — drop it
-                # and review without thinking instead of failing the review.
-                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
-                self._no_reasoning.add(api_model)
-                body.pop("reasoning", None)
-                body["temperature"] = (
-                    temperature if temperature is not None else self.config.temperature
+            # Reasoning models can exhaust max_tokens while thinking and return
+            # an empty message (finish_reason="length", no content, no tool
+            # calls). Give the output budget one chance to double — bounded at
+            # 4x the configured value — before failing the call.
+            for _attempt in range(2):
+                resp = await client.post(
+                    self._chat_url(),
+                    headers=self._build_headers(),
+                    json=body,
                 )
-                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
-            self._handle_error(resp)
-            data = resp.json()
+                if (
+                    resp.status_code == 400
+                    and body["tool_choice"] != "auto"
+                    and "tool_choice" in resp.text.lower()
+                ):
+                    # Forced choice unsupported — remember it and let the model pick.
+                    logger.info(
+                        "Model %s rejected forced tool_choice; retrying with auto", api_model
+                    )
+                    self._no_forced_tool_choice.add(api_model)
+                    body["tool_choice"] = "auto"
+                    resp = await client.post(
+                        self._chat_url(), headers=self._build_headers(), json=body
+                    )
+                if (
+                    resp.status_code == 400
+                    and "reasoning" in body
+                    and "reasoning" in resp.text.lower()
+                ):
+                    # Reasoning effort unsupported on this model/endpoint — drop it
+                    # and review without thinking instead of failing the review.
+                    logger.info(
+                        "Model %s rejected reasoning effort; retrying without it", api_model
+                    )
+                    self._no_reasoning.add(api_model)
+                    body.pop("reasoning", None)
+                    body["temperature"] = (
+                        temperature if temperature is not None else self.config.temperature
+                    )
+                    resp = await client.post(
+                        self._chat_url(), headers=self._build_headers(), json=body
+                    )
+                self._handle_error(resp)
+                data = resp.json()
+                self._account_usage(data)
 
-        self._account_usage(data)
+                message = data["choices"][0]["message"]
+                tool_calls = message.get("tool_calls")
 
-        message = data["choices"][0]["message"]
-        tool_calls = message.get("tool_calls")
+                if tool_calls and len(tool_calls) > 0:
+                    return tool_calls[0]["function"]["arguments"]
 
-        if tool_calls and len(tool_calls) > 0:
-            return tool_calls[0]["function"]["arguments"]
+                # Fallback: if the model returned content instead of a tool call,
+                # return the content as-is (some models may not support tool calling)
+                content = message.get("content") or ""
+                if content:
+                    logger.warning(
+                        "Model returned content instead of tool call, using content as fallback"
+                    )
+                    return content
 
-        # Fallback: if the model returned content instead of a tool call,
-        # return the content as-is (some models may not support tool calling)
-        content = message.get("content") or ""
-        if content:
-            logger.warning("Model returned content instead of tool call, using content as fallback")
-            return content
+                finish_reason = data["choices"][0].get("finish_reason")
+                # No attempt left — don't bump the remembered budget for a
+                # request that will never be made.
+                if finish_reason != "length" or _attempt == 1:
+                    break
+                current = body["max_tokens"]
+                escalated = min(current * 2, max(self.config.max_tokens, 1) * 4)
+                if escalated <= current:
+                    break
+                logger.warning(
+                    "Model %s hit max_tokens=%d with no output (reasoning exhausted the budget); "
+                    "retrying once with max_tokens=%d",
+                    api_model,
+                    current,
+                    escalated,
+                )
+                self._max_tokens_override[api_model] = escalated
+                body["max_tokens"] = escalated
 
         raise LLMError("no_tool_call")
 
