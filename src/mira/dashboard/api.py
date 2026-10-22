@@ -358,7 +358,7 @@ class ModelsResponse(BaseModel):
     indexing_model: str
     review_model: str
     security_model: str
-    backend: str  # "openrouter" | "bedrock" | "openai-compatible"
+    backend: str  # "openrouter" | "requesty" | "bedrock" | "openai-compatible"
     indexing_source: str  # "dashboard" (DB override) | "config" (mira.yaml)
     review_source: str
     security_source: str
