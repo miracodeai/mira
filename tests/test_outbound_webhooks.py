@@ -161,6 +161,18 @@ class TestDeliverOne:
         assert result == (True, f"HTTP {status}")
         assert client.post.call_count == 1
 
+    @pytest.mark.parametrize("url", ["https://[invalid", "https://receiver.example:bad/hook", None])
+    async def test_invalid_legacy_url_makes_no_network_attempt(self, url):
+        factory, client = _mock_httpx(status=200)
+        with (
+            patch("mira.outbound_webhooks.httpx.AsyncClient", factory),
+            patch("mira.outbound_webhooks.socket.getaddrinfo") as resolve,
+        ):
+            ok, _ = await nf.deliver_one({"url": url}, nf.REVIEW_COMPLETED, {})
+        assert ok is False
+        resolve.assert_not_called()
+        client.post.assert_not_called()
+
     async def test_success(self):
         factory, client = _mock_httpx(status=200)
         with patch("mira.outbound_webhooks.httpx.AsyncClient", factory):
@@ -261,6 +273,45 @@ class TestSsrfResolution:
 
 
 class TestDispatch:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://[invalid",
+            123,
+            ["invalid"],
+            {"invalid": "url"},
+            "https://receiver.example/path\x00q",
+            "https://receiver.example/path\x7fq",
+            "https://\ud800.example/hook",
+        ],
+    )
+    async def test_bad_legacy_entry_does_not_block_next(self, in_memory_db, url):
+        in_memory_db.set_webhooks(
+            [
+                {"id": "bad", "url": url, "enabled": True, "events": [nf.REVIEW_COMPLETED]},
+                {
+                    "id": "good",
+                    "url": "https://receiver.example/hook",
+                    "enabled": True,
+                    "events": [nf.REVIEW_COMPLETED],
+                },
+            ]
+        )
+        requests = []
+
+        def respond(request):
+            requests.append(str(request.url))
+            return httpx.Response(200)
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(respond)
+        with patch(
+            "mira.outbound_webhooks.httpx.AsyncClient",
+            side_effect=lambda **kwargs: client_type(transport=transport, **kwargs),
+        ):
+            await nf.dispatch_event(nf.REVIEW_COMPLETED, {})
+        assert requests == ["https://receiver.example/hook"]
+
     async def test_only_enabled_and_subscribed(self, in_memory_db: AppDatabase):
         in_memory_db.set_webhooks(
             [
@@ -303,6 +354,85 @@ class TestDispatch:
 
 
 class TestAdminEndpoints:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://receiver.example/hook?token=synthetic-value",
+            "http://receiver.example:8080/hook",
+            "https://bücher.example/über?token=synthetic-value",
+            " https://receiver.example/hook ",
+        ],
+    )
+    def test_valid_url_is_preserved_without_dns(self, in_memory_db, url):
+        with patch("mira.outbound_webhooks.socket.getaddrinfo") as resolve:
+            created = create_webhook(WebhookCreate(url=url, events=[nf.REVIEW_COMPLETED]), _admin())
+        assert created["id"]
+        assert in_memory_db.get_webhooks()[0]["url"] == url.strip()
+        resolve.assert_not_called()
+
+    @pytest.mark.parametrize("url", ["https://[invalid", "https://receiver.example:70000/hook"])
+    def test_malformed_update_preserves_stored_entry(self, in_memory_db, url):
+        created = create_webhook(
+            WebhookCreate(url="https://receiver.example/hook", events=[nf.REVIEW_COMPLETED]),
+            _admin(),
+        )
+        before = in_memory_db.get_webhooks()
+
+        with pytest.raises(HTTPException) as exc:
+            update_webhook(created["id"], WebhookUpdate(url=url), _admin())
+
+        assert exc.value.status_code == 400
+        assert in_memory_db.get_webhooks() == before
+        assert url not in exc.value.detail
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://[invalid",
+            123,
+            ["invalid"],
+            {"invalid": "url"},
+            None,
+            "https://\ud800.example/hook",
+        ],
+    )
+    def test_listing_malformed_legacy_url_is_safe(self, in_memory_db, url):
+        in_memory_db.set_webhooks(
+            [{"id": "legacy", "url": url, "events": [nf.REVIEW_COMPLETED], "enabled": True}]
+        )
+
+        listing = list_webhooks(_admin())
+
+        assert listing["webhooks"][0]["format"] == "generic"
+        assert listing["webhooks"][0]["url_masked"] == "(invalid URL)"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://[invalid",
+            "https:///missing-host",
+            "https://receiver.example:bad/hook",
+            "https://receiver.example:70000/hook",
+            "https://bad host.example/hook",
+            "https://receiv\ner.example/hook",
+            "https://receiv\rer.example/hook",
+            "https://receiv\ter.example/hook",
+            "https://receiver.example/path\x00q",
+            "https://receiver.example/path\x7fq",
+            "https://\ud800.example/hook",
+        ],
+    )
+    def test_create_rejects_malformed_url_before_save(self, in_memory_db, url):
+        before = in_memory_db.get_webhooks()
+        with pytest.raises(HTTPException) as exc:
+            create_webhook(
+                WebhookCreate(url=url, events=[nf.REVIEW_COMPLETED]),
+                _admin(),
+            )
+        assert exc.value.status_code == 400
+        assert in_memory_db.get_webhooks() == before
+        assert url not in exc.value.detail
+
     def test_non_admin_forbidden(self, in_memory_db: AppDatabase):
         with pytest.raises(HTTPException) as exc:
             create_webhook(

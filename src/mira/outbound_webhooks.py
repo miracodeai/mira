@@ -18,7 +18,7 @@ import os
 import socket
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
@@ -61,6 +61,23 @@ _EVENT_VALUES = {e["value"] for e in AVAILABLE_EVENTS}
 _TIMEOUT_SECONDS = 5.0
 
 
+def _parse_http_url(value: object) -> ParseResult | None:
+    if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        return None
+    try:
+        value.encode("utf-8")
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        if any(c.isspace() for c in parsed.netloc):
+            return None
+        _ = parsed.port  # Access validates numeric/range syntax without DNS.
+        httpx.URL(value)
+    except (ValueError, httpx.InvalidURL):
+        return None
+    return parsed
+
+
 class WebhookConfig(BaseModel):
     """A single configured outbound webhook."""
 
@@ -74,8 +91,8 @@ class WebhookConfig(BaseModel):
     @classmethod
     def _validate_url(cls, v: str) -> str:
         v = v.strip()
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("URL must start with http:// or https://")
+        if _parse_http_url(v) is None:
+            raise ValueError("URL must be a valid http(s) URL with a hostname and optional port")
         return v
 
     @field_validator("events")
@@ -89,7 +106,9 @@ class WebhookConfig(BaseModel):
 
 def detect_format(url: str) -> str:
     """Classify a webhook URL as ``"slack"``, ``"teams"`` or ``"generic"``."""
-    parsed = urlparse(url)
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return "generic"
     host = (parsed.hostname or "").lower()
     if host == "hooks.slack.com":
         return "slack"
@@ -113,7 +132,9 @@ def detect_format(url: str) -> str:
 
 def mask_url(url: str) -> str:
     """``https://hooks.slack.com/services/T0/B0/XXXX`` → ``https://hooks.slack.com/…XXXX``."""
-    parsed = urlparse(url)
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return "(invalid URL)"
     host = parsed.hostname or ""
     scheme = parsed.scheme or "https"
     tail = url[-4:] if len(url) >= 4 else url
@@ -225,7 +246,10 @@ def is_safe_webhook_url(url: str) -> bool:
     re-resolves it, leaving a narrow DNS-rebinding window for an admin who also
     controls a fast-flipping DNS record.
     """
-    host = (urlparse(url).hostname or "").lower()
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return False
+    host = (parsed.hostname or "").lower()
     if not host or host == "localhost":
         return False
 
