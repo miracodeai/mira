@@ -111,6 +111,22 @@ docker run -p 8000:8000 --env-file .env \
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 
+Atlas Cloud is also available as an OpenAI-compatible backend. Keep the API key
+in the deployment environment and select any supported Atlas Cloud LLM by its
+full model id:
+
+```yaml
+# mira.yaml
+llm:
+  base_url: "https://api.atlascloud.ai/v1"
+  api_key_env: "ATLASCLOUD_API_KEY"
+  model: "deepseek-ai/deepseek-v4-pro"
+```
+
+```bash
+ATLASCLOUD_API_KEY=your-key-here
+```
+
 ### Codex CLI
 
 If you already use OpenAI Codex locally, Mira can run reviews through the
