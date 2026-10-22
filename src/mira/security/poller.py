@@ -23,14 +23,14 @@ from mira.security.osv import (
 
 
 def _prefer_resolved(rows: list[dict]) -> list[dict]:
-    """Dedupe by (owner, repo, ecosystem, name) preferring lockfile entries.
+    """Prefer lockfile rows per package, keeping distinct resolved npm versions.
 
     Manifests record version *constraints* like ``>=1.30`` — sending those
     to OSV produces false positives because OSV interprets them as concrete
     versions and matches against everything in that range. Lockfiles record
     the *resolved* version, which is what we actually want to scan against.
     """
-    by_key: dict[tuple[str, str, str, str], dict] = {}
+    by_key: dict[tuple[str, str, str, str], list[dict]] = {}
     for r in rows:
         # Case-insensitive on name — PyPI normalises `PyJWT`/`pyjwt`/`PyJwt`
         # to the same package, so a manifest row spelled `PyJWT` should
@@ -38,15 +38,22 @@ def _prefer_resolved(rows: list[dict]) -> list[dict]:
         key = (r["owner"], r["repo"], r["kind"], r["name"].lower())
         existing = by_key.get(key)
         if existing is None:
-            by_key[key] = r
+            by_key[key] = [r]
+            continue
+        if r["kind"] == "npm":
+            if _is_lockfile_path(r.get("file_path", "")):
+                if not _is_lockfile_path(existing[0].get("file_path", "")):
+                    by_key[key] = [r]
+                elif all(prior["version"] != r["version"] for prior in existing):
+                    existing.append(r)
             continue
         # Prefer the row coming from a lockfile path. If both or neither are
         # lockfile rows, keep the first one.
         if _is_lockfile_path(r.get("file_path", "")) and not _is_lockfile_path(
-            existing.get("file_path", "")
+            existing[0].get("file_path", "")
         ):
-            by_key[key] = r
-    return list(by_key.values())
+            by_key[key] = [r]
+    return [r for group in by_key.values() for r in group]
 
 
 logger = logging.getLogger(__name__)

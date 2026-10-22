@@ -7,8 +7,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mira.index.store import IndexStore
+from mira.security import poller
 from mira.security.osv import (
     PackageQuery,
+    VulnEntry,
     normalize_version,
     osv_ecosystem,
     parse_advisory,
@@ -295,3 +297,133 @@ class TestVulnerabilityCRUD:
         row = store.list_vulnerabilities()[0]
         assert row.first_seen_at == pytest.approx(first_seen, abs=0.001)
         assert row.last_seen_at >= first_seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("poll_scope", ["repo", "org"])
+@pytest.mark.parametrize("reverse_rows", [False, True])
+async def test_npm_poll_retains_each_resolved_version_and_prunes_removed_one(
+    store, monkeypatch, poll_scope, reverse_rows
+):
+    # The real SQLite store exercises advisory retention. Only PostgreSQL
+    # acquisition is substituted, since a disposable server is unavailable here.
+    from mira.index import pg_store
+
+    def package(version, path):
+        return {
+            "name": "shared",
+            "kind": "npm",
+            "version": version,
+            "file_path": path,
+        }
+
+    old_path = "app/package-lock.json"
+    duplicate_path = "examples/package-lock.json"
+    new_path = "tools/package-lock.json"
+    lockfiles = [
+        (old_path, "1.0.0"),
+        (duplicate_path, "1.0.0"),
+        (new_path, "2.0.0"),
+    ]
+    for path, version in lockfiles:
+        store.replace_manifest_packages(path, [package(version, path)])
+    store.replace_manifest_packages("package.json", [package("^1.0.0", "package.json")])
+    store.replace_vulnerabilities_for_package(
+        "shared", "npm", "1.0.0", [{"cve_id": "GHSA-old", "severity": "high"}]
+    )
+
+    list_packages = store.list_manifest_packages
+    input_versions = []
+
+    def ordered_packages():
+        packages = sorted(list_packages(), key=lambda p: p.file_path)
+        if reverse_rows:
+            packages.reverse()
+        input_versions.append(tuple(p.version for p in packages))
+        return packages
+
+    monkeypatch.setattr(store, "list_manifest_packages", ordered_packages)
+    monkeypatch.setattr(pg_store, "PgIndexStore", lambda *_: store)
+    monkeypatch.setattr(
+        pg_store,
+        "list_packages_org_wide",
+        lambda *_: [
+            {
+                "owner": "o",
+                "repo": "r",
+                "kind": p.kind,
+                "name": p.name,
+                "version": p.version,
+                "file_path": p.file_path,
+            }
+            for p in ordered_packages()
+        ],
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://synthetic/test")
+
+    active_sets = []
+    real_prune = store.prune_stale_vulnerabilities
+
+    def record_prune(active):
+        active_sets.append(active)
+        return real_prune(active)
+
+    monkeypatch.setattr(store, "prune_stale_vulnerabilities", record_prune)
+
+    query_calls = []
+
+    async def synthetic_osv(queries):
+        keys = [(q.ecosystem, q.name, q.version) for q in queries]
+        query_calls.append(keys)
+        return {
+            ("npm", "shared", "1.0.0"): [
+                VulnEntry("GHSA-old", "Old version advisory", "high", "", "2.0.0")
+            ]
+        }
+
+    monkeypatch.setattr(poller, "query_batch", synthetic_osv)
+
+    async def scan():
+        if poll_scope == "repo":
+            return await poller.poll_repo("o", "r")
+        return await poller.poll_org_wide()
+
+    assert await scan() == {"high": 1}
+    assert input_versions[-1] == (
+        ("2.0.0", "^1.0.0", "1.0.0", "1.0.0")
+        if reverse_rows
+        else ("1.0.0", "1.0.0", "^1.0.0", "2.0.0")
+    )
+    assert set(query_calls[-1]) == {
+        ("npm", "shared", "1.0.0"),
+        ("npm", "shared", "2.0.0"),
+    }
+    assert len(query_calls[-1]) == 2
+    assert active_sets[-1] == {
+        ("shared", "npm", "1.0.0"),
+        ("shared", "npm", "2.0.0"),
+    }
+    assert {(v.cve_id, v.package_version) for v in store.list_vulnerabilities()} == {
+        ("GHSA-old", "1.0.0")
+    }
+
+    store.replace_manifest_packages(old_path, [])
+    assert await scan() == {"high": 1}
+    assert set(query_calls[-1]) == {
+        ("npm", "shared", "1.0.0"),
+        ("npm", "shared", "2.0.0"),
+    }
+    assert len(query_calls[-1]) == 2
+    assert active_sets[-1] == {
+        ("shared", "npm", "1.0.0"),
+        ("shared", "npm", "2.0.0"),
+    }
+    assert {(v.cve_id, v.package_version) for v in store.list_vulnerabilities()} == {
+        ("GHSA-old", "1.0.0")
+    }
+
+    store.replace_manifest_packages(duplicate_path, [])
+    assert await scan() == {}
+    assert query_calls[-1] == [("npm", "shared", "2.0.0")]
+    assert active_sets[-1] == {("shared", "npm", "2.0.0")}
+    assert store.list_vulnerabilities() == []
