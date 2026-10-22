@@ -116,6 +116,8 @@ export function SetupModal({
       "To change which repos Mira can access, update your GitHub App installation permissions.",
     forgejo:
       "To change which repos Mira can access, update your Forgejo access token scopes.",
+    origin:
+      "To change which repos Mira can access, update your Origin App installation or MIRA_ORIGIN_TOKEN scopes.",
     gitlab:
       "To change which repos Mira can access, update your GitLab access token scopes.",
   } as const
