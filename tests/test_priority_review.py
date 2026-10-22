@@ -248,3 +248,21 @@ class TestPRReviewProgressDB:
         )
         db.delete_pr_review_progress("o", "r", 1)
         assert db.get_pr_review_progress("o", "r", 1) is None
+
+
+def test_merge_progress_reopens_file_skipped_on_a_new_head():
+    from mira.core.engine import _merge_progress
+    from mira.dashboard.db import PRReviewProgress
+
+    prior = PRReviewProgress(
+        owner="o",
+        repo="r",
+        pr_number=1,
+        total_paths=["a", "b"],
+        reviewed_paths=["a", "b"],
+        skipped_paths=[],
+    )
+    # A new push changed both; this pass only had room for b.
+    assert _merge_progress(prior, ["b"], ["a"]) == ({"b"}, {"a"})
+    # review-rest then covers a.
+    assert _merge_progress(None, ["a"], []) == ({"a"}, set())

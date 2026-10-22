@@ -36,6 +36,32 @@ class LLMProvider(OpenAICompatibleProvider):
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
 
+    async def _post(
+        self, client: httpx.AsyncClient, body: dict, temperature: float | None
+    ) -> httpx.Response:
+        """POST to /chat/completions, retrying without reasoning or temperature if rejected."""
+        if body["model"] in self._no_temperature:
+            body.pop("temperature", None)
+        resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+        if resp.status_code == 400 and "reasoning" in body and "reasoning" in resp.text.lower():
+            # Reasoning effort unsupported on this model/endpoint — drop it
+            # and review without thinking instead of failing the review.
+            logger.info("Model %s rejected reasoning effort; retrying without it", body["model"])
+            self._no_reasoning.add(body["model"])
+            body.pop("reasoning", None)
+            if body["model"] not in self._no_temperature:
+                body["temperature"] = (
+                    temperature if temperature is not None else self.config.temperature
+                )
+            resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+        if resp.status_code == 400 and "temperature" in body and "temperature" in resp.text.lower():
+            # Some models (e.g. kimi-k2.7-code) only accept their default temperature.
+            logger.info("Model %s rejected temperature; retrying without it", body["model"])
+            self._no_temperature.add(body["model"])
+            body.pop("temperature")
+            resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+        return resp
+
     async def _call_llm(
         self,
         model: str,
@@ -65,11 +91,7 @@ class LLMProvider(OpenAICompatibleProvider):
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post(client, body, temperature)
             self._handle_error(resp)
             data = resp.json()
 
@@ -108,11 +130,7 @@ class LLMProvider(OpenAICompatibleProvider):
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post(client, body, temperature)
             if (
                 resp.status_code == 400
                 and body["tool_choice"] != "auto"
@@ -122,17 +140,7 @@ class LLMProvider(OpenAICompatibleProvider):
                 logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
                 self._no_forced_tool_choice.add(api_model)
                 body["tool_choice"] = "auto"
-                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
-            if resp.status_code == 400 and "reasoning" in body and "reasoning" in resp.text.lower():
-                # Reasoning effort unsupported on this model/endpoint — drop it
-                # and review without thinking instead of failing the review.
-                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
-                self._no_reasoning.add(api_model)
-                body.pop("reasoning", None)
-                body["temperature"] = (
-                    temperature if temperature is not None else self.config.temperature
-                )
-                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+                resp = await self._post(client, body, temperature)
             self._handle_error(resp)
             data = resp.json()
 
@@ -178,11 +186,7 @@ class LLMProvider(OpenAICompatibleProvider):
         self._apply_reasoning(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            resp = await client.post(
-                self._chat_url(),
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post(client, body, temperature)
             self._handle_error(resp)
             data = resp.json()
 

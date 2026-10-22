@@ -125,12 +125,83 @@ async def _run_pr_handler(result: ReviewResult | Exception, mock_engine_cls, moc
         patch("mira.outbound_webhooks.dispatch_event", new_callable=AsyncMock) as mock_dispatch,
     ):
         mock_db.get_repo.return_value = MagicMock(status="ready")  # indexed → skip note
+        mock_db.get_pr_review_progress.return_value = None  # no follow-up rounds
         await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
     return mock_dispatch
 
 
 def _events(mock_dispatch: AsyncMock) -> list[str]:
     return [call.args[0] for call in mock_dispatch.await_args_list]
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+async def test_large_pr_reviews_skipped_files_until_done(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    mock_config.return_value.review.auto_review_rest_rounds = 3
+    engine = AsyncMock()
+    found = ReviewResult(summary="ok", comments=[_comment(Severity.WARNING)])
+    engine.review_pr = AsyncMock(return_value=found)
+    mock_engine_cls.return_value = engine
+
+    with (
+        patch("mira.dashboard.api._app_db") as mock_db,
+        patch("mira.outbound_webhooks.dispatch_event", new_callable=AsyncMock) as mock_dispatch,
+    ):
+        mock_db.get_repo.return_value = MagicMock(status="ready")
+        mock_db.get_pr_review_progress.side_effect = [
+            MagicMock(skipped_paths=["b.py", "c.py"]),
+            MagicMock(skipped_paths=[]),
+        ]
+        await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
+
+    # First review, then one follow-up for the skipped files; stops once nothing is left.
+    assert engine.review_pr.await_count == 2
+    assert engine._review_only_paths == {"b.py", "c.py"}
+    assert engine._keep_walkthrough is True  # the follow-up keeps the first walkthrough
+    # Events fire once, after the follow-up, and cover both rounds.
+    assert _data_for(mock_dispatch, "review.completed")["comments"] == 2
+    assert _events(mock_dispatch).count("review.completed") == 1
+    assert _events(mock_dispatch).count("review.high_severity") == 1
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+async def test_failed_follow_up_marks_review_failed(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    mock_config.return_value.review.auto_review_rest_rounds = 2
+    engine = AsyncMock()
+    engine.review_pr = AsyncMock(side_effect=[ReviewResult(summary="ok"), RuntimeError("boom")])
+    mock_engine_cls.return_value = engine
+
+    with (
+        patch("mira.dashboard.api._app_db") as mock_db,
+        patch("mira.outbound_webhooks.dispatch_event", new_callable=AsyncMock) as mock_dispatch,
+        patch("mira.platforms.handlers.review_tracker") as tracker,
+    ):
+        tracker.try_start.return_value = True
+        mock_db.get_repo.return_value = MagicMock(status="ready")
+        mock_db.get_pr_review_progress.return_value = MagicMock(skipped_paths=["b.py"])
+        await handle_pull_request(_make_pr_payload(), mock_app_auth, "mira-bot")
+
+    tracker.fail.assert_called_once()
+    tracker.complete.assert_not_called()
+    # The first pass's findings are still announced.
+    assert _events(mock_dispatch) == ["review.completed"]
 
 
 def _data_for(mock_dispatch: AsyncMock, event: str) -> dict:

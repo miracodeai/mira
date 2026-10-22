@@ -1282,19 +1282,22 @@ class AppDatabase:
             return row[0] if row else None
 
     def set_setting(self, key: str, value: str) -> None:
+        self.set_settings({key: value})
+
+    def set_settings(self, values: dict[str, str]) -> None:
+        """Upsert several settings in one statement, so a save never lands half-applied."""
+        if not values:
+            return
+        rows = ", ".join(["(?, ?)"] * len(values))
+        params = [item for pair in values.items() for item in pair]
+        sql = f"INSERT INTO settings (key, value) VALUES {rows} ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
-            self._sqlite_conn.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
+            self._sqlite_conn.execute(sql, params)
             self._sqlite_conn.commit()
         else:
             with self._pg_cursor() as cur:
-                cur.execute(
-                    "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
-                    (key, value),
-                )
+                cur.execute(sql.replace("?", "%s"), params)
 
     @property
     def setup_complete(self) -> bool:

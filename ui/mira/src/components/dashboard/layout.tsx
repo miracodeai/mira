@@ -85,6 +85,7 @@ const navItems = [
 // children rather than a flat nav item.
 const settingsSubItems = [
   { to: "/settings/models", label: "Models" },
+  { to: "/settings/providers", label: "Providers" },
   { to: "/settings/review", label: "Review" },
   { to: "/settings/webhooks", label: "Webhooks" },
 ]
@@ -105,6 +106,7 @@ const PAGE_LABELS: Record<string, string> = {
   account: "Account",
   password: "Password",
   models: "Models",
+  providers: "Providers",
   review: "Review",
   webhooks: "Webhooks",
 }

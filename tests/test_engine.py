@@ -191,6 +191,28 @@ class TestReviewEngine:
         mock_llm.review.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_second_opinion_models_vote_on_findings(
+        self, mock_llm: LLMProvider, sample_diff_text: str, sample_llm_response_data: dict
+    ):
+        # The second model agrees on one of the three drafted findings; the vote keeps only it.
+        agreed = {**sample_llm_response_data, "comments": sample_llm_response_data["comments"][1:2]}
+        other = MagicMock()
+        other.review = AsyncMock(return_value=json.dumps(agreed))
+        other.usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        config = MiraConfig()
+        config.review.security_pass = False
+        config.review.self_critique = False
+        engine = ReviewEngine(config=config, llm=mock_llm)
+
+        with patch("mira.core.engine.second_opinion_llms", return_value=[other]):
+            result = await engine.review_diff(sample_diff_text)
+
+        other.review.assert_awaited_once()
+        assert [c.title for c in result.comments] == ["Use of eval() for parsing config"]
+        assert any(e.get("stage") == "ensemble_vote" for e in result.audit)
+        assert result.token_usage["total_tokens"] == mock_llm.usage["total_tokens"] + 10
+
+    @pytest.mark.asyncio
     async def test_audit_records_drafted_counts(self, mock_llm: LLMProvider, sample_diff_text: str):
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm)
         result = await engine.review_diff(sample_diff_text)

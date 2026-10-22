@@ -111,6 +111,51 @@ docker run -p 8000:8000 --env-file .env \
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 
+### ChatGPT / Claude subscription sign-in
+
+Mira can run reviews on a ChatGPT (Plus/Pro/Business) or Claude (Pro/Max) subscription
+instead of an API key, using the same OAuth flows as [OpenCodex](https://github.com/lidge-jun/opencodex)
+— no CLI involved. In the dashboard open **Settings → Providers**:
+
+- **OpenAI (Codex login)** — device-code sign-in: open the link, enter the code.
+- **Anthropic (Claude)** — opens claude.ai; after approving, the browser returns to
+  `http://localhost:54545/callback`. Publish that port (`-p 54545:54545`) so Mira can catch it,
+  or paste the final URL into the dialog.
+- **Free / Local / Paid tabs** — built-in presets for OpenAI-compatible providers (NVIDIA NIM,
+  Groq, Cerebras, Gemini, OpenRouter, DeepSeek, Ollama, LM Studio, …). Paste a key (local ones
+  need none) and Mira checks it by listing models. **Add a custom one** takes any other
+  OpenAI-compatible base URL. Keys live in the same encrypted store as the sign-ins, and models
+  appear as `@<provider>/<model>`. From Docker Desktop, reach local servers via
+  `host.docker.internal`; on Linux, start Mira with `--add-host=host.docker.internal:host-gateway`.
+
+Their models then appear in every model picker on **Settings → Models** (suffixed
+"(ChatGPT)" / "(Claude)"), mixed freely with API-key models per purpose. Lists are live,
+several accounts per provider are supported (**Manage** → **Use**), and tokens refresh
+automatically. Each account shows its 5-hour and weekly usage; an account that hits its
+limit is skipped for the next signed-in one. Credentials are stored owner-only in
+`MIRA_INDEX_DIR/_llm_auth/accounts.json`, encrypted when `MIRA_SECRET_KEY` is set (any long
+random string; keep it, or sign in again after changing it).
+Both flows reuse the official Codex / Claude Code OAuth clients, as OpenCodex does; check
+that this fits your plan's terms before relying on it.
+
+On **Settings > Models** each model can list fallbacks, tried in order when it fails (for
+example Claude, then ChatGPT, then an API model). Two optional review settings live there too:
+a **Critic Model** for the self-critique pass, and **Second-opinion Models** that also review
+each PR and keep only findings most models agree on. Both are off by default; on a small
+benchmark sample neither beat the default setup, and one second opinion halved recall.
+
+Each model slot, fallback, and second opinion has a reasoning dropdown. **Default** uses
+`llm.review_reasoning_effort` for review, inherits review for security, and leaves indexing
+and the critic off. Fallbacks inherit their slot; second opinions inherit review. **Off**
+explicitly disables Mira's reasoning effort, even when a deployment default is set.
+List entries store an optional suffix such as `claude/claude-opus-5-5#high`; the same format
+works in `mira.yaml`'s `fallback_models` and `ensemble_models` lists. Available levels follow
+the provider's model metadata when supplied; unknown models keep the full list.
+
+Reviews also run ruff's bug-only rules (syntax errors, undefined names) on changed Python
+files, point out existing tests the PR leaves untouched, and review files skipped on large
+PRs automatically (`review.auto_review_rest_rounds`, default 2).
+
 ### Codex CLI
 
 If you already use OpenAI Codex locally, Mira can run reviews through the
