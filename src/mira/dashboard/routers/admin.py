@@ -150,7 +150,6 @@ async def register_forgejo_repo(body: ForgejoRepoRegister, request: Request) -> 
     return await _register_and_index_repo("forgejo", "MIRA_FORGEJO_TOKEN", body)
 
 
-
 @router.post("/api/origin/sync")
 async def sync_origin_repos(request: Request) -> dict:
     """Discover Origin repos accessible to MIRA_ORIGIN_TOKEN and register them.

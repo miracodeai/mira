@@ -260,7 +260,10 @@ async def handle_origin_pr(
     from mira.platforms.handlers import run_pr_review
     from mira.platforms.index_handlers import _get_app_db
 
-    if event_type == "pull_request.head_ref.pushed" and not load_config().review.review_on_synchronize:
+    if (
+        event_type == "pull_request.head_ref.pushed"
+        and not load_config().review.review_on_synchronize
+    ):
         logger.info("Origin PR head push skipped — review.review_on_synchronize is off")
         return
 
@@ -328,7 +331,9 @@ async def handle_origin_push(
         fetcher = make_fetcher("origin", token)
         default_branch = await fetcher.default_branch(owner, repo_name)
     except Exception:
-        logger.exception("Origin push: failed to resolve default branch for %s/%s", owner, repo_name)
+        logger.exception(
+            "Origin push: failed to resolve default branch for %s/%s", owner, repo_name
+        )
         return
 
     # Origin push payloads have refUpdates, not a commits array. Without a
@@ -511,9 +516,7 @@ async def handle_origin_comment(
             platform="origin",
         )
     except Exception:
-        logger.exception(
-            "Error handling Origin comment on %s/%s#%d", owner, repo_name, number
-        )
+        logger.exception("Error handling Origin comment on %s/%s#%d", owner, repo_name, number)
 
 
 async def handle_origin_installation(
@@ -579,9 +582,7 @@ async def dispatch_origin_event(
         return "processing"
 
     if event_type == "repository.pushed":
-        background_tasks.add_task(
-            handle_origin_push, payload, auth, bot_name, installation_id
-        )
+        background_tasks.add_task(handle_origin_push, payload, auth, bot_name, installation_id)
         return "processing"
 
     if event_type == "pull_request.comment.created":

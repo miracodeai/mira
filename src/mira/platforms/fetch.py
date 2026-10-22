@@ -371,7 +371,6 @@ class ForgejoRepoFetcher:
         return _strip_tarball(blob, max_file_size, f"{owner}/{repo}, indexable_paths")
 
 
-
 class OriginRepoFetcher:
     """Fetches repo content via the Cursor Origin REST API (`/v1/origin`).
 

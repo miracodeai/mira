@@ -188,9 +188,7 @@ class OriginProvider(BaseProvider):
                     params["pageToken"] = page_token
                 resp = await client.get(url, headers=self._headers(), params=params)
                 if resp.status_code != 200:
-                    raise ProviderError(
-                        f"Origin GET {url} → {resp.status_code}: {resp.text[:300]}"
-                    )
+                    raise ProviderError(f"Origin GET {url} → {resp.status_code}: {resp.text[:300]}")
                 data = resp.json() or {}
                 items = data.get(list_key) or []
                 out.extend(items)
@@ -303,7 +301,9 @@ class OriginProvider(BaseProvider):
             if entry.get("type") == "blob" and entry.get("path"):
                 paths.append(entry["path"])
         if data.get("truncated"):
-            logger.warning("Origin repo tree for %s/%s@%s was truncated", pr_info.owner, pr_info.repo, ref)
+            logger.warning(
+                "Origin repo tree for %s/%s@%s was truncated", pr_info.owner, pr_info.repo, ref
+            )
         return paths
 
     async def get_file_history(
@@ -408,7 +408,9 @@ class OriginProvider(BaseProvider):
         except ProviderError as exc:
             status = getattr(exc, "status_code", None)
             if status in (400, 422):
-                logger.warning("Origin inline review failed (%s); posting as individual comments", exc)
+                logger.warning(
+                    "Origin inline review failed (%s); posting as individual comments", exc
+                )
                 if summary_text:
                     try:
                         await self.post_comment(pr_info, summary_text)
@@ -418,7 +420,9 @@ class OriginProvider(BaseProvider):
                 for comment in result.comments:
                     body = format_comment_body(comment, bot_name=bot_name)
                     try:
-                        cid = await self._post_inline_comment(pr_info, comment.path, comment.line, body)
+                        cid = await self._post_inline_comment(
+                            pr_info, comment.path, comment.line, body
+                        )
                         ids.append(cid)
                     except ProviderError:
                         logger.warning(
@@ -430,9 +434,7 @@ class OriginProvider(BaseProvider):
                 return ids
             raise
 
-    async def _post_inline_comment(
-        self, pr_info: PRInfo, path: str, line: int, body: str
-    ) -> int:
+    async def _post_inline_comment(self, pr_info: PRInfo, path: str, line: int, body: str) -> int:
         resp = await self._request(
             "POST",
             f"{self._pr(pr_info)}/comments",
@@ -643,6 +645,9 @@ class OriginProvider(BaseProvider):
             return ""
         for comment in comments:
             thread = comment.get("thread") or {}
-            if str(thread.get("id") or "") == discussion_id or str(comment.get("id") or "") == discussion_id:
+            if (
+                str(thread.get("id") or "") == discussion_id
+                or str(comment.get("id") or "") == discussion_id
+            ):
                 return (comment.get("body") or "")[:1500]
         return ""
