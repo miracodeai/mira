@@ -217,6 +217,9 @@ class GitHubProvider(BaseProvider):
             gh_repo = gh.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
             user = pr.user
+            # mergeable_state is None while GitHub is still computing; leave
+            # empty so callers treat it as unknown rather than a conflict.
+            state = getattr(pr, "mergeable_state", None) or ""
             return PRInfo(
                 title=pr.title or "",
                 description=pr.body or "",
@@ -229,6 +232,7 @@ class GitHubProvider(BaseProvider):
                 head_sha=pr.head.sha or "",
                 author=(user.login or "") if user else "",
                 author_avatar_url=(user.avatar_url or "") if user else "",
+                mergeable_state=state,
             )
 
         try:
