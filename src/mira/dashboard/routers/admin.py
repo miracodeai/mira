@@ -152,14 +152,23 @@ async def register_forgejo_repo(body: ForgejoRepoRegister, request: Request) -> 
 @router.get("/api/settings/models", response_model=ModelsResponse)
 async def get_models() -> ModelsResponse:
     from mira.config import load_config
-    from mira.dashboard.model_catalog import active_backend, build_options, fetch_catalog
+    from mira.dashboard.model_catalog import (
+        active_backend,
+        build_options,
+        fetch_catalog,
+        missing_api_key,
+        subscription_options,
+    )
     from mira.dashboard.models_config import (
         API_STYLES,
         THINKING_MODES,
+        critique_config,
+        ensemble_configs,
         get_indexing_model,
         get_review_model,
         get_review_thinking_mode,
         get_security_model,
+        llm_config_for,
         resolve_api_style,
     )
 
@@ -176,7 +185,14 @@ async def get_models() -> ModelsResponse:
     api_style = resolve_api_style(config.llm, _api._app_db.get_setting("api_style"))
 
     backend = active_backend(config.llm)
-    catalog = await fetch_catalog(config.llm)
+    # Without a key the API models can't run, so list only subscription models.
+    key_missing = missing_api_key(config.llm)
+    catalog = None if key_missing else await fetch_catalog(config.llm)
+    subs = await subscription_options()
+
+    def options(purpose: str) -> list[ModelOption]:
+        api = [] if key_missing else build_options(backend, catalog, purpose)
+        return [ModelOption(**m) for m in api + subs]
 
     return ModelsResponse(
         indexing_model=indexing,
@@ -189,13 +205,21 @@ async def get_models() -> ModelsResponse:
         config_indexing_model=get_indexing_model(config.llm),
         config_review_model=get_review_model(config.llm),
         config_security_model=get_security_model(config.llm),
-        indexing_options=[ModelOption(**m) for m in build_options(backend, catalog, "indexing")],
-        review_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
-        security_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
+        indexing_options=options("indexing"),
+        review_options=options("review"),
+        security_options=options("review"),
         review_thinking_mode=thinking or "off",
         thinking_options=[ModelOption(**m) for m in THINKING_MODES],
         api_style=api_style,
         api_style_options=[ModelOption(**m) for m in API_STYLES],
+        missing_api_key=key_missing,
+        # Effective values (dashboard setting, else mira.yaml) so the form shows what runs.
+        critique_model=getattr(critique_config(config.llm), "model", ""),
+        ensemble_models=[c.model for c in ensemble_configs(config.llm)],
+        **{
+            f"{tier}_fallbacks": llm_config_for(tier, config.llm).fallback_models
+            for tier in ("indexing", "review", "security")
+        },
     )
 
 
@@ -278,24 +302,31 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     # is stored as-is — the dashboard accepts the same free-form model ids as
     # mira.yaml (the dropdown still guides toward registry models), and the
     # registry falls back gracefully for pricing/limits of unknown ids.
-    _api._app_db.set_setting("indexing_model", body.indexing_model.strip())
-    _api._app_db.set_setting("review_model", body.review_model.strip())
-    _api._app_db.set_setting("security_model", body.security_model.strip())
+    settings = {
+        "indexing_model": body.indexing_model.strip(),
+        "review_model": body.review_model.strip(),
+        "security_model": body.security_model.strip(),
+    }
+    for tier in ("indexing", "review", "security"):
+        fallbacks = getattr(body, f"{tier}_fallbacks")
+        if fallbacks is not None:
+            ids = dict.fromkeys(m.strip() for m in fallbacks if m.strip() and "," not in m)
+            settings[f"{tier}_fallback_models"] = ",".join(ids)
+    if body.critique_model is not None:
+        settings["critique_model"] = body.critique_model.strip()
+    if body.ensemble_models is not None:
+        ids = dict.fromkeys(m.strip() for m in body.ensemble_models if m.strip() and "," not in m)
+        settings["ensemble_models"] = ",".join(ids)
     # Clear "off" to "" rather than persisting the literal — "off" is the
     # default, and a stored value would shadow a mira.yaml
     # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
     # reads back as unset so the config fallback chain works.
-    if body.review_thinking_mode and body.review_thinking_mode != "off":
-        _api._app_db.set_setting("review_thinking_mode", body.review_thinking_mode)
-    else:
-        _api._app_db.set_setting("review_thinking_mode", "")
-
+    settings["review_thinking_mode"] = (
+        "" if body.review_thinking_mode in ("", "off") else body.review_thinking_mode
+    )
     # Clear "chat" (default) to "" so a stored value never shadows mira.yaml config overrides.
-    if body.api_style and body.api_style != "chat":
-        _api._app_db.set_setting("api_style", body.api_style)
-    else:
-        _api._app_db.set_setting("api_style", "")
-
+    settings["api_style"] = "" if body.api_style in ("", "chat") else body.api_style
+    _api._app_db.set_settings(settings)
     _api._app_db.mark_setup_complete()
     return {"ok": True}
 
