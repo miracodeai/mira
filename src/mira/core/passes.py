@@ -498,10 +498,15 @@ async def self_critique(
 
     keep_indices: set[int] = set()
     verdict_by_idx: dict[int, dict] = {}
-    for v in verdicts:
+    # The schema asks for verdicts in input order; some models then omit `index`.
+    # Position is only trustworthy when no verdict has an index and none are missing.
+    positional_ok = len(verdicts) == len(comments) and not any(
+        isinstance(v, dict) and "index" in v for v in verdicts
+    )
+    for pos, v in enumerate(verdicts):
         try:
-            idx = int(v.get("index", -1))
-        except (TypeError, ValueError):
+            idx = int(v.get("index", pos if positional_ok else -1))
+        except (AttributeError, TypeError, ValueError):
             continue
         if not 0 <= idx < len(comments):
             continue
