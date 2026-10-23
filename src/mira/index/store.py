@@ -2061,6 +2061,45 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
     return rows[:limit]
 
 
+def rename_repo_index(owner: str, old: str, new: str, platform: str = "github") -> None:
+    """Move a renamed repo's index (and relationship overrides) to its new name.
+
+    Mirrors ``IndexStore.open``: Postgres rows are re-keyed in place, a SQLite
+    store is a per-repo file that gets moved. Never overwrites an existing store.
+    """
+    key_owner = owner if platform == "github" else f"_{platform}/{owner}"
+    index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        from mira.index.pg_store import rename_repo_pg
+
+        rename_repo_pg(db_url, key_owner, old, new)
+    else:
+        src = os.path.join(index_dir, key_owner, f"{old}.db")
+        dst = os.path.join(index_dir, key_owner, f"{new}.db")
+        if os.path.exists(src):
+            if os.path.exists(dst):
+                raise FileExistsError(f"Index store already exists for {owner}/{new}")
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(src + suffix):
+                    os.replace(src + suffix, dst + suffix)
+
+    rel_path = os.path.join(index_dir, "_relationships.db")
+    if os.path.exists(rel_path):
+        old_full, new_full = f"{owner}/{old}", f"{owner}/{new}"
+        conn = sqlite3.connect(rel_path)
+        try:
+            with conn:
+                for table in ("relationship_overrides", "custom_edges"):
+                    for col in ("source_repo", "target_repo"):
+                        conn.execute(
+                            f"UPDATE OR IGNORE {table} SET {col}=? WHERE {col}=?",
+                            (new_full, old_full),
+                        )
+        finally:
+            conn.close()
+
+
 def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = None) -> list[dict]:
     """SQLite equivalent of pg_store.list_learned_rules_org_wide.
 

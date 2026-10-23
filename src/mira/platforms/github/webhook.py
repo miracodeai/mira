@@ -16,7 +16,7 @@ from typing import Any, Protocol
 
 from mira.config import load_config
 from mira.index.indexer import _should_index
-from mira.index.store import IndexStore
+from mira.index.store import IndexStore, rename_repo_index
 from mira.models import PRInfo
 from mira.platforms.base_branch_policy import base_branch_is_filtered_for_repo
 from mira.platforms.command_policy import is_command_allowed
@@ -593,6 +593,9 @@ async def dispatch_github_event(
     if event == "installation_repositories" and action == "removed":
         background_tasks.add_task(handle_repos_removed, payload, app_auth, bot_name)
         return "processing"
+    if event == "repository" and action == "renamed":
+        background_tasks.add_task(handle_repo_renamed, payload, app_auth, bot_name)
+        return "processing"
 
     if event == "push":
         ref = payload.get("ref", "")
@@ -1085,6 +1088,27 @@ async def handle_repos_removed(
             logger.info("Removed repo %s", full_name)
     except Exception:
         logger.exception("Error handling repos_removed")
+
+
+async def handle_repo_renamed(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+) -> None:
+    """Handle repository.renamed — move the repo's stored data to its new name."""
+    repository = payload.get("repository", {})
+    owner = repository.get("owner", {}).get("login", "")
+    new = repository.get("name", "")
+    old = payload.get("changes", {}).get("repository", {}).get("name", {}).get("from", "")
+    if not (owner and old and new) or old == new:
+        return
+    try:
+        # Index first: the registry decides which name the dashboard resolves.
+        rename_repo_index(owner, old, new)
+        _get_app_db().rename_repo(owner, old, new)
+        logger.info("Renamed repo %s/%s -> %s/%s", owner, old, owner, new)
+    except Exception:
+        logger.exception("Error renaming repo %s/%s -> %s", owner, old, new)
 
 
 async def handle_repos_added(
