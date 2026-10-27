@@ -1,4 +1,5 @@
-"""FastAPI webhook server — serves GitHub and/or GitLab plus the dashboard UI.
+"""FastAPI webhook server — serves GitHub, GitLab, Forgejo and/or Bitbucket
+plus the dashboard UI.
 
 Each platform's events are verified and dispatched by its own module
 (``platforms.github.webhook`` / ``platforms.gitlab.webhook``); this file is just
@@ -48,6 +49,8 @@ def create_app(
     gitlab_webhook_secret: str | None = None,
     forgejo_auth: Any = None,
     forgejo_webhook_secret: str | None = None,
+    bitbucket_auth: Any = None,
+    bitbucket_webhook_secret: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI app. GitHub (``app_auth`` + ``webhook_secret``) and
     GitLab (``gitlab_auth`` + ``gitlab_webhook_secret``) routes each activate
@@ -99,6 +102,20 @@ def create_app(
                 )
             )
 
+        # Bitbucket's equivalent: discover the repos the credential can access.
+        bb_task = None
+        if bitbucket_auth is not None:
+            from mira.platforms.bitbucket.webhook import backfill_bitbucket_repos
+
+            bb_task = asyncio.create_task(backfill_bitbucket_repos(bitbucket_auth))
+            bb_task.add_done_callback(
+                lambda t: (
+                    logger.warning("Bitbucket discovery failed: %s", t.exception())
+                    if not t.cancelled() and t.exception()
+                    else None
+                )
+            )
+
         from mira.security.poller import run_forever as run_vuln_poller
 
         vuln_task = asyncio.create_task(run_vuln_poller())
@@ -115,6 +132,8 @@ def create_app(
             backfill_task.cancel()
         if forgejo_auth is not None and not fj_task.done():
             fj_task.cancel()
+        if bb_task is not None and not bb_task.done():
+            bb_task.cancel()
         if not vuln_task.done():
             vuln_task.cancel()
 
@@ -198,6 +217,31 @@ def create_app(
             payload = await request.json()
             status = await dispatch_forgejo_event(
                 event, payload, forgejo_auth, bot_name, background_tasks
+            )
+            return _json_status(status)
+
+    if bitbucket_auth is not None and bitbucket_webhook_secret is not None:
+        from mira.platforms.bitbucket.webhook import (
+            dispatch_bitbucket_event,
+            verify_bitbucket_signature,
+        )
+
+        @app.post("/bitbucket/webhook")
+        async def bitbucket_webhook(
+            request: Request, background_tasks: BackgroundTasks
+        ) -> Response:
+            body = await request.body()
+            signature = request.headers.get("X-Hub-Signature", "")
+            if not verify_bitbucket_signature(signature, body, bitbucket_webhook_secret):
+                return Response(
+                    content='{"error": "invalid signature"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+            event = request.headers.get("X-Event-Key", "")
+            payload = await request.json()
+            status = await dispatch_bitbucket_event(
+                event, payload, bitbucket_auth, bot_name, background_tasks
             )
             return _json_status(status)
 

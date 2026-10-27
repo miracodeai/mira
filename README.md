@@ -34,7 +34,7 @@ Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https
 - **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — and Mira is the fastest tool on the public [Code Review Bench](#benchmark).
 - **Catches PRs stepping on each other** — While reviewing, Mira checks the repo's other open PRs and flags merge-conflict risk and duplicate effort right in the walkthrough.
 - **Indexed, cross-file context** — A full-repo code index gives the model real project context, not just the diff — plus org-wide package search and hourly OSV.dev CVE scanning across every repo.
-- **GitHub, GitLab, and Forgejo** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline, with full feature parity across GitHub, GitLab, and Forgejo (incl. Codeberg). A Bitbucket adapter is next; the engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
+- **GitHub, GitLab, Forgejo, and Bitbucket Cloud** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline across GitHub, GitLab, Forgejo (incl. Codeberg), and Bitbucket Cloud. The engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
 - **Self-host on day one** — Docker image with Railway / Fly.io / Render configs, SQLite or Postgres. Every feature included.
 
 ## Dashboard
@@ -80,7 +80,7 @@ Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.6.
 
 ## Quick Start
 
-Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), and Forgejo/Codeberg (via an access token) are all fully supported; Bitbucket is next.
+Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), Forgejo/Codeberg (via an access token), and Bitbucket Cloud (via an access or API token) are all supported.
 
 **1. Deploy** — one-click on Railway, or with Docker:
 
@@ -108,6 +108,19 @@ docker run -p 8000:8000 --env-file .env \
 ```
 
 **2. Install the app** on your repos — every PR gets reviewed.
+
+**Bitbucket Cloud** — instead of the GitHub App creds, set:
+
+```bash
+# A workspace/project/repository access token (Bearer), or an API token as email:token.
+# Scopes: repository read, pull requests read+write, webhooks read+write.
+MIRA_BITBUCKET_TOKEN=ATCTT3x...
+MIRA_BITBUCKET_WEBHOOK_SECRET=your-secret
+MIRA_BITBUCKET_WORKSPACE=your-workspace   # optional: dashboard repo discovery scope
+MIRA_BITBUCKET_BOT_USER=mira              # optional: bot nickname if the token can't read /user
+```
+
+Then add a workspace (or repository) webhook pointing at `https://<mira-host>/bitbucket/webhook` with the same secret and the triggers *Repository: Push*, *Pull request: Created, Updated, Merged, Comment created*. Bitbucket PRs have no labels, so `@mira pause` state is kept in Mira's database. Comment commands check repository permission through the workspace permissions API, which needs admin rights; otherwise list reviewers in `commands.allowed_users`.
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 

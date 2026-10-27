@@ -26,9 +26,20 @@ class TestResolve:
         assert p["supports"]["installations"] is False
         assert p["terminology"]["pr_short"] == "MR"
 
-    def test_unknown_name_returns_default_with_name(self):
+    def test_bitbucket(self):
         p = profiles.resolve("bitbucket")
         assert p["name"] == "bitbucket"
+        assert p["api_url"] == "https://api.bitbucket.org/2.0"
+        assert p["auth_model"] == "token"
+        assert p["signature"]["scheme"] == "hmac-sha256"
+        assert p["signature"]["header"] == "X-Hub-Signature"
+        assert p["signature"]["prefix"] == "sha256="
+        assert p["event_header"] == "X-Event-Key"
+        assert p["webhook_route"] == "/bitbucket/webhook"
+
+    def test_unknown_name_returns_default_with_name(self):
+        p = profiles.resolve("sourcehut")
+        assert p["name"] == "sourcehut"
         assert p["api_url"] == ""
         assert p["signature"] == {}
 
@@ -38,7 +49,7 @@ class TestGet:
         assert profiles.get("gitlab")["name"] == "gitlab"
 
     def test_missing_returns_none(self):
-        assert profiles.get("bitbucket") is None
+        assert profiles.get("sourcehut") is None
 
 
 class TestEnvSeeding:
