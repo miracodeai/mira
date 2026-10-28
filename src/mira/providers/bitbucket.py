@@ -35,7 +35,13 @@ from mira.models import (
 )
 from mira.platforms import profiles
 from mira.platforms.bitbucket import state
-from mira.platforms.bitbucket.auth import bitbucket_auth_headers, user_handle, user_identifiers
+from mira.platforms.bitbucket.auth import (
+    bitbucket_auth_headers,
+    learned_bot_user,
+    remember_bot_user,
+    user_handle,
+    user_identifiers,
+)
 from mira.providers.base import BaseProvider
 from mira.providers.formatting import format_comment_body, format_key_issues
 
@@ -60,6 +66,65 @@ def parse_pr_url(pr_url: str) -> tuple[str, str, int]:
 
 def _quote_path(path: str) -> str:
     return quote(path, safe="/")
+
+
+# Bitbucket's markdown escapes raw HTML, so Mira's GitHub-flavoured bodies would
+# show `<!-- marker -->` and `<details>` tags as text. Outgoing bodies are
+# rewritten (outside fenced code): HTML comments become link-reference
+# definitions, which render as nothing; <details>/<summary>/<b> become markdown.
+# Incoming bodies map the definitions back, so marker lookups are unchanged.
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+_HTML_COMMENT = re.compile(r"<!--\s*(.*?)\s*-->", re.DOTALL)
+_HIDDEN_REF = re.compile(r"^\[//\]: # \((.*)\)$", re.MULTILINE)
+_SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
+_BOLD = re.compile(r"<(b|strong)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+_DETAILS = re.compile(r"</?details>", re.IGNORECASE)
+_BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+
+def _outside_fences(text: str, transform: Any) -> str:
+    """Apply ``transform`` to the prose segments of ``text``, not fenced code."""
+    out: list[str] = []
+    prose: list[str] = []
+    fence: str | None = None
+    for line in text.split("\n"):
+        m = _FENCE.match(line)
+        if fence is None and m:
+            out.append(transform("\n".join(prose)))
+            prose = []
+            fence = m.group(1)[0] * len(m.group(1))
+            out.append(line)
+        elif fence is not None:
+            out.append(line)
+            if line.strip().startswith(fence) and line.strip().strip(fence[0]) == "":
+                fence = None
+        else:
+            prose.append(line)
+    out.append(transform("\n".join(prose)))
+    return "\n".join(out)
+
+
+def _prose_to_bitbucket(text: str) -> str:
+    text = _HTML_COMMENT.sub(lambda m: f"\n\n[//]: # ({m.group(1).strip()})\n\n", text)
+    text = _BOLD.sub(lambda m: f"**{m.group(2).strip()}**", text)
+    text = _SUMMARY.sub(lambda m: f"\n{_bold(m.group(1).strip())}\n", text)
+    text = _DETAILS.sub("", text)
+    text = _BREAK.sub("\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+def _bold(label: str) -> str:
+    return label if label.startswith("**") else f"**{label}**"
+
+
+def to_bitbucket_markdown(body: str) -> str:
+    """Rewrite a Mira (GitHub-flavoured) body into markdown Bitbucket renders."""
+    return _outside_fences(body, _prose_to_bitbucket).strip()
+
+
+def from_bitbucket_markdown(raw: str) -> str:
+    """Map hidden link-reference markers back to the HTML comments Mira expects."""
+    return _HIDDEN_REF.sub(lambda m: f"<!-- {m.group(1)} -->", raw)
 
 
 class BitbucketProvider(BaseProvider):
@@ -113,16 +178,20 @@ class BitbucketProvider(BaseProvider):
         return out
 
     async def _self_ids(self) -> set[str]:
-        """Every identifier of the token's user — who comments are posted as."""
+        """Every identifier of the token's user — who comments are posted as.
+
+        Access tokens get a 403 from ``GET /user``; their bot user is then the
+        one learned from a previously posted comment.
+        """
         if self._bot_ids is None:
             ids: set[str] = {self._bot_override} if self._bot_override else set()
             try:
                 resp = await self._request("GET", f"{self._api}/user")
                 ids |= user_identifiers(resp.json())
             except Exception as exc:
-                logger.warning("Failed to resolve Bitbucket bot identity: %s", exc)
+                logger.debug("GET /user unavailable for this credential: %s", exc)
             self._bot_ids = ids
-        return self._bot_ids
+        return self._bot_ids | user_identifiers(learned_bot_user())
 
     async def _bot_identities(self, bot_login: str | None) -> set[str]:
         ids = set(await self._self_ids())
@@ -152,7 +221,9 @@ class BitbucketProvider(BaseProvider):
         author = pr.get("author") or {}
         return PRInfo(
             title=pr.get("title") or "",
-            description=pr.get("description") or (pr.get("summary") or {}).get("raw") or "",
+            description=from_bitbucket_markdown(
+                pr.get("description") or (pr.get("summary") or {}).get("raw") or ""
+            ),
             base_branch=(destination.get("branch") or {}).get("name") or "",
             head_branch=(source.get("branch") or {}).get("name") or "",
             url=((pr.get("links") or {}).get("html") or {}).get("href") or pr_url,
@@ -319,9 +390,14 @@ class BitbucketProvider(BaseProvider):
     # ── posting ─────────────────────────────────────────────────────
 
     async def _post_pr_comment(self, pr_info: PRInfo, payload: dict[str, Any]) -> int:
+        raw = (payload.get("content") or {}).get("raw")
+        if raw is not None:
+            payload = {**payload, "content": {"raw": to_bitbucket_markdown(raw)}}
         resp = await self._request("POST", f"{self._pr(pr_info)}/comments", json=payload)
         try:
-            return int((resp.json() or {}).get("id") or 0)
+            data = resp.json() or {}
+            remember_bot_user(data.get("user"))
+            return int(data.get("id") or 0)
         except (TypeError, ValueError):
             return 0
 
@@ -330,8 +406,10 @@ class BitbucketProvider(BaseProvider):
     ) -> list[int]:
         """Post each finding as an inline comment, then the summary as a PR comment.
 
-        Bitbucket rejects an inline anchor outside the diff with a 400; such a
-        finding falls back to a plain PR comment naming the file and line.
+        Bitbucket accepts any anchor line, even one outside the diff, so the
+        engine's unanchorable-comment filter is what keeps findings on real
+        lines. A comment Bitbucket does reject (e.g. a path not in the PR)
+        falls back to a plain PR comment naming the file and line.
         """
         if not result.comments:
             return []
@@ -389,7 +467,15 @@ class BitbucketProvider(BaseProvider):
         await self._post_pr_comment(pr_info, {"content": {"raw": body}})
 
     async def _comments(self, pr_info: PRInfo) -> list[dict[str, Any]]:
-        comments = await self._paginate(f"{self._pr(pr_info)}/comments")
+        # The list view returns a resolved comment's `resolution` as `{}` unless
+        # its fields are requested explicitly.
+        comments = await self._paginate(
+            f"{self._pr(pr_info)}/comments?fields=%2Bvalues.resolution.type"
+        )
+        for c in comments:
+            content = c.get("content")
+            if isinstance(content, dict) and isinstance(content.get("raw"), str):
+                content["raw"] = from_bitbucket_markdown(content["raw"])
         return [c for c in comments if not c.get("deleted")]
 
     async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:
@@ -408,14 +494,15 @@ class BitbucketProvider(BaseProvider):
         await self._request(
             "PUT",
             f"{self._pr(pr_info)}/comments/{comment_id}",
-            json={"content": {"raw": body}},
+            json={"content": {"raw": to_bitbucket_markdown(body)}},
         )
 
     async def get_comment_body(self, pr_info: PRInfo, comment_id: int) -> str:
         """Fetch a comment's raw body by id. Best-effort."""
         try:
             resp = await self._request("GET", f"{self._pr(pr_info)}/comments/{comment_id}")
-            return (((resp.json() or {}).get("content") or {}).get("raw") or "")[:1500]
+            raw = ((resp.json() or {}).get("content") or {}).get("raw") or ""
+            return from_bitbucket_markdown(raw)[:1500]
         except Exception:
             return ""
 
@@ -451,7 +538,8 @@ class BitbucketProvider(BaseProvider):
         for c in comments:
             if c.get("parent") or not c.get("inline"):
                 continue
-            if identities and not self._is_by(c, identities):
+            # Unknown identity matches nothing: never claim (or resolve) a human's thread.
+            if not self._is_by(c, identities):
                 continue
             inline = c.get("inline") or {}
             records.append(
@@ -460,7 +548,7 @@ class BitbucketProvider(BaseProvider):
                     path=inline.get("path") or "",
                     line=self._inline_line(c),
                     body=(c.get("content") or {}).get("raw") or "",
-                    is_resolved=bool(c.get("resolution")),
+                    is_resolved=c.get("resolution") is not None,
                     is_outdated=bool(inline.get("outdated")),
                 )
             )
@@ -543,13 +631,17 @@ class BitbucketProvider(BaseProvider):
 
     async def get_pr_description(self, pr_info: PRInfo) -> str:
         resp = await self._request("GET", self._pr(pr_info))
-        return (resp.json() or {}).get("description") or ""
+        return from_bitbucket_markdown((resp.json() or {}).get("description") or "")
 
     async def update_pr_description(self, pr_info: PRInfo, body: str) -> None:
         # Bitbucket's PUT validates the title, so send it alongside.
         resp = await self._request("GET", self._pr(pr_info))
         title = (resp.json() or {}).get("title") or pr_info.title
-        await self._request("PUT", self._pr(pr_info), json={"title": title, "description": body})
+        await self._request(
+            "PUT",
+            self._pr(pr_info),
+            json={"title": title, "description": to_bitbucket_markdown(body)},
+        )
 
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         state.add_label(pr_info.owner, pr_info.repo, pr_info.number, label)

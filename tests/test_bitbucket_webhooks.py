@@ -53,6 +53,9 @@ async def client(app) -> AsyncClient:  # noqa: ANN001
 @pytest.fixture(autouse=True)
 def pr_state():  # noqa: ANN201
     """In-memory stand-in for the app-db settings table."""
+    from mira.platforms.bitbucket import auth as bb_auth
+
+    bb_auth._learned_user = None
     store: dict[str, str] = {}
 
     class _DB:

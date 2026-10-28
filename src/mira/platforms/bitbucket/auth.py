@@ -12,6 +12,10 @@ username, and mentions in comment markdown are stored as ``@{account_id}``.
 So besides the human-readable handle returned by ``get_bot_identity`` we keep
 every identifier of the bot user, for self-author detection and for turning
 ``@{account_id}`` mentions back into ``@<handle>``.
+
+Access tokens can't call ``GET /user`` (403). Their bot user is learned
+instead from the author of the first comment Mira posts
+(``remember_bot_user``) and persisted, so later self-detection works.
 """
 
 from __future__ import annotations
@@ -46,6 +50,32 @@ def user_handle(user: dict | None) -> str:
 
 
 # ``@{557058:…}`` (account id) or ``@{{…uuid…}}`` (a braced uuid).
+_learned_user: dict | None = None
+
+
+def remember_bot_user(user: dict | None) -> None:
+    """Record the token's bot user, seen as the author of a comment Mira posted."""
+    global _learned_user
+    if not user or not user_identifiers(user) or user == _learned_user:
+        return
+    _learned_user = {
+        k: user[k] for k in ("nickname", "account_id", "uuid", "display_name") if user.get(k)
+    }
+    from mira.platforms.bitbucket import state
+
+    state.save_bot_user(_learned_user)
+
+
+def learned_bot_user() -> dict | None:
+    """The bot user learned from a posted comment (memory, then the app DB)."""
+    global _learned_user
+    if _learned_user is None:
+        from mira.platforms.bitbucket import state
+
+        _learned_user = state.load_bot_user()
+    return _learned_user
+
+
 _ID_MENTION = re.compile(r"@\{(\{[^}\s]+\}|[^}\s]+)\}")
 
 
@@ -89,7 +119,7 @@ class BitbucketTokenAuth:
 
     async def _fetch_user(self) -> dict | None:
         if self._fetched:
-            return self._user
+            return self._user or learned_bot_user()
         self._fetched = True
         try:
             async with httpx.AsyncClient() as client:
@@ -103,7 +133,7 @@ class BitbucketTokenAuth:
                     self._user = data if isinstance(data, dict) else None
         except (httpx.HTTPError, ValueError):
             self._user = None
-        return self._user
+        return self._user or learned_bot_user()
 
     async def get_bot_identity(self) -> str | None:
         """The bot's handle (nickname), via ``GET /user`` (cached)."""

@@ -92,6 +92,27 @@ def _no_bot_override(monkeypatch):
     monkeypatch.delenv("MIRA_BITBUCKET_BOT_USER", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_bitbucket_state():
+    """Keep the learned bot user and PR state in memory, reset per test."""
+    from mira.platforms.bitbucket import auth as bb_auth
+    from mira.platforms.bitbucket import state as bb_state
+
+    store: dict[str, str] = {}
+
+    class _DB:
+        def get_setting(self, key):
+            return store.get(key)
+
+        def set_setting(self, key, value):
+            store[key] = value
+
+    bb_auth._learned_user = None
+    with patch.object(bb_state, "_db", lambda: _DB()):
+        yield store
+    bb_auth._learned_user = None
+
+
 # ── auth helpers ────────────────────────────────────────────────────
 
 
@@ -309,7 +330,7 @@ class TestThreads:
             "content": {"raw": "resolved finding"},
             "user": BOT,
             "inline": {"path": "a.py", "to": 9, "outdated": True},
-            "resolution": {"type": "resolved"},
+            "resolution": {"type": "comment_resolution"},
         },
         {
             "id": 3,
@@ -632,3 +653,127 @@ class TestFetcherTreeCompleteness:
         page = {"values": [], "next": f"{REPO}/src/main/?page=2"}
         with pytest.raises(IncompleteTreeError, match="progress"):
             await self._tree({self.FIRST: _FakeResp(json_data=page)})
+
+
+class TestLearnedIdentity:
+    """Access tokens get 403 from GET /user; the bot user is learned from posts."""
+
+    @staticmethod
+    def _handler(posted_user):
+        def handler(method, url, **kw):
+            if url.endswith("/user"):
+                return _FakeResp(status=403, json_data={"error": {"message": "not accessible"}})
+            if method == "POST":
+                return _FakeResp(status=201, json_data={"id": 77, "user": posted_user})
+            if "/comments?" in url:
+                return _FakeResp(
+                    json_data=_comments_page(
+                        {
+                            "id": 77,
+                            "content": {"raw": "x"},
+                            "user": posted_user,
+                            "inline": {"path": "a.py", "to": 1},
+                        },
+                        {
+                            "id": 78,
+                            "content": {"raw": "y"},
+                            "user": ALICE,
+                            "inline": {"path": "a.py", "to": 2},
+                        },
+                    )
+                )
+            raise AssertionError(url)
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_unknown_identity_matches_no_threads(self):
+        ctx, _ = _patch(self._handler(BOT))
+        with ctx:
+            threads = await BitbucketProvider("tok").get_all_bot_threads(_pr_info())
+        assert threads == []
+
+    @pytest.mark.asyncio
+    async def test_identity_learned_from_post_and_persisted(self, _isolated_bitbucket_state):
+        from mira.platforms.bitbucket import auth as bb_auth
+
+        ctx, _ = _patch(self._handler(BOT))
+        with ctx:
+            provider = BitbucketProvider("tok")
+            await provider.post_comment(_pr_info(), "hello")
+            threads = await provider.get_all_bot_threads(_pr_info())
+        assert [t.thread_id for t in threads] == ["77"]
+        assert "bitbucket:bot_user" in _isolated_bitbucket_state
+
+        # A restart forgets the in-memory copy; the app DB still has it.
+        bb_auth._learned_user = None
+        auth_ctx, _ = _patch(self._handler(BOT), "mira.platforms.bitbucket.auth")
+        with auth_ctx:
+            auth = BitbucketTokenAuth("tok")
+            assert await auth.get_bot_identity() == "mira-bot"
+            assert "557058:bot" in await auth.get_bot_ids()
+
+
+class TestBitbucketMarkdown:
+    """Bitbucket escapes raw HTML; outgoing bodies are rewritten to markdown."""
+
+    def test_html_comment_becomes_hidden_reference_and_round_trips(self):
+        from mira.models import WALKTHROUGH_MARKER
+        from mira.providers.bitbucket import from_bitbucket_markdown, to_bitbucket_markdown
+
+        out = to_bitbucket_markdown(f"{WALKTHROUGH_MARKER}\n## Walkthrough")
+        assert out.startswith("[//]: # (mira-walkthrough)\n\n## Walkthrough")
+        assert "<!--" not in out
+        assert WALKTHROUGH_MARKER in from_bitbucket_markdown(out)
+
+    def test_details_and_bold_become_markdown(self):
+        from mira.providers.bitbucket import to_bitbucket_markdown
+
+        out = to_bitbucket_markdown(
+            "<details>\n<summary><b>Confidence: 2/5</b> &nbsp; x</summary>\n\n- why\n\n</details>"
+            "\n\n<details>\n<summary>Prompt for AI Agents</summary>\n\nbody\n</details>"
+        )
+        assert "<" not in out
+        assert "**Confidence: 2/5** &nbsp; x" in out
+        assert "**Prompt for AI Agents**" in out
+        assert "\n\n\n" not in out
+
+    def test_fenced_code_is_untouched(self):
+        from mira.providers.bitbucket import to_bitbucket_markdown
+
+        code = "```ts\nconst a = '<b>x</b>'; // <!-- keep -->\n\n\n\nend\n```"
+        assert code in to_bitbucket_markdown(f"<b>Title</b>\n\n{code}\n\n<!-- m -->")
+
+    @pytest.mark.asyncio
+    async def test_posted_and_updated_bodies_are_converted(self):
+        sent: list[dict] = []
+
+        def handler(method, url, **kw):
+            sent.append(kw.get("json") or {})
+            return _FakeResp(status=201, json_data={"id": 1, "user": BOT, "title": "T"})
+
+        ctx, _ = _patch(handler)
+        with ctx:
+            provider = BitbucketProvider("tok")
+            await provider.post_comment(_pr_info(), "<!-- m -->\n<b>hi</b>")
+            await provider.update_comment(_pr_info(), 1, "<!-- m -->\nedited")
+            await provider.update_pr_description(_pr_info(), "desc\n<!-- mira-pr-summary-start -->")
+        assert sent[0]["content"]["raw"] == "[//]: # (m)\n\n**hi**"
+        assert sent[1]["content"]["raw"] == "[//]: # (m)\n\nedited"
+        assert sent[3]["description"] == "desc\n\n[//]: # (mira-pr-summary-start)"
+
+    @pytest.mark.asyncio
+    async def test_marker_found_in_converted_comment(self):
+        def handler(method, url, **kw):
+            return _FakeResp(
+                json_data=_comments_page(
+                    {"id": 5, "content": {"raw": "[//]: # (mira-walkthrough)\n\n## Walkthrough"}}
+                )
+            )
+
+        ctx, _ = _patch(handler)
+        with ctx:
+            found = await BitbucketProvider("tok").find_bot_comment(
+                _pr_info(), "<!-- mira-walkthrough -->"
+            )
+        assert found == 5

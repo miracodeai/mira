@@ -74,3 +74,24 @@ def swap_head(owner: str, repo: str, number: int, head: str) -> str:
         except Exception as exc:  # noqa: BLE001 - state is best-effort
             logger.debug("Failed to save Bitbucket PR head: %s", exc)
     return previous
+
+
+_BOT_USER_KEY = "bitbucket:bot_user"
+
+
+def load_bot_user() -> dict[str, Any] | None:
+    """The bot user learned from a posted comment, if one was recorded."""
+    try:
+        raw = _db().get_setting(_BOT_USER_KEY)
+        data = json.loads(raw) if raw else None
+        return data if isinstance(data, dict) else None
+    except Exception as exc:  # noqa: BLE001 - state is best-effort
+        logger.debug("Failed to load Bitbucket bot user: %s", exc)
+        return None
+
+
+def save_bot_user(user: dict[str, Any]) -> None:
+    try:
+        _db().set_setting(_BOT_USER_KEY, json.dumps(user, sort_keys=True))
+    except Exception as exc:  # noqa: BLE001 - state is best-effort
+        logger.debug("Failed to save Bitbucket bot user: %s", exc)
