@@ -360,3 +360,29 @@ class TestCommentHandler:
         assert (kw["comment_path"], kw["comment_line"]) == ("a.py", 12)
         assert kw["original_suggestion"] == "original finding"
         assert kw["platform"] == "bitbucket"
+
+
+@pytest.mark.asyncio
+async def test_failed_review_dispatches_review_failed(bitbucket_auth):
+    """A review that raises is reported to outbound webhooks (review.failed)."""
+    from mira.platforms.bitbucket.webhook import handle_bitbucket_pr
+
+    db = type("DB", (), {"register_repo": lambda self, *a, **k: None})()
+    with (
+        patch("mira.platforms.index_handlers._get_app_db", return_value=db),
+        patch(f"{WEBHOOK}.create_provider"),
+        patch(
+            "mira.platforms.handlers.run_pr_review",
+            new=AsyncMock(side_effect=RuntimeError("model returned nothing")),
+        ),
+        patch("mira.outbound_webhooks.dispatch_event", new=AsyncMock()) as dispatch,
+    ):
+        await handle_bitbucket_pr(_pr_payload("alice"), bitbucket_auth, BOT)
+    dispatch.assert_awaited_once()
+    event, data = dispatch.await_args.args
+    assert event == "review.failed"
+    assert data == {
+        "repo": "acme/widgets",
+        "pr_url": "https://bitbucket.org/acme/widgets/pull-requests/7",
+        "error": "model returned nothing",
+    }

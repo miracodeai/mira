@@ -193,8 +193,14 @@ async def handle_bitbucket_pr(payload: dict[str, Any], auth: PlatformAuth, bot_n
             platform="bitbucket",
             pr_title=pr.get("title", "") or "",
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Error handling Bitbucket PR event for %s/%s#%d", owner, repo_name, number)
+        from mira.outbound_webhooks import REVIEW_FAILED, dispatch_event
+
+        await dispatch_event(
+            REVIEW_FAILED,
+            {"repo": f"{owner}/{repo_name}", "pr_url": _pr_url(payload), "error": str(exc)},
+        )
 
 
 async def handle_bitbucket_merge(
