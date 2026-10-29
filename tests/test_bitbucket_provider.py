@@ -777,3 +777,39 @@ class TestBitbucketMarkdown:
                 _pr_info(), "<!-- mira-walkthrough -->"
             )
         assert found == 5
+
+
+class TestSrcRefForSlashedBranches:
+    """Bitbucket 404s on /src/feature%2Fx/...; the PR branch maps to its head SHA."""
+
+    @pytest.mark.asyncio
+    async def test_pr_branch_uses_head_sha(self):
+        seen: list[str] = []
+
+        def handler(method, url, **kw):
+            seen.append(url)
+            if "max_depth" in url:
+                return _FakeResp(json_data={"values": [{"type": "commit_file", "path": "a.py"}]})
+            return _FakeResp(text="x")
+
+        ctx, _ = _patch(handler)
+        info = _pr_info(head_branch="feature/RND-1-thing", head_sha="abc123")
+        with ctx:
+            provider = BitbucketProvider("tok")
+            assert await provider.get_file_content(info, "src/a.py", "feature/RND-1-thing") == "x"
+            assert await provider.get_repo_tree(info, "feature/RND-1-thing") == ["a.py"]
+        assert seen[0] == f"{REPO}/src/abc123/src/a.py"
+        assert seen[1].startswith(f"{REPO}/src/abc123/?")
+
+    @pytest.mark.asyncio
+    async def test_other_refs_unchanged(self):
+        seen: list[str] = []
+
+        def handler(method, url, **kw):
+            seen.append(url)
+            return _FakeResp(text="x")
+
+        ctx, _ = _patch(handler)
+        with ctx:
+            await BitbucketProvider("tok").get_file_content(_pr_info(), "a.py", "deadbeef")
+        assert seen == [f"{REPO}/src/deadbeef/a.py"]

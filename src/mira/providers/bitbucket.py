@@ -318,8 +318,21 @@ class BitbucketProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to fetch compare diff: {e}") from e
 
+    @staticmethod
+    def _src_ref(pr_info: PRInfo, ref: str) -> str:
+        """The ref to put in a ``/src/{ref}/`` URL.
+
+        Bitbucket can't resolve a branch name containing ``/`` (``feature/x``)
+        in that path segment, encoded or not, so the PR's own branch is
+        replaced by its head commit.
+        """
+        if ref == pr_info.head_branch and pr_info.head_sha:
+            return pr_info.head_sha
+        return ref
+
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Raw file content at a ref — used to verify a thread's fix landed."""
+        ref = self._src_ref(pr_info, ref)
         url = f"{self._repo(pr_info)}/src/{quote(ref, safe='')}/{_quote_path(path)}"
         try:
             resp = await self._request("GET", url, ok=(200, 404))
@@ -330,6 +343,7 @@ class BitbucketProvider(BaseProvider):
 
     async def get_repo_tree(self, pr_info: PRInfo, ref: str) -> list[str]:
         """Every file path in the repo at a ref, for JIT cross-file context."""
+        ref = self._src_ref(pr_info, ref)
         url = f"{self._repo(pr_info)}/src/{quote(ref, safe='')}/?max_depth=100"
         try:
             items = await self._paginate(url)
