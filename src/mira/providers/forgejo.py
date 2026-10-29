@@ -153,6 +153,11 @@ class ForgejoProvider(BaseProvider):
             repo=repo,
             head_sha=(pr.get("head") or {}).get("sha") or "",
             platform="forgejo",
+            mergeable_state=(
+                "dirty"
+                if pr.get("mergeable") is False
+                else ("clean" if pr.get("mergeable") is True else "")
+            ),
         )
 
     async def get_repo_permission(
