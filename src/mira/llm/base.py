@@ -10,7 +10,7 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from mira.config import LLMConfig
-from mira.exceptions import LLMError, NonRetriableLLMError
+from mira.exceptions import LLMError, NonRetriableLLMError, StructuredOutputError
 from mira.llm import provider_profiles as profiles
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 
@@ -48,6 +48,7 @@ class LLMProviderProtocol(Protocol):
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str: ...
 
     async def complete_agentic(
@@ -110,13 +111,19 @@ def _strip_model_prefix(model: str, base_url: str) -> str:
 
 
 def _retriable(exception: BaseException) -> bool:
-    """Return True for transient errors; False for 4xx non-retriable errors."""
-    if isinstance(exception, NonRetriableLLMError):
+    """Return True for transient errors; False for 4xx and semantic failures."""
+    if isinstance(exception, (NonRetriableLLMError, StructuredOutputError)):
         return False
     return isinstance(
         exception,
         (httpx.TimeoutException, httpx.NetworkError, LLMError),
     )
+
+
+def _exception_excerpt(error: BaseException, limit: int = 300) -> str:
+    """Short, single-line error text safe to put in a diagnostic message."""
+    text = " ".join(str(error).split())
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 # ── Shared base for OpenAI-compatible providers ─────────────────────
@@ -268,6 +275,7 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -332,11 +340,22 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
-        """Complete a prompt using tool calling for structured output."""
+        """Complete a prompt using tool calling for structured output.
+
+        ``force_tool`` names the tool to force and switches on strict structured
+        output: a successful response that contains prose instead of that tool
+        call raises ``StructuredOutputError``. Without it the historical text
+        fallback is preserved for callers that tolerate prose.
+        """
         try:
             return await self._call_llm_with_tools(
-                self.config.model, messages, tools, temperature=temperature
+                self.config.model,
+                messages,
+                tools,
+                temperature=temperature,
+                force_tool=force_tool,
             )
         except NonRetriableLLMError:
             raise
@@ -354,14 +373,26 @@ class OpenAICompatibleProvider:
                         messages,
                         tools,
                         temperature=temperature,
+                        force_tool=force_tool,
                     )
                 except Exception as fallback_err:
+                    if isinstance(primary_err, StructuredOutputError) or isinstance(
+                        fallback_err, StructuredOutputError
+                    ):
+                        raise StructuredOutputError(
+                            "structured_output",
+                            model=self.config.fallback_model,
+                            tool=force_tool or "structured tool",
+                            excerpt=_exception_excerpt(fallback_err),
+                        ) from fallback_err
                     raise LLMError(
                         "both_models_failed",
                         primary_model=self.config.model,
                         fallback_model=self.config.fallback_model,
                         error=fallback_err,
                     ) from fallback_err
+            if isinstance(primary_err, StructuredOutputError):
+                raise
             raise LLMError(
                 "tool_call_failed", model=self.config.model, error=primary_err
             ) from primary_err

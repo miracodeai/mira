@@ -49,6 +49,12 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Model output was refused or filtered ({protocol})",
         safe="Model output was refused or filtered",
     ),
+    "structured_output": ErrorMessage(
+        full=(
+            "Model {model} returned prose instead of a `{tool}` call (response excerpt: {excerpt})"
+        ),
+        safe="Model returned prose instead of the required structured tool call",
+    ),
     "no_tools": ErrorMessage(
         full="tools list must not be empty",
         safe="tools list must not be empty",
