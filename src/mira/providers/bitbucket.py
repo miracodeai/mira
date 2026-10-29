@@ -42,7 +42,7 @@ from mira.platforms.bitbucket.auth import (
     user_handle,
     user_identifiers,
 )
-from mira.providers.base import BaseProvider
+from mira.providers.base import CHECK_RUN_NAME, BaseProvider, CheckConclusion
 from mira.providers.formatting import format_comment_body, format_key_issues
 
 logger = logging.getLogger(__name__)
@@ -701,6 +701,61 @@ class BitbucketProvider(BaseProvider):
                 )
             )
         return out
+
+    # ── review status (build status on the head commit) ─────────────
+
+    # Bitbucket shows build statuses on the PR and the commit. Posting again
+    # with the same key overwrites the status, so one key tracks a review.
+    _BUILD_STATUS_KEY = "mira-review"
+    _BUILD_STATES = {"success": "SUCCESSFUL", "failure": "FAILED", "neutral": "SUCCESSFUL"}
+
+    async def _post_build_status(self, pr_info: PRInfo, state: str, description: str) -> None:
+        await self._request(
+            "POST",
+            f"{self._repo(pr_info)}/commit/{quote(pr_info.head_sha, safe='')}/statuses/build",
+            json={
+                "key": self._BUILD_STATUS_KEY,
+                "state": state,
+                "name": f"{CHECK_RUN_NAME} review",
+                "url": pr_info.url,
+                # Bitbucket rejects long descriptions; keep it to one line.
+                "description": description[:255],
+            },
+        )
+
+    async def start_check_run(
+        self,
+        pr_info: PRInfo,
+        *,
+        title: str = "",
+        summary: str = "",
+        details_url: str = "",
+    ) -> int | None:
+        """Mark the PR head commit's ``Mira review`` build status as in progress."""
+        if not pr_info.head_sha or not pr_info.url:
+            return None
+        await self._post_build_status(pr_info, "INPROGRESS", summary or title)
+        return 0
+
+    async def finish_check_run(
+        self,
+        pr_info: PRInfo,
+        run_id: int | None,
+        conclusion: CheckConclusion,
+        *,
+        title: str = "",
+        summary: str = "",
+        details: str = "",
+    ) -> None:
+        """Overwrite the build status with the review's outcome.
+
+        Build statuses have no expandable details area, so ``details`` (review
+        stats) is folded into the one-line description when present.
+        """
+        if run_id is None or not pr_info.head_sha or not pr_info.url:
+            return
+        description = f"{summary} ({details})" if summary and details else summary or details
+        await self._post_build_status(pr_info, self._BUILD_STATES[conclusion], description)
 
     # ── description / labels ────────────────────────────────────────
 

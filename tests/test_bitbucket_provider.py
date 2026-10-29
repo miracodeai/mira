@@ -854,3 +854,77 @@ class TestMermaidOnBitbucket:
 
         code = "```ts\nconst g = 'graph LR';\n```"
         assert code in to_bitbucket_markdown(code)
+
+
+class TestReviewBuildStatus:
+    """Review progress is shown as a Bitbucket build status on the head commit."""
+
+    STATUS_URL = f"{REPO}/commit/abc123/statuses/build"
+
+    def _capture(self):
+        calls: list[tuple[str, str, dict]] = []
+
+        def handler(method, url, **kw):
+            calls.append((method, url, kw.get("json")))
+            return _FakeResp(status=201, json_data={})
+
+        return handler, calls
+
+    @pytest.mark.asyncio
+    async def test_start_posts_in_progress(self):
+        handler, calls = self._capture()
+        ctx, _ = _patch(handler)
+        with ctx:
+            run_id = await BitbucketProvider("tok").start_check_run(
+                _pr_info(), title="Code Review In Progress", summary="Mira is analyzing…"
+            )
+        assert run_id == 0
+        assert calls == [
+            (
+                "POST",
+                self.STATUS_URL,
+                {
+                    "key": "mira-review",
+                    "state": "INPROGRESS",
+                    "name": "Mira review",
+                    "url": "https://bitbucket.org/acme/widgets/pull-requests/7",
+                    "description": "Mira is analyzing…",
+                },
+            )
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("conclusion", "state"),
+        [("success", "SUCCESSFUL"), ("failure", "FAILED"), ("neutral", "SUCCESSFUL")],
+    )
+    async def test_finish_overwrites_same_key(self, conclusion, state):
+        handler, calls = self._capture()
+        ctx, _ = _patch(handler)
+        with ctx:
+            await BitbucketProvider("tok").finish_check_run(
+                _pr_info(), 0, conclusion, summary="Review finished.", details="3 files reviewed"
+            )
+        method, url, body = calls[0]
+        assert (method, url) == ("POST", self.STATUS_URL)
+        assert body["key"] == "mira-review"
+        assert body["state"] == state
+        assert body["description"] == "Review finished. (3 files reviewed)"
+
+    @pytest.mark.asyncio
+    async def test_skips_without_head_sha_or_run(self):
+        handler, calls = self._capture()
+        ctx, _ = _patch(handler)
+        with ctx:
+            provider = BitbucketProvider("tok")
+            assert await provider.start_check_run(_pr_info(head_sha="")) is None
+            await provider.finish_check_run(_pr_info(), None, "success")
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_description_capped(self):
+        handler, calls = self._capture()
+        ctx, _ = _patch(handler)
+        with ctx:
+            await BitbucketProvider("tok").start_check_run(_pr_info(), summary="x" * 400)
+        assert len(calls[0][2]["description"]) == 255
