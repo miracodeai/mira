@@ -117,8 +117,69 @@ def _bold(label: str) -> str:
     return label if label.startswith("**") else f"**{label}**"
 
 
+# Bitbucket has no Mermaid renderer, so a ```mermaid fence would show as raw
+# `graph LR` source. Diagrams arrive already validated and canonicalised by
+# mira.llm.mermaid.harden_mermaid, so they are turned into a short text flow.
+_MERMAID_FENCE = re.compile(r"^```mermaid[ \t]*\n(.*?)\n```[ \t]*$", re.DOTALL | re.MULTILINE)
+_FLOW_NODE = re.compile(
+    r"(?P<id>[A-Za-z_][\w.-]*)\s*(?:\[\[|\[\(|\(\(|\[|\(|\{\{|\{|>)\s*\"?(?P<label>[^\"\]\)\}]*?)\"?\s*(?:\]\]|\)\]|\)\)|\]|\)|\}\}|\})"
+)
+_FLOW_ARROW = re.compile(r"\s*(?:-->|---|-\.->|==>|--\s*[^-]+?\s*-->)(?:\|[^|]*\|)?\s*")
+_SEQ_MSG = re.compile(
+    r"^\s*(?P<a>[^-\s:]+)\s*(?:-->>|-->|->>|->|-\.->)[+-]?(?P<b>[^:\s]+)\s*:\s*(?P<text>.+?)\s*$"
+)
+
+
+def _mermaid_to_text(diagram: str) -> str:
+    """A Bitbucket-readable rendering of a hardened Mermaid diagram ("" if unknown)."""
+    lines = [ln.strip() for ln in diagram.strip().splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    head = lines[0].split()[0].lower()
+    if head in ("graph", "flowchart"):
+        labels: dict[str, str] = {}
+        for ln in lines[1:]:
+            for m in _FLOW_NODE.finditer(ln):
+                if m.group("label"):
+                    labels[m.group("id")] = m.group("label").strip()
+        targets: dict[str, list[str]] = {}
+        for ln in lines[1:]:
+            if ln.startswith(("subgraph", "end", "classDef", "class ", "style ")):
+                continue
+            ids = [
+                _FLOW_NODE.sub(lambda m: m.group("id"), part).strip()
+                for part in _FLOW_ARROW.split(ln)
+            ]
+            for src, dst in zip(ids, ids[1:], strict=False):
+                if src and dst:
+                    targets.setdefault(src, [])
+                    if dst not in targets[src]:
+                        targets[src].append(dst)
+        if not targets:
+            return ""
+
+        def name(node: str) -> str:
+            return f"`{labels.get(node, node)}`"
+
+        rows = [
+            f"- {name(src)} → {', '.join(name(d) for d in dsts)}" for src, dsts in targets.items()
+        ]
+        return "**Flow**\n\n" + "\n".join(rows)
+    if head == "sequencediagram":
+        steps = [m for m in (_SEQ_MSG.match(ln) for ln in lines[1:]) if m]
+        if not steps:
+            return ""
+        rows = [
+            f"{i}. `{m.group('a')}` → `{m.group('b')}`: {m.group('text')}"
+            for i, m in enumerate(steps, 1)
+        ]
+        return "**Sequence**\n\n" + "\n".join(rows)
+    return ""
+
+
 def to_bitbucket_markdown(body: str) -> str:
     """Rewrite a Mira (GitHub-flavoured) body into markdown Bitbucket renders."""
+    body = _MERMAID_FENCE.sub(lambda m: _mermaid_to_text(m.group(1)), body)
     return _outside_fences(body, _prose_to_bitbucket).strip()
 
 

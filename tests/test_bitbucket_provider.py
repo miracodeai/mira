@@ -813,3 +813,44 @@ class TestSrcRefForSlashedBranches:
         with ctx:
             await BitbucketProvider("tok").get_file_content(_pr_info(), "a.py", "deadbeef")
         assert seen == [f"{REPO}/src/deadbeef/a.py"]
+
+
+class TestMermaidOnBitbucket:
+    """Bitbucket can't render Mermaid; diagrams become a readable text flow."""
+
+    FLOW = (
+        "graph LR\n"
+        '  a["src/a.ts"] --> b["src/b.ts"]\n'
+        '  b --> c["src/c.ts"]\n'
+        "  b -->|calls| d\n"
+        '  d["src/d.ts"] --> c'
+    )
+
+    def test_flowchart_becomes_flow_list(self):
+        from mira.providers.bitbucket import to_bitbucket_markdown
+
+        out = to_bitbucket_markdown(f"Intro\n\n```mermaid\n{self.FLOW}\n```\n\nAfter")
+        assert "```" not in out and "graph LR" not in out
+        assert "- `src/a.ts` → `src/b.ts`" in out
+        assert "- `src/b.ts` → `src/c.ts`, `src/d.ts`" in out
+        assert "- `src/d.ts` → `src/c.ts`" in out
+        assert out.startswith("Intro") and out.endswith("After")
+
+    def test_sequence_becomes_numbered_steps(self):
+        from mira.providers.bitbucket import to_bitbucket_markdown
+
+        seq = "sequenceDiagram\n  participant API\n  API->>DB: query\n  DB-->>API: rows"
+        out = to_bitbucket_markdown(f"```mermaid\n{seq}\n```")
+        assert out == "**Sequence**\n\n1. `API` → `DB`: query\n2. `DB` → `API`: rows"
+
+    def test_unrecognised_diagram_is_dropped(self):
+        from mira.providers.bitbucket import to_bitbucket_markdown
+
+        out = to_bitbucket_markdown('x\n\n```mermaid\npie\n  "a": 1\n```\n\ny')
+        assert out == "x\n\ny"
+
+    def test_other_code_fences_untouched(self):
+        from mira.providers.bitbucket import to_bitbucket_markdown
+
+        code = "```ts\nconst g = 'graph LR';\n```"
+        assert code in to_bitbucket_markdown(code)
