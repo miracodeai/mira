@@ -189,6 +189,17 @@ class WalkthroughFileEntry:
 
 
 @dataclass
+class ChunkFailure:
+    """A review chunk that produced no usable structured review."""
+
+    chunk_index: int
+    paths: list[str] = field(default_factory=list)
+    reason: str = ""
+    hops: int | None = None
+    excerpt: str = ""
+
+
+@dataclass
 class WalkthroughResult:
     """Result of the PR walkthrough generation."""
 
@@ -215,6 +226,10 @@ class WalkthroughResult:
         overlaps: list[OverlapFinding] | None = None,
         failure_notice: str | None = None,
         unverified_findings: list[ReviewComment] | None = None,
+        failed_paths: list[str] | None = None,
+        failed_chunks: list[ChunkFailure] | None = None,
+        total_chunks: int = 0,
+        security_failures: list[ChunkFailure] | None = None,
     ) -> str:
         """Render as a markdown PR comment.
 
@@ -223,6 +238,47 @@ class WalkthroughResult:
         """
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
+
+        failure_paths: list[str] = []
+        for path in failed_paths or []:
+            if path and path not in failure_paths:
+                failure_paths.append(path)
+        for failure in failed_chunks or []:
+            for path in failure.paths:
+                if path and path not in failure_paths:
+                    failure_paths.append(path)
+
+        if (failure_paths or failed_chunks) and not in_progress and not failure_notice:
+            failed_count = len(failed_chunks) if failed_chunks else 1
+            total_count = total_chunks or failed_count
+            shown_paths = min(8, len(failure_paths))
+            path_text = ", ".join(f"`{p}`" for p in failure_paths[:shown_paths])
+            if len(failure_paths) > shown_paths:
+                path_text += f" and {len(failure_paths) - shown_paths} more"
+            path_text = path_text or "the affected files"
+            parts.append("")
+            parts.append(
+                f"> ⚠️ **Review incomplete: {failed_count} of {total_count} "
+                f"chunk{'s' if total_count != 1 else ''} failed.** No findings were "
+                f"returned for {path_text}. Comment `@{bot_name} review-rest` to retry."
+            )
+
+        if security_failures and not in_progress and not failure_notice:
+            security_paths: list[str] = []
+            for failure in security_failures:
+                for path in failure.paths:
+                    if path and path not in security_paths:
+                        security_paths.append(path)
+            shown_security = min(6, len(security_paths))
+            path_text = ", ".join(f"`{p}`" for p in security_paths[:shown_security])
+            if len(security_paths) > shown_security:
+                path_text += f" and {len(security_paths) - shown_security} more"
+            suffix = f" for {path_text}" if path_text else ""
+            parts.append("")
+            parts.append(
+                "> ⚠️ **Security review incomplete:** the security pass failed"
+                f"{suffix}. Security findings may be missing from this review."
+            )
 
         if self.sequence_diagram:
             # Hardening at render time — the single choke point every
@@ -426,6 +482,14 @@ class ReviewResult:
     reviewed_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
     total_paths: list[str] = field(default_factory=list)
+    # Chunks that produced no usable structured review. Kept separate from
+    # size-skipped paths so the walkthrough can say "incomplete" rather than
+    # "large PR"; both are retryable through review-rest.
+    failed_chunks: list[ChunkFailure] = field(default_factory=list)
+    failed_paths: list[str] = field(default_factory=list)
+    total_chunks: int = 0
+    security_failures: list[ChunkFailure] = field(default_factory=list)
+    dependency_failures: list[ChunkFailure] = field(default_factory=list)
     # Diagnostic trail: per-chunk draft counts and every comment dropped by a
     # filter/critique stage, so a benchmark run can show whether a missed
     # finding was never drafted or drafted-then-dropped. Not posted anywhere.
