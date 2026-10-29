@@ -759,9 +759,11 @@ dev = [
     { name = "types-pyyaml" },
 ]
 serve = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "ruff" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -770,6 +772,7 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.35" },
     { name = "click", specifier = ">=8.1" },
     { name = "cryptography", marker = "extra == 'dev'", specifier = ">=42.0" },
+    { name = "cryptography", marker = "extra == 'serve'", specifier = ">=42.0" },
     { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1" },
@@ -785,6 +788,7 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "ruff", marker = "extra == 'serve'", specifier = ">=0.4" },
     { name = "tenacity", specifier = ">=8.2" },
     { name = "tiktoken", specifier = ">=0.6" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
