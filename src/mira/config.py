@@ -6,7 +6,7 @@ import ipaddress
 import logging
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -15,6 +15,10 @@ from pydantic import BaseModel, Field, field_validator
 from mira.exceptions import ConfigError
 
 logger = logging.getLogger(__name__)
+
+IndexingTemperature = (
+    Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)] | Literal["omit"]
+)
 
 # `.mira.yaml` is the canonical per-repo override filename. `.mira.yaml`
 # is accepted for backward compat with repos that committed it before the
@@ -52,6 +56,7 @@ class LLMConfig(BaseModel):
     review_reasoning_effort: str | None = None
     reasoning_effort: str | None = None
     temperature: float = 0.2
+    indexing_temperature: IndexingTemperature = 0.0
     max_tokens: int = 4096
     max_context_tokens: int = 120_000
     # Provider selection. "openai" uses any OpenAI-compatible endpoint (default).

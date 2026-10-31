@@ -329,8 +329,12 @@ class BedrockProvider:
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         """Complete a prompt. Uses tool calling to enforce JSON when json_mode=True."""
+        if omit_temperature:
+            raise ValueError("Temperature omission requires an OpenAI-compatible HTTP provider")
         if json_mode:
             # Force structured JSON output via tool use
             tool_config = {

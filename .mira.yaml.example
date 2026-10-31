@@ -10,6 +10,10 @@ llm:
   # Fallback model if primary fails
   fallback_model: "openai/gpt-4o-mini"
   temperature: 0.2
+  # Code-index summaries over Chat/Responses only: 0.0 (default), omit, or a
+  # finite nonnegative number supported by your endpoint. Reviewer defaults
+  # and requested reasoning effort stay unchanged. Dashboard overrides win.
+  # indexing_temperature: 0.0
   max_tokens: 4096
 
   # ── AWS Bedrock configuration (uncomment to use) ──

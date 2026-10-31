@@ -50,6 +50,8 @@ class LLMProvider(OpenAICompatibleProvider):
         json_mode: bool,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         """Make a single LLM call with retries against the /chat/completions endpoint.
 
@@ -71,6 +73,8 @@ class LLMProvider(OpenAICompatibleProvider):
             body["response_format"] = {"type": "json_object"}
             # Copied container — caller-owned ``messages`` stay untouched.
             body["messages"] = _ensure_json_hint(messages)
+        if omit_temperature:
+            body.pop("temperature", None)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body)
 

@@ -41,6 +41,8 @@ class LLMProviderProtocol(Protocol):
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str: ...
 
     async def complete_with_tools(
@@ -281,6 +283,8 @@ class OpenAICompatibleProvider:
         json_mode: bool,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         raise NotImplementedError
 
@@ -311,6 +315,8 @@ class OpenAICompatibleProvider:
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         """Complete a prompt using JSON mode, with fallback model support."""
         try:
@@ -320,6 +326,7 @@ class OpenAICompatibleProvider:
                 json_mode,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                omit_temperature=omit_temperature,
             )
         except NonRetriableLLMError:
             raise
@@ -338,6 +345,7 @@ class OpenAICompatibleProvider:
                         json_mode,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        omit_temperature=omit_temperature,
                     )
                 except Exception as fallback_err:
                     raise LLMError(

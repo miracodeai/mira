@@ -290,6 +290,15 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
     )
 
 
+def _indexing_temperature_kwargs(llm: Any) -> dict[str, Any]:
+    config = llm.config
+    if config.provider in {"bedrock", "codex-cli", "codex_cli", "codex"}:
+        return {"temperature": 0.0}
+    if config.indexing_temperature == "omit":
+        return {"omit_temperature": True}
+    return {"temperature": config.indexing_temperature}
+
+
 async def _summarize_batch(
     files: list[tuple[str, str]],  # (path, content)
     llm: Any,
@@ -322,7 +331,7 @@ async def _summarize_batch(
             raw = await llm.complete(
                 messages,
                 json_mode=True,
-                temperature=0.0,
+                **_indexing_temperature_kwargs(llm),
                 max_tokens=cap,
             )
         except Exception as exc:
@@ -767,7 +776,7 @@ async def _summarize_directories(store: IndexStore, llm: Any, semaphore: asyncio
                 raw = await llm.complete(
                     messages,
                     json_mode=True,
-                    temperature=0.0,
+                    **_indexing_temperature_kwargs(llm),
                     max_tokens=4096,
                 )
                 data = json.loads(strip_think_blocks(_strip_code_fences(raw)))
@@ -981,7 +990,9 @@ async def _summarize_directories_selective(
 
         async with semaphore:
             try:
-                raw = await llm.complete(messages, json_mode=True, temperature=0.0)
+                raw = await llm.complete(
+                    messages, json_mode=True, **_indexing_temperature_kwargs(llm)
+                )
                 data = json.loads(strip_think_blocks(_strip_code_fences(raw)))
                 summary_text = data.get("summary", "")
                 if summary_text:
