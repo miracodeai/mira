@@ -409,11 +409,11 @@ async def index_repo(
         contents: list[str | None] = [tarball.get(p) for p in indexable]
     else:
         logger.info("Tarball unavailable, falling back to per-file fetch")
-        tasks = [
+        fetch_tasks = [
             fetcher.file_content(owner, repo, path, branch, semaphore=fetch_sem)
             for path in indexable
         ]
-        contents = await asyncio.gather(*tasks)
+        contents = await asyncio.gather(*fetch_tasks)
 
     # Filter out failed fetches and compute hashes for staleness check
     file_pairs: list[tuple[str, str]] = []
@@ -478,13 +478,15 @@ async def index_repo(
     # completions.
     llm_sem = asyncio.Semaphore(config.index.llm_concurrency)
     batches = _build_batches(file_pairs)
-    tasks = [asyncio.create_task(_summarize_batch(batch, llm, llm_sem)) for batch in batches]
+    summary_tasks = [
+        asyncio.create_task(_summarize_batch(batch, llm, llm_sem)) for batch in batches
+    ]
 
     indexed_count = len(trivial_pairs)
     try:
-        for fut in asyncio.as_completed(tasks):
+        for fut in asyncio.as_completed(summary_tasks):
             if cancel_check and cancel_check():
-                for t in tasks:
+                for t in summary_tasks:
                     if not t.done():
                         t.cancel()
                 logger.info(
