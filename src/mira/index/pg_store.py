@@ -320,7 +320,7 @@ def _registry_owner(storage_owner: str) -> str:
     use the clean owner to resolve the repository and ``IndexStore.open`` adds
     the storage prefix again after determining its platform.
     """
-    for platform in ("gitlab", "forgejo"):
+    for platform in ("gitlab", "forgejo", "bitbucket"):
         prefix = f"_{platform}/"
         if storage_owner.startswith(prefix):
             return storage_owner[len(prefix) :]

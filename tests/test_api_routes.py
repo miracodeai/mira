@@ -32,6 +32,8 @@ EXPECTED_ROUTES = {
     ("/api/gitlab/sync", "POST"),
     ("/api/forgejo/repos", "POST"),
     ("/api/forgejo/sync", "POST"),
+    ("/api/bitbucket/repos", "POST"),
+    ("/api/bitbucket/sync", "POST"),
     ("/api/indexing/estimate", "GET"),
     ("/api/indexing/status", "GET"),
     ("/api/learned-rules", "GET"),

@@ -210,7 +210,9 @@ def review(
                 "--token (or --github-token / GITHUB_TOKEN / MIRA_GIT_TOKEN) is required for PR review"
             )
         # Infer the platform from the URL shape; fall back to the configured default.
-        if "/-/merge_requests/" in pr_url or "gitlab" in pr_url:
+        if "/pull-requests/" in pr_url or "bitbucket" in pr_url:
+            provider_type = "bitbucket"
+        elif "/-/merge_requests/" in pr_url or "gitlab" in pr_url:
             provider_type = "gitlab"
         elif "/pulls/" in pr_url or "forgejo" in pr_url:
             provider_type = "forgejo"
@@ -314,6 +316,27 @@ def review(
     help="Forgejo API base, e.g. https://forgejo.example.com/api/v1",
 )
 @click.option(
+    "--bitbucket-token",
+    envvar="MIRA_BITBUCKET_TOKEN",
+    default=None,
+    help=(
+        "Bitbucket Cloud credential (enables the Bitbucket webhook route): a workspace/"
+        "project/repository access token, or an API token given as email:token"
+    ),
+)
+@click.option(
+    "--bitbucket-webhook-secret",
+    envvar="MIRA_BITBUCKET_WEBHOOK_SECRET",
+    default=None,
+    help="Secret set on the Bitbucket webhook (verifies the X-Hub-Signature header)",
+)
+@click.option(
+    "--bitbucket-bot-user",
+    envvar="MIRA_BITBUCKET_BOT_USER",
+    default=None,
+    help="The bot's Bitbucket nickname, when the credential can't read GET /user",
+)
+@click.option(
     "--bot-name",
     envvar="MIRA_BOT_NAME",
     default=None,
@@ -343,17 +366,21 @@ def serve(
     forgejo_token: str | None,
     forgejo_webhook_secret: str | None,
     forgejo_base_url: str | None,
+    bitbucket_token: str | None,
+    bitbucket_webhook_secret: str | None,
+    bitbucket_bot_user: str | None,
     bot_name: str | None,
     config_path: str | None,
     verbose: bool,
 ) -> None:
-    """Run the Mira webhook server for GitHub, GitLab, and/or Forgejo."""
+    """Run the Mira webhook server for GitHub, GitLab, Forgejo, and/or Bitbucket."""
     try:
         import asyncio
 
         import uvicorn
 
         from mira.config import set_global_defaults
+        from mira.platforms.bitbucket.auth import BitbucketTokenAuth
         from mira.platforms.forgejo.auth import ForgejoTokenAuth
         from mira.platforms.github.auth import GitHubAppAuth
         from mira.platforms.gitlab.auth import GitLabTokenAuth
@@ -379,15 +406,19 @@ def serve(
     github_configured = bool(app_id and private_key and webhook_secret)
     gitlab_configured = bool(gitlab_token and gitlab_webhook_secret)
     forgejo_configured = bool(forgejo_token and forgejo_webhook_secret)
-    if not github_configured and not gitlab_configured and not forgejo_configured:
+    bitbucket_configured = bool(bitbucket_token and bitbucket_webhook_secret)
+    if not (github_configured or gitlab_configured or forgejo_configured or bitbucket_configured):
         raise click.ClickException(
             "No platform configured. Provide GitHub App creds (--app-id, --private-key, "
-            "--webhook-secret) and/or GitLab creds (--gitlab-token, --gitlab-webhook-secret)."
+            "--webhook-secret), GitLab creds (--gitlab-token, --gitlab-webhook-secret), "
+            "Forgejo creds (--forgejo-token, --forgejo-webhook-secret) and/or Bitbucket "
+            "creds (--bitbucket-token, --bitbucket-webhook-secret)."
         )
 
     app_auth = None
     gitlab_auth = None
     forgejo_auth = None
+    bitbucket_auth = None
 
     if github_configured:
         assert private_key is not None
@@ -411,12 +442,26 @@ def serve(
             forgejo_token, forgejo_base_url or "https://codeberg.org/api/v1"
         )
 
+    if bitbucket_configured:
+        assert bitbucket_token is not None
+        from mira.platforms import profiles
+
+        bitbucket_auth = BitbucketTokenAuth(
+            bitbucket_token,
+            profiles.resolve("bitbucket")["api_url"] or "https://api.bitbucket.org/2.0",
+            bot_identity=bitbucket_bot_user,
+        )
+
     # Auto-detect the bot @mention from whichever platform's own identity when
     # the user didn't override it. Falls back to "miracodeai" on a lookup blip.
     if not bot_name:
-        identity_auth = app_auth or gitlab_auth or forgejo_auth
+        identity_auth = app_auth or gitlab_auth or forgejo_auth or bitbucket_auth
         if identity_auth is not None:
             bot_name = asyncio.run(identity_auth.get_bot_identity()) or "miracodeai"
+            # Bitbucket nicknames may contain characters the server rejects.
+            if not all(c.isascii() and (c.isalnum() or c in "_-") for c in bot_name):
+                click.echo(f"Detected bot identity {bot_name!r} is not a valid @mention name")
+                bot_name = "miracodeai"
             click.echo(f"Detected bot @mention: @{bot_name}")
         else:
             bot_name = "miracodeai"
@@ -437,6 +482,8 @@ def serve(
         gitlab_webhook_secret=gitlab_webhook_secret,
         forgejo_auth=forgejo_auth,
         forgejo_webhook_secret=forgejo_webhook_secret,
+        bitbucket_auth=bitbucket_auth,
+        bitbucket_webhook_secret=bitbucket_webhook_secret,
     )
 
     platforms = ", ".join(
@@ -445,6 +492,7 @@ def serve(
             ("GitHub", github_configured),
             ("GitLab", gitlab_configured),
             ("Forgejo", forgejo_configured),
+            ("Bitbucket", bitbucket_configured),
         ]
         if on
     )

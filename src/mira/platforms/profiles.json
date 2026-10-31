@@ -1,7 +1,7 @@
 {
   "_comment": "Code-hosting platform profiles. A profile is pure wire data describing how to talk to a platform — API base url, webhook route + signature scheme, event header, and which platform concepts it supports. Behaviour lives in the BaseProvider subclass (mira.providers) and the PlatformAuth/RepoFetcher implementations; this file just removes the per-platform branching. Adding an OpenAI-style git platform is a one-line entry. Resolved by name (e.g. 'github', 'gitlab').",
   "_fields": {
-    "api_url": "REST API base. For GitHub Enterprise / self-managed GitLab, override via MIRA_GITHUB_API_URL / MIRA_GITLAB_API_URL.",
+    "api_url": "REST API base. For GitHub Enterprise / self-managed GitLab, override via MIRA_GITHUB_API_URL / MIRA_GITLAB_API_URL (MIRA_FORGEJO_API_URL, MIRA_BITBUCKET_API_URL likewise).",
     "graphql_url": "GraphQL endpoint (GitHub only).",
     "webhook_route": "FastAPI path this platform's webhooks POST to.",
     "auth_model": "'app' (mints per-installation tokens) or 'token' (static access token).",
@@ -38,6 +38,16 @@
     "auth_model": "token",
     "signature": { "scheme": "hmac-sha256", "header": "X-Forgejo-Signature" },
     "event_header": "X-Forgejo-Event",
+    "terminology": { "pr_short": "PR", "pr": "pull request" },
+    "supports": { "installations": false, "token_minting": false }
+  },
+  "bitbucket": {
+    "api_url": "https://api.bitbucket.org/2.0",
+    "graphql_url": null,
+    "webhook_route": "/bitbucket/webhook",
+    "auth_model": "token",
+    "signature": { "scheme": "hmac-sha256", "header": "X-Hub-Signature", "prefix": "sha256=" },
+    "event_header": "X-Event-Key",
     "terminology": { "pr_short": "PR", "pr": "pull request" },
     "supports": { "installations": false, "token_minting": false }
   }
