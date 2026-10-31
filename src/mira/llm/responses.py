@@ -227,9 +227,9 @@ class ResponsesProvider(OpenAICompatibleProvider):
         if json_mode:
             body["text"] = {"format": {"type": "json_object"}}
             body["input"] = _ensure_json_hint(body["input"])
+        self._apply_reasoning(body, protocol="responses")
         if omit_temperature:
             body.pop("temperature", None)
-        self._apply_reasoning(body, protocol="responses")
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(

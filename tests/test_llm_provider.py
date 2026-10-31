@@ -81,6 +81,86 @@ class TestLLMProviderInit:
 class TestPerCallTemperatureOmission:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("api_style", ["chat", "responses"])
+    @pytest.mark.parametrize("effort", [None, "off", "low"])
+    async def test_profile_cannot_reinsert_explicitly_omitted_temperature(
+        self, tmp_path, monkeypatch, api_style, effort
+    ):
+        from mira.llm import provider_profiles
+
+        off_payload = (
+            {"thinking": {"type": "disabled"}}
+            if api_style == "chat"
+            else {"reasoning": {"effort": "none"}}
+        )
+        off_key = (
+            "reasoning_off_payload" if api_style == "chat" else "reasoning_off_payload_responses"
+        )
+        profile_path = tmp_path / "providers.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "fixture": {
+                        "base_url": "https://fixture.invalid/v1",
+                        off_key: {**off_payload, "temperature": 0.7},
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv("MIRA_PROVIDERS_JSON_PATH", str(profile_path))
+        seen = []
+
+        def respond(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "ok"}],
+                        }
+                    ],
+                },
+            )
+
+        client_class = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kw: client_class(transport=httpx.MockTransport(respond), **kw),
+        )
+        provider_profiles._load.cache_clear()
+        try:
+            config = LLMConfig(
+                model="test-model",
+                base_url="https://fixture.invalid/v1",
+                api_key_env="",
+                api_style=api_style,
+                reasoning_effort=effort,
+            )
+            provider = create_llm(config)
+            await provider.complete([{"role": "user", "content": "Hello"}], omit_temperature=True)
+            await provider.complete([{"role": "user", "content": "Hello"}], temperature=0.3)
+            assert "temperature" not in seen[0]
+            if effort == "low":
+                assert all("temperature" not in body for body in seen)
+                for body in seen:
+                    assert (
+                        body.get("reasoning_effort") == "low"
+                        if api_style == "chat"
+                        else body.get("reasoning") == {"effort": "low"}
+                    )
+            else:
+                assert all(all(body.get(k) == v for k, v in off_payload.items()) for body in seen)
+                assert seen[1]["temperature"] == 0.7
+            assert config.reasoning_effort == effort
+        finally:
+            provider_profiles._load.cache_clear()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_style", ["chat", "responses"])
     @pytest.mark.parametrize("effort", [None, "low"])
     async def test_omission_does_not_leak_into_other_calls_or_change_effort(
         self, monkeypatch, api_style, effort

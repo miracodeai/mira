@@ -73,10 +73,10 @@ class LLMProvider(OpenAICompatibleProvider):
             body["response_format"] = {"type": "json_object"}
             # Copied container — caller-owned ``messages`` stay untouched.
             body["messages"] = _ensure_json_hint(messages)
-        if omit_temperature:
-            body.pop("temperature", None)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body)
+        if omit_temperature:
+            body.pop("temperature", None)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
