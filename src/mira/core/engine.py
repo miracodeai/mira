@@ -6,6 +6,7 @@ import contextlib
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,7 +31,7 @@ from mira.core.passes import (
 )
 from mira.core.priority import rank_files
 from mira.core.threads import resolve_verified_threads, short_thread_description
-from mira.exceptions import MiraError, ResponseParseError
+from mira.exceptions import MiraError, ResponseParseError, StructuredOutputError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
@@ -48,6 +49,7 @@ from mira.models import (
     PR_SUMMARY_END,
     PR_SUMMARY_START,
     WALKTHROUGH_MARKER,
+    ChunkFailure,
     FileChangeType,
     KeyIssue,
     OverlapFinding,
@@ -87,6 +89,44 @@ def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> No
     """Record comments present before a stage but gone after it (identity-based)."""
     kept = {id(c) for c in after}
     audit.extend(_audit_drop(c, stage) for c in before if id(c) not in kept)
+
+
+def _response_excerpt(text: object, limit: int = 300) -> str:
+    """Short single-line excerpt for diagnostics; never logs full reasoning."""
+    value = text if isinstance(text, str) else str(text or "")
+    excerpt = " ".join(value.split())
+    return excerpt[:limit] + ("…" if len(excerpt) > limit else "")
+
+
+@dataclass
+class _ChunkOutcome:
+    comments: list[ReviewComment] = field(default_factory=list)
+    key_issues: list[KeyIssue] = field(default_factory=list)
+    summary: str = ""
+    failure: ChunkFailure | None = None
+
+
+def _incomplete_summary(
+    failures: list[ChunkFailure],
+    total_chunks: int,
+    original_summary: str,
+) -> str:
+    """Prefix the review summary with an explicit incomplete notice."""
+    if failures and len(failures) >= total_chunks:
+        lead = (
+            f"Review incomplete: all {total_chunks} chunks failed. "
+            "No findings were returned for this PR."
+        )
+    else:
+        lead = (
+            f"Review incomplete: {len(failures)} of {total_chunks} chunks failed. "
+            "No findings were returned for those files."
+        )
+    lead += " Comment `review-rest` to retry the failed files."
+    original = (original_summary or "").strip()
+    if original and "no issues found" not in original.lower():
+        return f"{lead}\n\n{original}"
+    return lead
 
 
 def compose_pr_description(current_body: str, summary_block: str, mode: str) -> str:
@@ -550,6 +590,25 @@ class ReviewEngine:
             f"**Message:** {message}"
         )
 
+    @staticmethod
+    def _format_chunk_failure_notice(failures: list[ChunkFailure]) -> str:
+        """User-safe notice for a review where every chunk failed."""
+        paths = sorted({path for failure in failures for path in failure.paths if path})
+        shown = paths[:8]
+        path_note = ", ".join(f"`{p}`" for p in shown)
+        if len(paths) > len(shown):
+            path_note += f" and {len(paths) - len(shown)} more"
+        reasons = sorted({failure.reason for failure in failures if failure.reason})
+        return (
+            f"The code review could not complete for any reviewed chunk. "
+            f"No findings were returned.\n\n"
+            f"**Stage:** Code review\n"
+            f"**Failed chunks:** {len(failures)}\n"
+            f"**Files:** {path_note or 'all selected files'}\n"
+            f"**Reason:** {', '.join(reasons) or 'structured output failed'}\n\n"
+            "Comment `review-rest` to retry the failed files."
+        )
+
     async def _detect_overlaps_safe(
         self,
         pr_info: PRInfo,
@@ -971,6 +1030,11 @@ class ReviewEngine:
 
                     import os as _os
 
+                    all_chunks_failed = bool(
+                        result.failed_chunks
+                        and result.total_chunks
+                        and len(result.failed_chunks) >= result.total_chunks
+                    )
                     markdown = result.walkthrough.to_markdown(
                         bot_name=self.bot_name,
                         review_stats=stats,
@@ -985,6 +1049,15 @@ class ReviewEngine:
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
                         overlaps=overlaps or None,
                         unverified_findings=unverified or None,
+                        failed_paths=result.failed_paths or None,
+                        failed_chunks=result.failed_chunks or None,
+                        total_chunks=result.total_chunks,
+                        security_failures=result.security_failures or None,
+                        failure_notice=(
+                            self._format_chunk_failure_notice(result.failed_chunks)
+                            if all_chunks_failed
+                            else None
+                        ),
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -1001,8 +1074,22 @@ class ReviewEngine:
             # No walkthrough (all files excluded, empty diff, or generation
             # failed) — finalize the placeholder so it doesn't sit on
             # "Reviewing this PR…" forever.
-            reason = result.skipped_reason or "Walkthrough was not generated."
-            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+            all_chunks_failed = bool(
+                result.failed_chunks
+                and result.total_chunks
+                and len(result.failed_chunks) >= result.total_chunks
+            )
+            if all_chunks_failed:
+                markdown = (
+                    f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n---\n\n"
+                    "<details>\n"
+                    "<summary><b>❌ Review failed</b> — click for details</summary>\n\n"
+                    f"{self._format_chunk_failure_notice(result.failed_chunks)}\n\n"
+                    "</details>\n"
+                )
+            else:
+                reason = result.skipped_reason or "Walkthrough was not generated."
+                markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
             try:
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
             except Exception as exc:
@@ -1045,6 +1132,14 @@ class ReviewEngine:
                 posted_comment_ids = (
                     await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
                 )
+        elif result.failed_chunks:
+            logger.warning(
+                "Review incomplete for PR %s: %d of %d chunk(s) failed; "
+                "no code suggestions were produced",
+                pr_info.url,
+                len(result.failed_chunks),
+                result.total_chunks,
+            )
         else:
             logger.info("No code suggestions for PR %s", pr_info.url)
 
@@ -1126,8 +1221,12 @@ class ReviewEngine:
                 )
                 prior_reviewed = set(prior.reviewed_paths) if prior else set()
                 prior_skipped = set(prior.skipped_paths) if prior else set()
-                new_reviewed = prior_reviewed | set(result.reviewed_paths)
-                new_skipped = (prior_skipped | set(result.skipped_paths)) - new_reviewed
+                failed_paths = set(result.failed_paths)
+                new_reviewed = (prior_reviewed | set(result.reviewed_paths)) - failed_paths
+                # Failed paths are retryable exactly like size-skipped paths.
+                new_skipped = (
+                    prior_skipped | set(result.skipped_paths) | failed_paths
+                ) - new_reviewed
                 _app_db.upsert_pr_review_progress(
                     PRReviewProgress(
                         owner=pr_info.owner,
@@ -1458,10 +1557,39 @@ class ReviewEngine:
         audit: list[dict] = []
         held_back: list[ReviewComment] = []
 
+        def _chunk_failure(
+            idx: int,
+            chunk: ReviewChunk,
+            reason: str,
+            *,
+            hops: int | None = None,
+            excerpt: str = "",
+        ) -> ChunkFailure:
+            failure = ChunkFailure(
+                chunk_index=idx,
+                paths=[f.path for f in chunk.files],
+                reason=reason,
+                hops=hops,
+                excerpt=_response_excerpt(excerpt),
+            )
+            audit.append(
+                {
+                    "stage": "chunk_failed",
+                    "chunk": idx,
+                    "paths": failure.paths,
+                    "reason": failure.reason,
+                    "hops": failure.hops,
+                    "excerpt": failure.excerpt,
+                }
+            )
+            return failure
+
         async def _review_chunk(
             idx: int,
             chunk: ReviewChunk,
-        ) -> tuple[list[ReviewComment], list[KeyIssue], str]:
+        ) -> _ChunkOutcome:
+            raw_response = ""
+            hops: int | None = None
             async with semaphore:
                 logger.info(
                     "Reviewing chunk %d/%d (%d files)",
@@ -1503,7 +1631,6 @@ class ReviewEngine:
                             parsed.summary or "",
                         )
 
-                    raw_response = ""
                     use_agentic = (
                         self.config.review.agentic_tools
                         and self._agentic_source_fetcher is not None
@@ -1515,11 +1642,67 @@ class ReviewEngine:
                             source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
                             repo_tree=list(self._agentic_repo_tree),
                         )
-                        raw_response = await agentic_review_loop(self.llm, messages, executor)
-                        audit.append({"stage": "agentic", "chunk": idx, "calls": executor.call_log})
-                    if not raw_response:
+                        loop_result = await agentic_review_loop(self.llm, messages, executor)
+                        if isinstance(loop_result, str):
+                            raw_response = loop_result
+                        else:
+                            raw_response = loop_result.raw_arguments
+                            hops = loop_result.hops or None
+                            audit.append(
+                                {
+                                    "stage": "agentic",
+                                    "chunk": idx,
+                                    "calls": executor.call_log,
+                                    "hops": loop_result.hops,
+                                    "hit_hop_cap": loop_result.hit_hop_cap,
+                                    "failed": bool(loop_result.error),
+                                }
+                            )
+                            if not raw_response and loop_result.error:
+                                logger.warning(
+                                    "Chunk %d/%d agentic review failed: %s",
+                                    idx + 1,
+                                    len(chunks),
+                                    loop_result.error,
+                                )
+                    else:
                         raw_response = await self.llm.review(messages)
-                    comments, key_issues, summary_text = _parse(raw_response)
+
+                    if not raw_response:
+                        logger.warning(
+                            "Chunk %d/%d produced no structured review",
+                            idx + 1,
+                            len(chunks),
+                        )
+                        return _ChunkOutcome(
+                            failure=_chunk_failure(
+                                idx,
+                                chunk,
+                                "structured output failed",
+                                hops=hops,
+                            )
+                        )
+
+                    try:
+                        comments, key_issues, summary_text = _parse(raw_response)
+                    except ResponseParseError as exc:
+                        excerpt = _response_excerpt(raw_response)
+                        logger.warning(
+                            "Chunk %d/%d failed to parse: %s (response=%s)",
+                            idx + 1,
+                            len(chunks),
+                            exc,
+                            excerpt,
+                        )
+                        return _ChunkOutcome(
+                            failure=_chunk_failure(
+                                idx,
+                                chunk,
+                                "response parse error",
+                                hops=hops,
+                                excerpt=raw_response,
+                            )
+                        )
 
                     # Ensemble: fire the extra runs in parallel and keep
                     # majority-vote findings. The agentic loop (if any) only
@@ -1572,15 +1755,43 @@ class ReviewEngine:
                                 len(comments),
                             )
 
-                    return comments, key_issues, summary_text
-                except ResponseParseError as exc:
+                    return _ChunkOutcome(
+                        comments=comments,
+                        key_issues=key_issues,
+                        summary=summary_text,
+                    )
+                except StructuredOutputError as exc:
                     logger.warning(
-                        "Chunk %d/%d failed to parse, skipping: %s",
+                        "Chunk %d/%d structured-output failure: %s",
                         idx + 1,
                         len(chunks),
                         exc,
                     )
-                    return [], [], ""
+                    return _ChunkOutcome(
+                        failure=_chunk_failure(
+                            idx,
+                            chunk,
+                            "structured output failed",
+                            hops=hops,
+                            excerpt=str(exc),
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Chunk %d/%d failed: %s",
+                        idx + 1,
+                        len(chunks),
+                        exc,
+                    )
+                    return _ChunkOutcome(
+                        failure=_chunk_failure(
+                            idx,
+                            chunk,
+                            f"review failed ({type(exc).__name__})",
+                            hops=hops,
+                            excerpt=raw_response or str(exc),
+                        )
+                    )
 
         review_task = _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
         # Per-chunk executors (fresh per call) so each chunk gets its own
@@ -1680,12 +1891,55 @@ class ReviewEngine:
         all_comments: list[ReviewComment] = []
         all_key_issues: list[KeyIssue] = []
         summaries: list[str] = []
-        for i, (comments, key_issues, summary_text) in enumerate(chunk_results):
-            audit.append({"stage": "drafted", "chunk": i, "count": len(comments)})
-            all_comments.extend(comments)
-            all_key_issues.extend(key_issues)
-            if summary_text:
-                summaries.append(summary_text)
+        chunk_failures: list[ChunkFailure] = []
+        for i, outcome in enumerate(chunk_results):
+            if outcome.failure:
+                chunk_failures.append(outcome.failure)
+                logger.warning(
+                    "Chunk %d/%d failed (%s): %s",
+                    i + 1,
+                    len(chunks),
+                    outcome.failure.reason,
+                    ", ".join(outcome.failure.paths[:8]),
+                )
+            audit.append(
+                {
+                    "stage": "drafted",
+                    "chunk": i,
+                    "count": len(outcome.comments),
+                    "failed": outcome.failure is not None,
+                }
+            )
+            all_comments.extend(outcome.comments)
+            all_key_issues.extend(outcome.key_issues)
+            if outcome.summary:
+                summaries.append(outcome.summary)
+
+        security_failures = list(getattr(security_comments, "failures", []) or [])
+        dependency_failures = list(getattr(dependency_comments, "failures", []) or [])
+        for failure in security_failures:
+            audit.append(
+                {
+                    "stage": "security_failed",
+                    "chunk": failure.chunk_index,
+                    "paths": failure.paths,
+                    "reason": failure.reason,
+                    "hops": failure.hops,
+                    "excerpt": failure.excerpt,
+                }
+            )
+        for failure in dependency_failures:
+            audit.append(
+                {
+                    "stage": "dependency_failed",
+                    "chunk": failure.chunk_index,
+                    "paths": failure.paths,
+                    "reason": failure.reason,
+                    "hops": failure.hops,
+                    "excerpt": failure.excerpt,
+                }
+            )
+
         audit.append({"stage": "drafted", "chunk": "security", "count": len(security_comments)})
         all_comments.extend(security_comments)
         audit.append({"stage": "drafted", "chunk": "dependency", "count": len(dependency_comments)})
@@ -1694,6 +1948,12 @@ class ReviewEngine:
         all_comments.extend(osv_comments)
         audit.append({"stage": "drafted", "chunk": "secrets", "count": len(secrets_comments)})
         all_comments.extend(secrets_comments)
+
+        failed_paths = sorted(
+            {path for failure in chunk_failures for path in failure.paths if path}
+        )
+        failed_path_set = set(failed_paths)
+        reviewed_paths = [p for p in selected_paths if p not in failed_path_set]
 
         all_comments = [classify_severity(c) for c in all_comments]
 
@@ -1745,21 +2005,30 @@ class ReviewEngine:
 
         if self.config.review.include_summary:
             original_summary = " ".join(summaries) if summaries else ""
-            # Regenerate from the FINAL filed outputs so summary prose can't
-            # claim issues that were dropped by the filter/critique passes.
-            try:
-                summary = await regenerate_summary(
-                    self.llm,
-                    final_comments,
-                    all_key_issues,
-                    pr_title,
-                    pr_description,
-                    fallback=original_summary,
-                    indexing_llm=self.indexing_llm,
+            if chunk_failures:
+                # Never regenerate a clean "No issues found" summary when part
+                # of the diff was never reviewed.
+                summary = _incomplete_summary(
+                    chunk_failures,
+                    len(chunks),
+                    original_summary,
                 )
-            except Exception as exc:
-                logger.warning("Summary regeneration failed, using original: %s", exc)
-                summary = original_summary or "No issues found."
+            else:
+                # Regenerate from the FINAL filed outputs so summary prose can't
+                # claim issues that were dropped by the filter/critique passes.
+                try:
+                    summary = await regenerate_summary(
+                        self.llm,
+                        final_comments,
+                        all_key_issues,
+                        pr_title,
+                        pr_description,
+                        fallback=original_summary,
+                        indexing_llm=self.indexing_llm,
+                    )
+                except Exception as exc:
+                    logger.warning("Summary regeneration failed, using original: %s", exc)
+                    summary = original_summary or "No issues found."
             summary = cap_review_summary(summary)
         else:
             summary = ""
@@ -1793,12 +2062,17 @@ class ReviewEngine:
             key_issues=all_key_issues,
             summary=summary,
             pr_summary_block=pr_summary_block,
-            reviewed_files=len(filtered),
+            reviewed_files=len(reviewed_paths),
             token_usage=self.llm.usage,
             walkthrough=walkthrough,
-            reviewed_paths=selected_paths,
+            reviewed_paths=reviewed_paths,
             skipped_paths=skipped_paths_only,
             total_paths=all_paths,
+            failed_chunks=chunk_failures,
+            failed_paths=failed_paths,
+            total_chunks=len(chunks),
+            security_failures=security_failures,
+            dependency_failures=dependency_failures,
             audit=audit,
             unverified_findings=held_back,
         )

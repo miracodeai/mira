@@ -11,10 +11,11 @@ import asyncio
 import json as _json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from mira.config import load_config
 from mira.dashboard.models_config import llm_config_for
-from mira.exceptions import ResponseParseError
+from mira.exceptions import ResponseParseError, StructuredOutputError
 from mira.llm import create_llm
 from mira.llm.base import LLMProviderProtocol
 from mira.llm.prompts.review import (
@@ -27,13 +28,117 @@ from mira.llm.response_parser import (
     parse_llm_response,
 )
 from mira.llm.tool_schemas import SUBMIT_CRITIQUE_TOOL, SUBMIT_REVIEW_TOOL
-from mira.models import KeyIssue, ReviewComment, Severity, WalkthroughResult
+from mira.models import ChunkFailure, KeyIssue, ReviewComment, Severity, WalkthroughResult
 
 logger = logging.getLogger(__name__)
 
 _MAX_REVIEW_SUMMARY_CHARS = 2_000
 _MAX_REVIEW_SUMMARY_TOKENS = 512
 _SUMMARY_TRUNCATION_MARKER = " … [summary truncated]"
+
+
+@dataclass
+class AgenticLoopResult:
+    """State returned by the agentic loop so callers can reuse the conversation."""
+
+    raw_arguments: str = ""
+    conversation: list[dict] = field(default_factory=list)
+    hops: int = 0
+    hit_hop_cap: bool = False
+    tool_calls: list[dict] = field(default_factory=list)
+    last_content: str = ""
+    error: str | None = None
+
+
+class PassResult(list):
+    """List of comments that also carries per-chunk failure metadata."""
+
+    def __init__(self, comments=(), failures: list[ChunkFailure] | None = None) -> None:
+        super().__init__(comments)
+        self.failures: list[ChunkFailure] = list(failures or [])
+
+
+def _response_excerpt(text: object, limit: int = 300) -> str:
+    """Short single-line excerpt for diagnostics; never logs full reasoning."""
+    value = text if isinstance(text, str) else str(text or "")
+    excerpt = " ".join(value.split())
+    return excerpt[:limit] + ("…" if len(excerpt) > limit else "")
+
+
+def _agentic_result(value: object) -> AgenticLoopResult:
+    """Accept the dataclass plus legacy string/duck-typed loop results."""
+    if isinstance(value, AgenticLoopResult):
+        return value
+    if isinstance(value, str):
+        return AgenticLoopResult(raw_arguments=value, hops=0)
+    return AgenticLoopResult(
+        raw_arguments=getattr(value, "raw_arguments", "") or "",
+        conversation=getattr(value, "conversation", []) or [],
+        hops=getattr(value, "hops", 0) or 0,
+        hit_hop_cap=bool(getattr(value, "hit_hop_cap", False)),
+        tool_calls=getattr(value, "tool_calls", []) or [],
+        last_content=getattr(value, "last_content", "") or "",
+        error=getattr(value, "error", None),
+    )
+
+
+async def _force_submit_review(
+    llm: LLMProviderProtocol,
+    conversation: list[dict],
+    tools: list[dict],
+    *,
+    hit_hop_cap: bool,
+) -> tuple[str, str | None]:
+    """Force ``submit_review`` on an existing conversation, retrying prose once."""
+    instruction = (
+        "You have reached the tool-call limit. Stop using tools and call "
+        "`submit_review` now with the findings you have. Do not answer in prose."
+        if hit_hop_cap
+        else (
+            "Stop using tools and call `submit_review` now with the findings you have. "
+            "Do not answer in prose."
+        )
+    )
+    convo = [*conversation, {"role": "user", "content": instruction}]
+
+    for attempt in range(2):
+        try:
+            raw = await llm.complete_with_tools(
+                messages=convo,
+                tools=tools,
+                force_tool="submit_review",
+            )
+        except StructuredOutputError as exc:
+            logger.debug("Forced submit_review returned prose: %s", exc)
+            last_error = f"structured output failed: {_response_excerpt(str(exc))}"
+        except Exception as exc:
+            logger.warning("Forced submit_review call failed: %s", exc)
+            return "", f"{type(exc).__name__}: {_response_excerpt(str(exc))}"
+        else:
+            # Strict providers raise on prose, but validating here also catches
+            # prompt-emulated providers (and mocked responses) that return prose.
+            parsed = loads_lenient(raw) if raw else None
+            if isinstance(parsed, dict):
+                return raw, None
+            last_error = (
+                "structured output failed: response was not a tool-call JSON object"
+                if raw
+                else "structured output failed: empty response"
+            )
+
+        if attempt == 0:
+            convo.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response was prose, not a tool call. Call "
+                        "`submit_review` now with the findings you have. Do not answer "
+                        "in prose."
+                    ),
+                }
+            )
+
+    return "", last_error
 
 
 def cap_review_summary(text: str) -> str:
@@ -53,14 +158,14 @@ async def agentic_review_loop(
     llm: LLMProviderProtocol,
     messages: list[dict],
     executor: object,
-) -> str:
+) -> AgenticLoopResult:
     """Run an agentic tool-use loop until the LLM submits a review.
 
     Hands the model `read_file` and `grep_repo` alongside the terminal
-    `submit_review` tool. Caps at 6 hops to bound token spend; returns the
-    JSON args of the final `submit_review` call (same shape `llm.review`
-    returns), or "" if the loop exited without one — caller falls back to
-    a forced single-tool call.
+    `submit_review` tool. Caps at 6 hops to bound token spend. Returns the
+    JSON args of the final `submit_review` call plus the conversation and
+    hop/tool metadata, so callers can force a final submit on the *existing*
+    conversation instead of rebuilding the chunk from scratch.
     """
     from mira.llm.agentic_tools import AGENTIC_TOOLS
 
@@ -80,16 +185,33 @@ async def agentic_review_loop(
             "`submit_review` with all your findings."
         )
 
+    calls_made: list[dict] = []
     max_hops = 6
+    last_content = ""
     for hop in range(max_hops):
         try:
             msg = await llm.complete_agentic(convo, tools=tools)
         except Exception as exc:
             logger.warning("Agentic hop %d failed: %s", hop + 1, exc)
-            return ""
+            return AgenticLoopResult(
+                conversation=convo,
+                hops=hop + 1,
+                tool_calls=calls_made,
+                last_content=last_content,
+                error=f"{type(exc).__name__}: {_response_excerpt(str(exc))}",
+            )
 
         tool_calls = msg.get("tool_calls") or []
         content = msg.get("content") or ""
+        last_content = content
+        finish_reason = msg.get("finish_reason") or msg.get("stop_reason")
+        logger.debug(
+            "Agentic hop %d: tools=%s content_len=%d finish_reason=%s",
+            hop + 1,
+            [((c.get("function") or {}).get("name") or "") for c in tool_calls],
+            len(content),
+            finish_reason,
+        )
 
         if not tool_calls:
             logger.debug(
@@ -97,7 +219,21 @@ async def agentic_review_loop(
                 hop + 1,
                 len(content),
             )
-            return ""
+            raw, error = await _force_submit_review(
+                llm,
+                convo,
+                tools,
+                hit_hop_cap=False,
+            )
+            return AgenticLoopResult(
+                raw_arguments=raw,
+                conversation=convo,
+                hops=hop + 1,
+                hit_hop_cap=False,
+                tool_calls=calls_made,
+                last_content=last_content,
+                error=error,
+            )
 
         assistant_message = {
             "role": "assistant",
@@ -123,7 +259,13 @@ async def agentic_review_loop(
             fn = call.get("function") or {}
             name = fn.get("name") or ""
             if name == "submit_review":
-                return fn.get("arguments") or ""
+                return AgenticLoopResult(
+                    raw_arguments=fn.get("arguments") or "",
+                    conversation=convo,
+                    hops=hop + 1,
+                    tool_calls=calls_made,
+                    last_content=last_content,
+                )
 
             raw_args = fn.get("arguments") or "{}"
             try:
@@ -131,6 +273,7 @@ async def agentic_review_loop(
             except Exception:
                 args = {}
 
+            calls_made.append({"name": name, "args": args})
             tool_result = await executor.execute(name, args)  # type: ignore[attr-defined]
             convo.append(
                 {
@@ -141,7 +284,21 @@ async def agentic_review_loop(
             )
 
     logger.debug("Agentic loop hit %d-hop cap without submit_review", max_hops)
-    return ""
+    raw, error = await _force_submit_review(
+        llm,
+        convo,
+        tools,
+        hit_hop_cap=True,
+    )
+    return AgenticLoopResult(
+        raw_arguments=raw,
+        conversation=convo,
+        hops=max_hops,
+        hit_hop_cap=True,
+        tool_calls=calls_made,
+        last_content=last_content,
+        error=error,
+    )
 
 
 def _indexing_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
@@ -160,6 +317,29 @@ def _security_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
         return fallback
 
 
+@dataclass
+class _SecurityScanOutcome:
+    comments: list[ReviewComment] = field(default_factory=list)
+    failure: ChunkFailure | None = None
+
+
+def _chunk_failure(
+    files: list,
+    reason: str,
+    *,
+    hops: int | None = None,
+    excerpt: str = "",
+    chunk_index: int = 0,
+) -> ChunkFailure:
+    return ChunkFailure(
+        chunk_index=chunk_index,
+        paths=[getattr(f, "path", "") for f in files if getattr(f, "path", "")],
+        reason=reason,
+        hops=hops,
+        excerpt=_response_excerpt(excerpt),
+    )
+
+
 async def security_review_pass(
     llm: LLMProviderProtocol,
     files: list,
@@ -167,11 +347,12 @@ async def security_review_pass(
     pr_title: str = "",
     security_llm: LLMProviderProtocol | None = None,
     agentic_executor_factory: Callable[[], object] | None = None,
-) -> list[ReviewComment]:
+) -> PassResult:
     """Dedicated security review on the security tier (``security_model`` → review model).
 
-    Runs in parallel with the main review. Returns ``[]`` on any failure
-    so a transient LLM/API error doesn't kill the main review.
+    Runs in parallel with the main review. Returns no comments on failure so a
+    transient LLM/API error doesn't kill the main review; the returned
+    ``PassResult`` also carries per-chunk failures for audit/visibility.
 
     `narrowed` is `files` with migrations/lockfiles/specs stripped (caller
     decides what counts); falls back to `files` if `narrowed` is empty.
@@ -184,11 +365,11 @@ async def security_review_pass(
     (falling back to the one-shot call when the loop bails).
     """
     if not files:
-        return []
+        return PassResult()
 
     target_files = narrowed or files
     if not target_files:
-        return []
+        return PassResult()
     sec_llm = security_llm or _security_llm(llm)
 
     budget = int(load_config().llm.max_context_tokens * 0.75)
@@ -200,13 +381,15 @@ async def security_review_pass(
         provider=sec_llm if hasattr(sec_llm, "count_tokens") else None,
     )
     if len(chunks) <= 1:
-        return await _security_scan_once(
+        outcome = await _security_scan_once(
             sec_llm,
             llm,
             target_files,
             pr_title,
             executor=agentic_executor_factory() if agentic_executor_factory else None,
         )
+        single_failures = [outcome.failure] if outcome.failure else []
+        return PassResult(outcome.comments, single_failures)
 
     logger.info(
         "Security pass: splitting %d files into %d chunks (single-call budget %d tokens)",
@@ -216,7 +399,7 @@ async def security_review_pass(
     )
     sem = asyncio.Semaphore(load_config().review.max_concurrent_chunks)
 
-    async def _bounded(chunk_files_list: list) -> list[ReviewComment]:
+    async def _bounded(chunk_files_list: list) -> _SecurityScanOutcome:
         async with sem:
             return await _security_scan_once(
                 sec_llm,
@@ -227,7 +410,14 @@ async def security_review_pass(
             )
 
     results = await asyncio.gather(*[_bounded(c.files) for c in chunks])
-    return [c for chunk_comments in results for c in chunk_comments]
+    comments: list[ReviewComment] = []
+    failures: list[ChunkFailure] = []
+    for index, outcome in enumerate(results):
+        comments.extend(outcome.comments)
+        if outcome.failure:
+            outcome.failure.chunk_index = index
+            failures.append(outcome.failure)
+    return PassResult(comments, failures)
 
 
 async def _security_scan_once(
@@ -236,26 +426,38 @@ async def _security_scan_once(
     files: list,
     pr_title: str,
     executor: object | None = None,
-) -> list[ReviewComment]:
+) -> _SecurityScanOutcome:
     """Run the security scan on a single chunk of files.
 
     When ``executor`` is given, the agentic tool-use loop runs first on the
-    security-tier provider. Whether it bails (returns "") or raises
-    (executor bug, uncaught tool error), the one-shot call below is the
-    floor; the existing ``except`` path then retries on ``fallback_llm``,
-    so the pass still returns ``[]`` on total failure rather than
-    propagating into the main review.
+    security-tier provider. Whether it bails or raises, the one-shot strict
+    call below is the floor; the existing ``except`` path then retries on
+    ``fallback_llm``. A total failure is returned as metadata so the main
+    review can surface a security-incomplete notice without failing itself.
     """
     messages = build_security_review_prompt(files=files, pr_title=pr_title)
     raw = ""
+    hops: int | None = None
+    loop_error = ""
     if executor is not None:
         try:
-            raw = await agentic_review_loop(sec_llm, messages, executor)
+            result = _agentic_result(await agentic_review_loop(sec_llm, messages, executor))
+            raw = result.raw_arguments
+            hops = result.hops or None
+            loop_error = result.error or ""
+            if not raw:
+                logger.debug(
+                    "Security agentic loop ended without submit_review (hops=%s, cap=%s): %s",
+                    result.hops,
+                    result.hit_hop_cap,
+                    result.error or "no structured output",
+                )
         except Exception as exc:
             logger.warning(
                 "Security pass agentic loop failed (%s); falling back to one-shot",
                 exc,
             )
+            loop_error = f"{type(exc).__name__}: {_response_excerpt(str(exc))}"
             raw = ""
     try:
         if not raw:
@@ -263,6 +465,7 @@ async def _security_scan_once(
                 messages=messages,
                 tools=[SUBMIT_REVIEW_TOOL],
                 temperature=0.0,
+                force_tool="submit_review",
             )
     except Exception as exc:
         # Retry on the main LLM rather than drop the security pass entirely.
@@ -276,23 +479,52 @@ async def _security_scan_once(
                     messages=messages,
                     tools=[SUBMIT_REVIEW_TOOL],
                     temperature=0.0,
+                    force_tool="submit_review",
                 )
             except Exception as exc2:
                 logger.warning("Security review pass failed: %s", exc2)
-                return []
+                return _SecurityScanOutcome(
+                    failure=_chunk_failure(
+                        files,
+                        "security pass failed",
+                        hops=hops,
+                        excerpt=f"{exc2} {loop_error}".strip(),
+                    )
+                )
         else:
             logger.warning("Security review pass failed: %s", exc)
-            return []
+            return _SecurityScanOutcome(
+                failure=_chunk_failure(
+                    files,
+                    "security pass failed",
+                    hops=hops,
+                    excerpt=f"{exc} {loop_error}".strip(),
+                )
+            )
 
     try:
         parsed = parse_llm_response(raw)
         comments = convert_to_review_comments(parsed, diff_files=files)
     except ResponseParseError as exc:
         logger.warning("Security review pass parse error: %s", exc)
-        return []
+        return _SecurityScanOutcome(
+            failure=_chunk_failure(
+                files,
+                "security response parse error",
+                hops=hops,
+                excerpt=raw,
+            )
+        )
     except Exception as exc:
         logger.warning("Security review pass conversion failed: %s", exc)
-        return []
+        return _SecurityScanOutcome(
+            failure=_chunk_failure(
+                files,
+                "security response conversion failed",
+                hops=hops,
+                excerpt=raw,
+            )
+        )
 
     for c in comments:
         if not c.category or c.category != "security":
@@ -300,7 +532,7 @@ async def _security_scan_once(
         c.source_pass = "security"
     if comments:
         logger.info("Security pass produced %d candidate comment(s)", len(comments))
-    return comments
+    return _SecurityScanOutcome(comments=comments)
 
 
 async def dependency_review_pass(
@@ -309,7 +541,7 @@ async def dependency_review_pass(
     existing_packages: list[str] | None = None,
     pr_title: str = "",
     indexing_llm: LLMProviderProtocol | None = None,
-) -> list[ReviewComment]:
+) -> PassResult:
     """Flag newly-added dependencies that duplicate an existing one.
 
     Runs in parallel with the main review over only the changed manifest files
@@ -317,11 +549,12 @@ async def dependency_review_pass(
     names already declared in the repo (from the index) so the model can spot a
     new package that overlaps one already present.
 
-    Returns ``[]`` when no manifest changed or on any failure, so a transient
-    LLM/API error doesn't kill the main review. Mirrors ``security_review_pass``.
+    Returns no comments on failure so a transient LLM/API error doesn't kill
+    the main review; the returned ``PassResult`` carries failure metadata for
+    logging/audit only (no full-review banner).
     """
     if not manifest_files:
-        return []
+        return PassResult()
 
     dep_llm = indexing_llm or _indexing_llm(llm)
 
@@ -335,6 +568,7 @@ async def dependency_review_pass(
             messages=messages,
             tools=[SUBMIT_REVIEW_TOOL],
             temperature=0.0,
+            force_tool="submit_review",
         )
     except Exception as exc:
         # Retry on the main LLM rather than drop the pass entirely.
@@ -348,29 +582,62 @@ async def dependency_review_pass(
                     messages=messages,
                     tools=[SUBMIT_REVIEW_TOOL],
                     temperature=0.0,
+                    force_tool="submit_review",
                 )
             except Exception as exc2:
                 logger.warning("Dependency review pass failed: %s", exc2)
-                return []
+                return PassResult(
+                    failures=[
+                        _chunk_failure(
+                            manifest_files,
+                            "dependency pass failed",
+                            excerpt=str(exc2),
+                        )
+                    ]
+                )
         else:
             logger.warning("Dependency review pass failed: %s", exc)
-            return []
+            return PassResult(
+                failures=[
+                    _chunk_failure(
+                        manifest_files,
+                        "dependency pass failed",
+                        excerpt=str(exc),
+                    )
+                ]
+            )
 
     try:
         parsed = parse_llm_response(raw)
         comments = convert_to_review_comments(parsed, diff_files=manifest_files)
     except ResponseParseError as exc:
         logger.warning("Dependency review pass parse error: %s", exc)
-        return []
+        return PassResult(
+            failures=[
+                _chunk_failure(
+                    manifest_files,
+                    "dependency response parse error",
+                    excerpt=raw,
+                )
+            ]
+        )
     except Exception as exc:
         logger.warning("Dependency review pass conversion failed: %s", exc)
-        return []
+        return PassResult(
+            failures=[
+                _chunk_failure(
+                    manifest_files,
+                    "dependency response conversion failed",
+                    excerpt=raw,
+                )
+            ]
+        )
 
     for c in comments:
         c.category = "dependency"
     if comments:
         logger.info("Dependency pass produced %d candidate comment(s)", len(comments))
-    return comments
+    return PassResult(comments)
 
 
 _MAX_HUNK_EVIDENCE_CHARS = 1200

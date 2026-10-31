@@ -14,7 +14,7 @@ from tenacity import (
 )
 
 from mira.config import LLMConfig
-from mira.exceptions import LLMError
+from mira.exceptions import LLMError, StructuredOutputError
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 
 logger = logging.getLogger(__name__)
@@ -356,18 +356,88 @@ class BedrockProvider:
         )
         return self._extract_text(response)
 
+    async def _call_named_tool_with_fallback(
+        self,
+        messages: list[dict],
+        *,
+        tool_config: dict,
+        force_tool: str,
+        temperature: float | None = None,
+    ) -> str:
+        """Strict structured call: prose is a failure, and fallback gets a turn."""
+        models = [self.config.model]
+        if self.config.fallback_model and self.config.fallback_model != self.config.model:
+            models.append(self.config.fallback_model)
+
+        last_error: Exception | None = None
+        for index, model in enumerate(models):
+            try:
+                response = await self._call_converse(
+                    model,
+                    messages,
+                    tool_config=tool_config,
+                    temperature=temperature,
+                )
+            except Exception as exc:
+                last_error = exc
+            else:
+                tool_json = self._extract_tool_use(response)
+                if tool_json:
+                    return tool_json
+                text = self._extract_text(response)
+                excerpt = " ".join(text.split())[:300]
+                last_error = StructuredOutputError(
+                    "structured_output",
+                    model=model,
+                    tool=force_tool,
+                    excerpt=excerpt or "(empty response)",
+                )
+            if index + 1 < len(models):
+                logger.warning(
+                    "Primary model %s failed (%s), trying fallback %s",
+                    model,
+                    last_error,
+                    models[index + 1],
+                )
+
+        assert last_error is not None
+        if len(models) > 1:
+            if isinstance(last_error, StructuredOutputError):
+                raise last_error
+            raise LLMError(
+                "both_models_failed",
+                primary_model=self.config.model,
+                fallback_model=self.config.fallback_model,
+                error=last_error,
+            ) from last_error
+        if isinstance(last_error, StructuredOutputError):
+            raise last_error
+        raise LLMError(
+            "bedrock_call_failed", model=self.config.model, error=last_error
+        ) from last_error
+
     async def complete_with_tools(
         self,
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
         """Complete using tool calling for structured output."""
         bedrock_tools = [_openai_tool_to_bedrock(t) for t in tools]
+        forced_tool_name = force_tool or tools[0]["function"]["name"]
         tool_config = {
             "tools": bedrock_tools,
-            "toolChoice": self._tool_choice(tools[0]["function"]["name"]),
+            "toolChoice": self._tool_choice(forced_tool_name),
         }
+
+        if force_tool:
+            return await self._call_named_tool_with_fallback(
+                messages,
+                tool_config=tool_config,
+                force_tool=force_tool,
+                temperature=temperature,
+            )
 
         response = await self._call_with_fallback(
             messages,
@@ -433,6 +503,8 @@ class BedrockProvider:
             del openai_msg["tool_calls"]
         if reasoning_blocks:
             openai_msg["reasoning_blocks"] = reasoning_blocks
+        if response.get("stopReason"):
+            openai_msg["finish_reason"] = response["stopReason"]
 
         return openai_msg
 

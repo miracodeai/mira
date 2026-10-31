@@ -59,6 +59,16 @@ class NonRetriableLLMError(LLMError):
     """LLM client error (4xx) that should not be retried."""
 
 
+class StructuredOutputError(LLMError):
+    """A successful LLM response that lacked the required structured tool call.
+
+    This is a semantic failure, not a transport/API failure: retrying the same
+    request unchanged will just reproduce the prose response. Callers that want
+    another attempt must change the conversation (a corrective instruction) or
+    try the configured fallback model.
+    """
+
+
 class ResponseParseError(MiraError):
     """Error parsing or validating LLM response."""
 

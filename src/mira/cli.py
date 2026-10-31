@@ -47,7 +47,10 @@ def _format_text(result: ReviewResult) -> str:
         lines.append("")
 
     if not result.comments:
-        lines.append("No issues found.")
+        if result.failed_chunks or result.security_failures or result.dependency_failures:
+            lines.append("Review incomplete: one or more review chunks failed.")
+        else:
+            lines.append("No issues found.")
         return "\n".join(lines)
 
     for i, c in enumerate(result.comments, 1):
