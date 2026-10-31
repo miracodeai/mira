@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from mira.platforms import profiles
 
 
@@ -97,3 +99,17 @@ class TestRuntimeOverride:
             assert profiles.resolve("github")["name"] == "github"
         finally:
             profiles._load.cache_clear()
+
+
+@pytest.mark.parametrize("api_url", ["https://git.acme.test/custom-api", "https://[invalid"])
+@pytest.mark.parametrize("platform", ["github", "gitlab", "forgejo", "bitbucket"])
+def test_invalid_forgejo_url_does_not_block_profile_lookup(monkeypatch, api_url, platform):
+    monkeypatch.setenv("MIRA_FORGEJO_API_URL", api_url)
+    monkeypatch.delenv("MIRA_FORGEJO_BASE_URL", raising=False)
+    monkeypatch.delenv("MIRA_PLATFORMS_JSON_PATH", raising=False)
+    profiles._load.cache_clear()
+    try:
+        assert profiles.resolve(platform)["name"] == platform
+        assert profiles.all_profiles()["forgejo"]["api_url"] == api_url
+    finally:
+        profiles._load.cache_clear()

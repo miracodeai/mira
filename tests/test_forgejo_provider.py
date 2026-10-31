@@ -5,12 +5,15 @@ Forgejo has no Checks API; check runs are adapted onto commit statuses.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
+import httpx
 import pytest
 
-from mira.exceptions import ProviderError
+from mira.exceptions import ConfigError, ProviderError
 from mira.models import PRInfo
+from mira.platforms import profiles
 from mira.providers.forgejo import ForgejoProvider
 
 
@@ -40,6 +43,47 @@ class _FakeClient:
 
 def _patch(handler):
     return patch("mira.providers.forgejo.httpx.AsyncClient", lambda *a, **k: _FakeClient(handler))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subpath", ["", "/forgejo"])
+async def test_compare_diff_sends_token_to_configured_instance(monkeypatch, subpath):
+    monkeypatch.setenv("MIRA_FORGEJO_API_URL", f"https://git.acme.test{subpath}/api/v1/")
+    monkeypatch.delenv("MIRA_FORGEJO_BASE_URL", raising=False)
+    monkeypatch.delenv("MIRA_PLATFORMS_JSON_PATH", raising=False)
+    profiles._load.cache_clear()
+    requests = []
+
+    def handler(method, url, **kw):
+        requests.append((method, url, kw["headers"]))
+        response = _FakeResp()
+        response.text = "diff --git a/file b/file"
+        return response
+
+    pr = PRInfo(
+        title="Example",
+        description="",
+        base_branch="main",
+        head_branch="feature",
+        url=f"https://git.acme.test{subpath}/alice/private-repo/pulls/1",
+        number=1,
+        owner="alice",
+        repo="private-repo",
+        platform="forgejo",
+    )
+    try:
+        with _patch(handler):
+            diff = await ForgejoProvider("dummy-token").get_compare_diff(pr, "base", "head")
+        assert diff == "diff --git a/file b/file"
+        assert requests == [
+            (
+                "GET",
+                f"https://git.acme.test{subpath}/alice/private-repo/compare/base...head.diff",
+                {"Authorization": "token dummy-token", "Accept": "text/plain"},
+            )
+        ]
+    finally:
+        profiles._load.cache_clear()
 
 
 class TestGetRepoPermission:
@@ -218,3 +262,196 @@ class TestCheckRuns:
         with _patch(handler):
             assert await provider.start_check_run(self._pr_info(head_sha="")) is None
             assert called == []
+
+
+class TestForgejoURLs:
+    @pytest.fixture(autouse=True)
+    def isolate_profiles(self, monkeypatch):
+        monkeypatch.delenv("MIRA_FORGEJO_API_URL", raising=False)
+        monkeypatch.delenv("MIRA_FORGEJO_BASE_URL", raising=False)
+        monkeypatch.delenv("MIRA_PLATFORMS_JSON_PATH", raising=False)
+        profiles._load.cache_clear()
+        yield
+        profiles._load.cache_clear()
+
+    def test_default_web_base(self):
+        assert ForgejoProvider("dummy-token")._base == "https://codeberg.org"
+
+    @pytest.mark.parametrize(
+        ("api_url", "base_url"),
+        [
+            ("https://git.acme.test/api/v1", "https://git.acme.test"),
+            ("https://git.acme.test/api/v1/", "https://git.acme.test"),
+            ("https://git.acme.test/forgejo/api/v1/", "https://git.acme.test/forgejo"),
+            ("http://localhost:3000/git/api/v1", "http://localhost:3000/git"),
+        ],
+    )
+    def test_infers_web_base(self, monkeypatch, api_url, base_url):
+        monkeypatch.setenv("MIRA_FORGEJO_API_URL", api_url)
+        assert ForgejoProvider("dummy-token")._base == base_url
+
+    @pytest.mark.parametrize(
+        "api_url",
+        [
+            "https://git.acme.test/custom-api",
+            "https://git.acme.test/api/v10",
+            "https://[invalid/api/v1",
+        ],
+    )
+    def test_cannot_infer_raises_config_error(self, monkeypatch, api_url):
+        monkeypatch.setenv("MIRA_FORGEJO_API_URL", api_url)
+        with pytest.raises(ConfigError, match="Cannot infer MIRA_FORGEJO_BASE_URL"):
+            ForgejoProvider("dummy-token")
+
+    @pytest.mark.parametrize(
+        "api_url", ["https://git.acme.test/api/v1", "https://api.acme.test/custom"]
+    )
+    def test_explicit_base_takes_precedence(self, monkeypatch, api_url):
+        monkeypatch.setenv("MIRA_FORGEJO_API_URL", api_url)
+        monkeypatch.setenv("MIRA_FORGEJO_BASE_URL", "https://web.acme.test/forgejo/")
+        assert ForgejoProvider("dummy-token")._base == "https://web.acme.test/forgejo"
+
+    @pytest.mark.parametrize("explicit_base", [None, "https://web.acme.test/forgejo"])
+    def test_profile_override(self, monkeypatch, tmp_path, explicit_base):
+        profile = {"api_url": "https://git.acme.test/forgejo/api/v1"}
+        if explicit_base:
+            profile["base_url"] = explicit_base
+        custom = tmp_path / "platforms.json"
+        custom.write_text(json.dumps({"forgejo": profile}))
+        monkeypatch.setenv("MIRA_PLATFORMS_JSON_PATH", str(custom))
+        assert ForgejoProvider("dummy-token")._base == (
+            explicit_base or "https://git.acme.test/forgejo"
+        )
+
+
+class TestRemoveLabel:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [200, 204])
+    @pytest.mark.parametrize(
+        ("label", "encoded"),
+        [
+            ("mira-paused", b"mira-paused"),
+            ("needs triage", b"needs%20triage"),
+            ("team/security", b"team%2Fsecurity"),
+            ("label#tag?x=1&more", b"label%23tag%3Fx%3D1%26more"),
+            ("literal%2Ftag", b"literal%252Ftag"),
+            ("修正", b"%E4%BF%AE%E6%AD%A3"),
+        ],
+    )
+    async def test_removes_only_requested_label(self, monkeypatch, status, label, encoded):
+        from urllib.parse import unquote
+
+        labels = {label, "bug", "release-blocker"}
+        requests = []
+        collection = b"/api/v1/repos/example/app/issues/7/labels"
+
+        def serve(request):
+            requests.append(request)
+            raw_path = request.url.raw_path.split(b"?", 1)[0]
+            if raw_path == collection:
+                labels.clear()  # Forgejo's collection DELETE clears every label.
+            else:
+                assert raw_path.startswith(collection + b"/")
+                labels.discard(unquote(raw_path[len(collection) + 1 :].decode()))
+            return httpx.Response(status, json=[] if status == 200 else None)
+
+        client_type = httpx.AsyncClient
+        monkeypatch.setattr(
+            "mira.providers.forgejo.httpx.AsyncClient",
+            lambda **kwargs: client_type(transport=httpx.MockTransport(serve), **kwargs),
+        )
+        provider = ForgejoProvider("synthetic")
+        provider._api = "https://forge.example.invalid/api/v1"
+        info = PRInfo(
+            title="Synthetic",
+            description="",
+            base_branch="main",
+            head_branch="topic",
+            url="https://forge.example.invalid/example/app/pulls/7",
+            number=7,
+            owner="example",
+            repo="app",
+            platform="forgejo",
+        )
+
+        await provider.remove_label(info, label)
+
+        assert labels == {"bug", "release-blocker"}
+        assert len(requests) == 1
+        assert requests[0].method == "DELETE"
+        assert requests[0].url.raw_path == collection + b"/" + encoded
+        assert requests[0].url.fragment == ""
+        assert requests[0].url.params.multi_items() == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [403, 404, 422, 500])
+    async def test_remove_label_errors_do_not_fall_back_to_collection(self, monkeypatch, status):
+        requests = []
+
+        def serve(request):
+            requests.append(request)
+            return httpx.Response(status)
+
+        client_type = httpx.AsyncClient
+        monkeypatch.setattr(
+            "mira.providers.forgejo.httpx.AsyncClient",
+            lambda **kwargs: client_type(transport=httpx.MockTransport(serve), **kwargs),
+        )
+        provider = ForgejoProvider("synthetic")
+        provider._api = "https://forge.example.invalid/api/v1"
+        info = PRInfo(
+            title="Synthetic",
+            description="",
+            base_branch="main",
+            head_branch="topic",
+            url="https://forge.example.invalid/example/app/pulls/7",
+            number=7,
+            owner="example",
+            repo="app",
+            platform="forgejo",
+        )
+
+        with pytest.raises(ProviderError) as error:
+            await provider.remove_label(info, "mira-paused")
+
+        assert error.value.status_code == status
+        assert len(requests) == 1
+        assert requests[0].url.raw_path == b"/api/v1/repos/example/app/issues/7/labels/mira-paused"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label", ["", ".", ".."])
+    async def test_remove_label_rejects_normalizing_identifiers_without_http(
+        self, monkeypatch, label
+    ):
+        requests = []
+
+        def serve(request):
+            requests.append(str(request.url))
+            return httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        monkeypatch.setattr(
+            "mira.providers.forgejo.httpx.AsyncClient",
+            lambda **kwargs: client_type(transport=httpx.MockTransport(serve), **kwargs),
+        )
+        provider = ForgejoProvider("synthetic")
+        provider._api = "https://forge.example.invalid/api/v1"
+        info = PRInfo(
+            title="Synthetic",
+            description="",
+            base_branch="main",
+            head_branch="topic",
+            url="https://forge.example.invalid/example/app/pulls/7",
+            number=7,
+            owner="example",
+            repo="app",
+            platform="forgejo",
+        )
+        error = None
+        try:
+            await provider.remove_label(info, label)
+        except ProviderError as exc:
+            error = exc
+
+        assert requests == []
+        assert isinstance(error, ProviderError)

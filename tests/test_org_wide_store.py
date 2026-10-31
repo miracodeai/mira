@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from mira.index import store as store_module
 from mira.index.store import (
     IndexStore,
     _iter_repo_dbs,
@@ -153,3 +154,158 @@ def test_vulnerability_counts_do_not_recreate_disappearing_database(index_dir, m
     monkeypatch.setattr(sqlite3, "connect", connect)
     assert count_vulnerabilities_org_wide_sqlite() == {}
     assert not vanished.exists()
+
+
+_ORG_READERS = [
+    "list_packages_org_wide_sqlite",
+    "search_packages_org_wide_sqlite",
+    "list_vulnerabilities_org_wide_sqlite",
+    "list_learned_rules_org_wide_sqlite",
+]
+
+
+@pytest.mark.parametrize("reader", _ORG_READERS)
+def test_org_reader_does_not_recreate_disappearing_database(index_dir, monkeypatch, reader):
+    vanished = index_dir / "acme" / "vanished.db"
+    _write_severities(vanished, ["critical"])
+    real_connect = sqlite3.connect
+
+    def remove_before_connect(database, *args, **kwargs):
+        # Removal after discovery and any existence check must still not create a DB.
+        vanished.unlink()
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", remove_before_connect)
+    assert getattr(store_module, reader)() == []
+    assert not vanished.exists()
+
+
+@pytest.mark.parametrize("reader", _ORG_READERS)
+@pytest.mark.parametrize("relative", [False, True])
+def test_org_readers_keep_wal_rows_and_encoded_paths(index_dir, monkeypatch, reader, relative):
+    path = index_dir / "org ?#%日本" / "repo ?#%.db"
+    path.parent.mkdir(parents=True)
+    writer = IndexStore(str(path))
+    try:
+        assert writer._conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        writer._conn.execute("PRAGMA wal_autocheckpoint=0")
+        writer.replace_manifest_packages(
+            "package.json",
+            [
+                {
+                    "name": "alpha",
+                    "kind": "npm",
+                    "version": "2.0",
+                    "file_path": "package.json",
+                    "is_dev": True,
+                },
+                {"name": "beta", "kind": "npm", "version": "3.0", "file_path": "package.json"},
+            ],
+        )
+        writer.replace_vulnerabilities_for_package(
+            "alpha",
+            "npm",
+            "2.0",
+            [
+                {"cve_id": "SYNTHETIC-high", "severity": "high"},
+                {"cve_id": "SYNTHETIC-low", "severity": "low"},
+            ],
+        )
+        writer.create_learned_rule(
+            "Pending synthetic rule", "security", status="pending", active=False
+        )
+        writer.create_learned_rule("Approved synthetic rule", "style", status="approved")
+        assert path.with_name(path.name + "-wal").exists()
+        if relative:
+            monkeypatch.chdir(index_dir.parent)
+            monkeypatch.setenv("MIRA_INDEX_DIR", index_dir.name)
+        before = path.read_bytes()
+        kwargs = {
+            "list_packages_org_wide_sqlite": {},
+            "search_packages_org_wide_sqlite": {
+                "name": "ALPHA",
+                "version": "2.",
+                "kind": "npm",
+                "is_dev": True,
+                "limit": 1,
+            },
+            "list_vulnerabilities_org_wide_sqlite": {"limit": 1},
+            "list_learned_rules_org_wide_sqlite": {"status": "pending"},
+        }[reader]
+
+        rows = getattr(store_module, reader)(**kwargs)
+
+        assert rows
+        assert all(
+            (r["platform"], r["owner"], r["repo"]) == ("github", "org ?#%日本", "repo ?#%")
+            for r in rows
+        )
+        if reader == "list_packages_org_wide_sqlite":
+            assert {(r["name"], r["version"]) for r in rows} == {("alpha", "2.0"), ("beta", "3.0")}
+        elif reader == "search_packages_org_wide_sqlite":
+            assert [(r["name"], r["version"], r["is_dev"]) for r in rows] == [
+                ("alpha", "2.0", True)
+            ]
+        elif reader == "list_vulnerabilities_org_wide_sqlite":
+            assert [r["cve_id"] for r in rows] == ["SYNTHETIC-high"]
+        else:
+            assert [(r["rule_text"], r["status"], r["active"]) for r in rows] == [
+                ("Pending synthetic rule", "pending", False)
+            ]
+        assert path.read_bytes() == before
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize("reader", _ORG_READERS)
+@pytest.mark.parametrize("fault", ["connect", "query"])
+def test_org_readers_skip_errors_and_close_connections(index_dir, monkeypatch, reader, fault):
+    broken = index_dir / "acme" / "broken.db"
+    _write_severities(broken, ["critical"])
+    real_connect = sqlite3.connect
+    opened = []
+
+    def connect(database, *args, **kwargs):
+        if fault == "connect":
+            raise sqlite3.OperationalError("synthetic connection failure")
+        connection = real_connect(database, *args, **kwargs)
+        opened.append(connection)
+        connection.set_authorizer(lambda *_: sqlite3.SQLITE_DENY)
+        return connection
+
+    before = broken.read_bytes()
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    assert getattr(store_module, reader)() == []
+    assert len(opened) == (1 if fault == "query" else 0)
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connection.execute("SELECT 1")
+    assert broken.read_bytes() == before
+
+
+def test_readonly_rules_reader_keeps_legacy_columns_compatible(index_dir):
+    path = index_dir / "acme" / "legacy.db"
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE learned_rules (id INTEGER, rule_text TEXT, source_signal TEXT, category TEXT, path_pattern TEXT, sample_count INTEGER, active INTEGER, created_at REAL, updated_at REAL)"
+        )
+        connection.execute(
+            "INSERT INTO learned_rules VALUES (1, 'Legacy rule', 'manual', 'style', '', 0, 1, 1, 2)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    before = path.read_bytes()
+
+    rows = store_module.list_learned_rules_org_wide_sqlite(status="approved")
+
+    assert len(rows) == 1
+    assert (rows[0]["rule_text"], rows[0]["status"], rows[0]["created_by"]) == (
+        "Legacy rule",
+        "approved",
+        "",
+    )
+    assert store_module.list_learned_rules_org_wide_sqlite(status="pending") == []
+    assert path.read_bytes() == before

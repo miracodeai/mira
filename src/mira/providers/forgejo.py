@@ -17,11 +17,11 @@ import logging
 import re
 from collections.abc import AsyncGenerator
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
-from mira.exceptions import ProviderError
+from mira.exceptions import ConfigError, ProviderError
 from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
@@ -56,6 +56,21 @@ def parse_pr_url(pr_url: str) -> tuple[str, str, int]:
     return match.group("owner"), match.group("repo"), int(match.group("number"))
 
 
+def _forgejo_web_base(api_url: str) -> str:
+    """Infer the web root only from a standard Forgejo API endpoint."""
+    try:
+        url = urlsplit(api_url)
+        if url.path.endswith("/api/v1"):
+            return urlunsplit(url._replace(path=url.path.removesuffix("/api/v1")))
+    except ValueError:
+        pass
+    raise ConfigError(
+        "Cannot infer MIRA_FORGEJO_BASE_URL from the Forgejo API URL. "
+        "Use an API URL whose path ends in /api/v1, or set "
+        "MIRA_FORGEJO_BASE_URL explicitly."
+    )
+
+
 class ForgejoProvider(BaseProvider):
     """Forgejo code hosting provider (Gitea-compatible REST API)."""
 
@@ -63,8 +78,9 @@ class ForgejoProvider(BaseProvider):
         if not token:
             raise ProviderError("Forgejo token is required")
         self._token = token
-        self._api = profiles.resolve("forgejo")["api_url"] or "https://codeberg.org/api/v1"
-        self._base = profiles.resolve("forgejo").get("base_url") or "https://codeberg.org"
+        profile = profiles.resolve("forgejo")
+        self._api = profile["api_url"] or "https://codeberg.org/api/v1"
+        self._base = profile.get("base_url") or _forgejo_web_base(self._api.rstrip("/"))
         self._username: str | None = None
 
     # ── low-level HTTP ──────────────────────────────────────────────
@@ -602,9 +618,13 @@ class ForgejoProvider(BaseProvider):
         )
 
     async def remove_label(self, pr_info: PRInfo, label: str) -> None:
+        # Quoting preserves dot segments, which HTTP clients normalize to a parent resource.
+        if label in ("", ".", ".."):
+            raise ProviderError("Cannot remove an empty or dot-segment label identifier")
         await self._request(
             "DELETE",
-            f"{self._repo(pr_info)}/issues/{pr_info.number}/labels?name={quote(label, safe='')}",
+            f"{self._repo(pr_info)}/issues/{pr_info.number}/labels/{quote(label, safe='')}",
+            ok=(200, 204),
         )
 
     async def get_discussion_root_body(self, pr_info: PRInfo, discussion_id: str) -> str:

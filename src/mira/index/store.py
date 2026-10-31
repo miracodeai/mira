@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mira.index._package_search import PackageGroups, matching_sqlite_packages
 from mira.index._store_shared import _StoreSharedMixin
 from mira.models import PRFingerprint
 
@@ -1676,7 +1677,7 @@ def list_packages_org_wide_sqlite() -> list[dict]:
     out: list[dict] = []
     for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(Path(db_path).absolute().as_uri() + "?mode=ro", uri=True)
             try:
                 rows = conn.execute(
                     "SELECT DISTINCT kind, name, version, file_path FROM package_manifests "
@@ -1710,26 +1711,17 @@ def search_packages_org_wide_sqlite(
 ) -> list[dict]:
     """SQLite equivalent of pg_store.search_packages_org_wide."""
     index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
-    name_l = name.lower() if name else None
-    version_l = version.lower() if version else None
-
     rows: list[dict] = []
     for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(Path(db_path).absolute().as_uri() + "?mode=ro", uri=True)
             try:
                 cur = conn.execute(
                     "SELECT name, kind, version, file_path, is_dev FROM package_manifests"
                 )
-                for r_name, r_kind, r_version, r_file, r_dev in cur.fetchall():
-                    if name_l and name_l not in r_name.lower():
-                        continue
-                    if version_l and version_l not in r_version.lower():
-                        continue
-                    if kind and r_kind != kind:
-                        continue
-                    if is_dev is not None and bool(r_dev) != is_dev:
-                        continue
+                for r_name, r_kind, r_version, r_file, r_dev in matching_sqlite_packages(
+                    cur.fetchall(), name=name, version=version, kind=kind, is_dev=is_dev
+                ):
                     rows.append(
                         {
                             "platform": platform,
@@ -1749,6 +1741,54 @@ def search_packages_org_wide_sqlite(
 
     rows.sort(key=lambda r: (r["name"].lower(), r["owner"], r["repo"]))
     return rows[:limit]
+
+
+def search_package_groups_org_wide_sqlite(
+    name: str | None = None,
+    version: str | None = None,
+    kind: str | None = None,
+    is_dev: bool | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Select final package groups while streaming each read-only SQLite store."""
+    index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
+    groups = PackageGroups(limit)
+    for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
+        checkpoint = groups.checkpoint()
+        completed = False
+        try:
+            conn = sqlite3.connect(Path(db_path).absolute().as_uri() + "?mode=ro", uri=True)
+            try:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        "SELECT name, kind, version, file_path, is_dev FROM package_manifests"
+                    )
+                    for r_name, r_kind, r_version, r_file, r_dev in matching_sqlite_packages(
+                        cursor, name=name, version=version, kind=kind, is_dev=is_dev
+                    ):
+                        groups.add(
+                            {
+                                "platform": platform,
+                                "owner": owner,
+                                "repo": repo,
+                                "name": r_name,
+                                "kind": r_kind,
+                                "version": r_version,
+                                "file_path": r_file,
+                                "is_dev": bool(r_dev),
+                            }
+                        )
+                    completed = True
+                finally:
+                    cursor.close()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            # Like the raw reader, keep complete rows if only cleanup failed.
+            if not completed:
+                groups.restore(checkpoint)
+    return groups.finish()
 
 
 def count_vulnerabilities_org_wide_sqlite() -> dict[str, int]:
@@ -1779,7 +1819,7 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
     rows: list[dict] = []
     for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(Path(db_path).absolute().as_uri() + "?mode=ro", uri=True)
             try:
                 cur = conn.execute(
                     "SELECT package_name, ecosystem, package_version, cve_id, summary, "
@@ -1821,7 +1861,7 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = No
     rows: list[dict] = []
     for platform, owner, repo, db_path in _iter_repo_dbs(index_dir):
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(Path(db_path).absolute().as_uri() + "?mode=ro", uri=True)
             try:
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(learned_rules)").fetchall()}
                 has_status = "status" in cols

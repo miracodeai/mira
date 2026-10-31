@@ -108,7 +108,7 @@ async def poll_org_wide() -> dict[str, int]:
         if not eco:
             continue
         for owner, repo in repos:
-            active_per_repo[(owner, repo)].add((name, eco, version))
+            active_per_repo[(owner, repo)].add((name, kind, version))
 
     for (owner, repo), active in active_per_repo.items():
         try:
@@ -211,11 +211,7 @@ async def poll_repo(owner: str, repo: str) -> dict[str, int]:
 
     # GC vulnerability rows whose (name, ecosystem, version) is no longer in
     # this repo's dep set — covers the manifest→lockfile transition.
-    active = {
-        (r["name"], osv_ecosystem(r["kind"]) or "", r["version"])
-        for r in deduped
-        if osv_ecosystem(r["kind"])
-    }
+    active = {(r["name"], r["kind"], r["version"]) for r in deduped if osv_ecosystem(r["kind"])}
     store.prune_stale_vulnerabilities(active)
 
     results = await query_batch(queries)

@@ -107,14 +107,12 @@ def search_packages(
     manifest rows so the same package isn't shown twice (e.g. ``click 8.3.1``
     from ``uv.lock`` plus ``click >=8.1`` from ``pyproject.toml``).
     """
-    from mira.index.manifests import _is_lockfile_path
-
     db_url = os.environ.get("DATABASE_URL", "")
     capped_limit = max(1, min(limit, 2000))
     if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
-        from mira.index.pg_store import search_packages_org_wide
+        from mira.index.pg_store import search_package_groups_org_wide
 
-        rows = search_packages_org_wide(
+        rows = search_package_groups_org_wide(
             db_url,
             name=name,
             version=version,
@@ -123,9 +121,9 @@ def search_packages(
             limit=capped_limit,
         )
     else:
-        from mira.index.store import search_packages_org_wide_sqlite
+        from mira.index.store import search_package_groups_org_wide_sqlite
 
-        rows = search_packages_org_wide_sqlite(
+        rows = search_package_groups_org_wide_sqlite(
             name=name,
             version=version,
             kind=kind,
@@ -133,15 +131,4 @@ def search_packages(
             limit=capped_limit,
         )
 
-    deduped: dict[tuple[str, str, str, str], dict] = {}
-    for r in rows:
-        # Case-insensitive on name — PyPI normalises `PyJWT`/`pyjwt` to the
-        # same package; without this the dropdown shows both spellings.
-        key = (r["owner"], r["repo"], r["kind"], r["name"].lower())
-        existing = deduped.get(key)
-        if existing is None or (
-            _is_lockfile_path(r.get("file_path", ""))
-            and not _is_lockfile_path(existing.get("file_path", ""))
-        ):
-            deduped[key] = r
-    return [PackageSearchHit(**r) for r in deduped.values()]
+    return [PackageSearchHit(**r) for r in rows]

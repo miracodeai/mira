@@ -219,6 +219,10 @@ class ReviewConfig(BaseModel):
     # listed as skipped.
     max_chunks_per_review: int = Field(default=5, ge=1, le=20)
     include_summary: bool = True
+    # List findings the self-critique graded "plausible" but did not post in a
+    # collapsed "Worth a look (not verified)" walkthrough section (max 5).
+    # Never inline, never in key issues. Off by default.
+    show_unverified_findings: bool = False
     focus_only_on_problems: bool = False
     walkthrough: bool = True
     walkthrough_sequence_diagram: bool = True

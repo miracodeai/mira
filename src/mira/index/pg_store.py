@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from typing import Any
 
+from mira.index._package_search import PackageGroups
 from mira.index._store_shared import _StoreSharedMixin
 from mira.index.store import (
     BlastRadiusEntry,
@@ -431,22 +432,14 @@ def list_packages_org_wide(url: str) -> list[dict]:
     ]
 
 
-def search_packages_org_wide(
-    url: str,
-    name: str | None = None,
-    version: str | None = None,
-    kind: str | None = None,
-    is_dev: bool | None = None,
-    limit: int = 500,
-) -> list[dict]:
-    """Search for packages across every repo in the org.
-
-    Returns rows of {owner, repo, name, kind, version, file_path, is_dev}.
-    Case-insensitive name and version match (ILIKE with implicit wildcards).
-    Empty/None filters are ignored. Backs the org-wide package search page —
-    used for incident response ("which repos use lodash@4.17.20 after this
-    CVE?") and upgrade audits.
-    """
+def _package_search_query(
+    name: str | None,
+    version: str | None,
+    kind: str | None,
+    is_dev: bool | None,
+    limit: int | None,
+) -> tuple[str, tuple]:
+    """Share the existing backend matching/order between raw and grouped reads."""
     clauses: list[str] = []
     params: list = []
     if name:
@@ -467,9 +460,30 @@ def search_packages_org_wide(
         "SELECT owner, repo, name, kind, version, file_path, is_dev "
         f"FROM package_manifests {where} "
         "ORDER BY LOWER(name), owner, repo "
-        "LIMIT %s"
     )
-    params.append(limit)
+    if limit is not None:
+        sql += "LIMIT %s"
+        params.append(limit)
+    return sql, tuple(params)
+
+
+def search_packages_org_wide(
+    url: str,
+    name: str | None = None,
+    version: str | None = None,
+    kind: str | None = None,
+    is_dev: bool | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Search for packages across every repo in the org.
+
+    Returns rows of {owner, repo, name, kind, version, file_path, is_dev}.
+    Case-insensitive name and version match (ILIKE with implicit wildcards).
+    Empty/None filters are ignored. Backs the org-wide package search page —
+    used for incident response ("which repos use lodash@4.17.20 after this
+    CVE?") and upgrade audits.
+    """
+    sql, params = _package_search_query(name, version, kind, is_dev, limit)
 
     with _pg_cursor(url) as cur:
         cur.execute(sql, tuple(params))
@@ -487,6 +501,40 @@ def search_packages_org_wide(
         }
         for r in rows
     ]
+
+
+def search_package_groups_org_wide(
+    url: str,
+    name: str | None = None,
+    version: str | None = None,
+    kind: str | None = None,
+    is_dev: bool | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Stream final groups in the existing database order on a server cursor."""
+    from mira.db.postgres import connect
+
+    groups = PackageGroups(limit, postgres_order=True)
+    sql, params = _package_search_query(name, version, kind, is_dev, None)
+    _get_conn(url)  # Preserve the raw helper's lazy schema initialization.
+    with connect(url) as conn, conn.transaction():
+        conn.execute("SET TRANSACTION READ ONLY")
+        with conn.cursor(name="mira_package_search") as cursor:
+            cursor.itersize = 128
+            cursor.execute(sql, params)
+            for r in cursor:
+                groups.add(
+                    {
+                        "owner": _registry_owner(r[0]),
+                        "repo": r[1],
+                        "name": r[2],
+                        "kind": r[3],
+                        "version": r[4],
+                        "file_path": r[5],
+                        "is_dev": bool(r[6]),
+                    }
+                )
+    return groups.finish()
 
 
 class PgIndexStore(_StoreSharedMixin):
