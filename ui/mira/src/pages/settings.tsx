@@ -46,6 +46,7 @@ export function SettingsPage() {
   const [apiStyle, setApiStyle] = useState("chat")
   const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
+  const [modelsLoaded, setModelsLoaded] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
   const [temperatureMode, setTemperatureMode] = useState("inherit")
   const [temperatureInput, setTemperatureInput] = useState("")
@@ -77,37 +78,47 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (!currentUser?.is_admin) return
-    api.getModels().then((m) => {
-      setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
-      setReviewModel(m.review_source === "config" ? "" : m.review_model)
-      setSecurityModel(m.security_source === "config" ? "" : m.security_model)
-      setConfigIndexingModel(m.config_indexing_model)
-      setConfigReviewModel(m.config_review_model)
-      setConfigSecurityModel(m.config_security_model)
-      setBackend(m.backend)
-      setIndexingOptions(m.indexing_options)
-      setReviewOptions(m.review_options)
-      setSecurityOptions(m.security_options)
-      setThinkingMode(m.review_thinking_mode)
-      setThinkingOptions(m.thinking_options)
-      setApiStyle(m.api_style ?? "chat")
-      setApiStyleOptions(m.api_style_options ?? [])
-      const temperature = m.indexing_temperature
-      setConfigTemperature(m.config_indexing_temperature)
-      setTemperatureSource(m.indexing_temperature_source)
-      setTemperatureMode(
-        m.indexing_temperature_source === "config"
-          ? "inherit"
-          : temperature === "omit"
-            ? "omit"
-            : temperature === 0
-              ? "default"
-              : "custom"
-      )
-      setTemperatureInput(
-        typeof temperature === "number" ? String(temperature) : ""
-      )
-    })
+    api
+      .getModels()
+      .then((m) => {
+        setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
+        setReviewModel(m.review_source === "config" ? "" : m.review_model)
+        setSecurityModel(m.security_source === "config" ? "" : m.security_model)
+        setConfigIndexingModel(m.config_indexing_model)
+        setConfigReviewModel(m.config_review_model)
+        setConfigSecurityModel(m.config_security_model)
+        setBackend(m.backend)
+        setIndexingOptions(m.indexing_options)
+        setReviewOptions(m.review_options)
+        setSecurityOptions(m.security_options)
+        setThinkingMode(m.review_thinking_mode)
+        setThinkingOptions(m.thinking_options)
+        setApiStyle(m.api_style ?? "chat")
+        setApiStyleOptions(m.api_style_options ?? [])
+        const temperature = m.indexing_temperature
+        setConfigTemperature(m.config_indexing_temperature)
+        setTemperatureSource(m.indexing_temperature_source)
+        setTemperatureMode(
+          m.indexing_temperature_source === "config"
+            ? "inherit"
+            : temperature === "omit"
+              ? "omit"
+              : temperature === 0
+                ? "default"
+                : "custom"
+        )
+        setTemperatureInput(
+          typeof temperature === "number" ? String(temperature) : ""
+        )
+        setModelsError("")
+        setModelsLoaded(true)
+      })
+      .catch(() => {
+        setModelsLoaded(false)
+        setModelsError(
+          "Could not load model settings. Reload the page to retry."
+        )
+      })
     api.getGlobalSettings().then((s) => {
       setEffective(
         (s.effective as {
@@ -130,9 +141,12 @@ export function SettingsPage() {
     )
   }
 
+  const httpBackend =
+    modelsLoaded && backend !== "bedrock" && backend !== "codex-cli"
+
   const saveModels = async () => {
+    if (!modelsLoaded) return
     let temperature: IndexingTemperature | null = null
-    const httpBackend = backend !== "bedrock" && backend !== "codex-cli"
     setTemperatureError("")
     setModelsError("")
     if (httpBackend && temperatureMode === "custom") {
@@ -406,7 +420,7 @@ export function SettingsPage() {
                 model is recommended since it runs over every file.
               </p>
             </div>
-            {backend !== "bedrock" && backend !== "codex-cli" ? (
+            {httpBackend ? (
               <div className="space-y-2">
                 <label
                   className="text-sm font-medium"
@@ -475,11 +489,11 @@ export function SettingsPage() {
                   unchanged; existing reasoning policy may omit temperature.
                 </p>
               </div>
-            ) : (
+            ) : modelsLoaded ? (
               <p className="text-xs text-muted-foreground">
                 Indexing temperature is managed by this backend.
               </p>
-            )}
+            ) : null}
             <div className="space-y-2">
               <label className="text-sm font-medium">Review Model</label>
               <ModelCombobox
@@ -552,13 +566,22 @@ export function SettingsPage() {
                 </p>
               </div>
             )}
+            {!modelsLoaded && !modelsError && (
+              <p role="status" className="text-sm text-muted-foreground">
+                Loading model settings…
+              </p>
+            )}
             {modelsError && (
               <p role="alert" className="text-sm text-destructive">
                 {modelsError}
               </p>
             )}
             <div className="flex items-center gap-3">
-              <Button size="sm" onClick={saveModels} disabled={savingModels}>
+              <Button
+                size="sm"
+                onClick={saveModels}
+                disabled={savingModels || !modelsLoaded}
+              >
                 {savingModels && (
                   <Loader2 className="mr-2 h-3 w-3 animate-spin" />
                 )}

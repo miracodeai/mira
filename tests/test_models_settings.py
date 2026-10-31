@@ -37,6 +37,23 @@ def in_memory_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppDatabase
     return db
 
 
+@pytest.fixture
+def models_http_app(in_memory_db):
+    from fastapi import FastAPI
+
+    from mira.dashboard.api import router
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def admin_user(request, call_next):
+        request.state.user = _admin_req().state.user
+        return await call_next(request)
+
+    app.include_router(router)
+    return app
+
+
 class TestEffectiveModelLogging:
     def test_dashboard_override_logged_as_source(
         self, in_memory_db: AppDatabase, caplog: pytest.LogCaptureFixture
@@ -84,6 +101,66 @@ class TestSetModelsInheritAndCustom:
 
 
 class TestIndexingTemperatureSettings:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [0, 0.4, "omit", None])
+    async def test_http_policy_round_trip(
+        self, in_memory_db, no_catalog_fetch, models_http_app, value
+    ):
+        import httpx
+
+        in_memory_db.set_setting("indexing_temperature", '"omit"')
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=models_http_app), base_url="http://test.invalid"
+        ) as client:
+            response = await client.put(
+                "/api/settings/models",
+                json={"indexing_model": "", "review_model": "", "indexing_temperature": value},
+            )
+            assert response.status_code == 200
+            resolved = (await client.get("/api/settings/models")).json()
+        assert resolved["indexing_temperature"] == (0.0 if value is None else value)
+        assert resolved["indexing_temperature_source"] == (
+            "config" if value is None else "dashboard"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "literal",
+        [
+            "1e400",
+            "-1e400",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            '{"nested":1e400}',
+            "[1e400]",
+            "-1",
+            "true",
+            '"0.5"',
+        ],
+    )
+    async def test_http_validation_returns_serializable_errors_without_writes(
+        self, in_memory_db, models_http_app, literal
+    ):
+        import httpx
+
+        in_memory_db.set_setting("indexing_model", "original")
+        in_memory_db.set_setting("indexing_temperature", '"omit"')
+        body = (
+            '{"indexing_model":"changed","review_model":"","indexing_temperature":' + literal + "}"
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=models_http_app, raise_app_exceptions=False),
+            base_url="http://test.invalid",
+        ) as client:
+            response = await client.put(
+                "/api/settings/models", content=body, headers={"Content-Type": "application/json"}
+            )
+        assert response.status_code == 422
+        assert response.json()["detail"]
+        assert in_memory_db.get_setting("indexing_model") == "original"
+        assert in_memory_db.get_setting("indexing_temperature") == '"omit"'
+
     @pytest.mark.parametrize("stored", ["bad-json", "true", "-1", "NaN", '"0.5"', "null", "{}"])
     def test_invalid_saved_policy_uses_config_without_logging_value(self, stored, caplog):
         from mira.dashboard.models_config import resolve_indexing_temperature

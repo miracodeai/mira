@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Generator
@@ -11,7 +12,14 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
+from pydantic_core import InitErrorDetails
 
 from mira.config import IndexingTemperature
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
@@ -393,6 +401,30 @@ class ModelsUpdate(BaseModel):
     security_model: str = ""
     review_thinking_mode: str = "off"
     api_style: str = "chat"
+
+    @field_validator("indexing_temperature", mode="wrap")
+    @classmethod
+    def _json_safe_temperature_errors(
+        cls, value: object, handler: ValidatorFunctionWrapHandler
+    ) -> IndexingTemperature | None:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            try:
+                json.dumps(exc.errors(), allow_nan=False)
+            except (TypeError, ValueError):
+                # FastAPI echoes invalid inputs, including nonfinite values in rejected containers.
+                errors = [
+                    InitErrorDetails(
+                        type=error["type"],
+                        loc=error["loc"],
+                        input=repr(error["input"]),
+                        ctx=error.get("ctx", {}),
+                    )
+                    for error in exc.errors()
+                ]
+                raise ValidationError.from_exception_data(cls.__name__, errors) from exc
+            raise
 
 
 class GlobalSettingsResponse(BaseModel):
