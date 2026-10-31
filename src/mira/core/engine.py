@@ -469,6 +469,20 @@ class ReviewEngine:
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
 
+    async def _finalize_placeholder(self, pr_info: PRInfo, comment_id: int, reason: str) -> None:
+        """Replace the in-progress placeholder with a short final note.
+
+        Keeps the PR from sitting on "Reviewing this PR…" when no walkthrough
+        can be shown. Best effort: a failure here is only logged.
+        """
+        if not self.provider:
+            return
+        markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+        try:
+            await self.provider.update_comment(pr_info, comment_id, markdown)
+        except Exception as exc:
+            logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
+
     _CHECK_CONCLUSIONS: dict[str, tuple[CheckConclusion, str, str]] = {
         "success": (
             "success",
@@ -997,16 +1011,21 @@ class ReviewEngine:
                         await self.provider.post_comment(pr_info, markdown)
                 except Exception as exc:
                     logger.warning("Failed to post walkthrough comment: %s", exc)
+                    # The review itself finished; don't leave the placeholder
+                    # on "Reviewing this PR…" when the walkthrough can't land.
+                    if placeholder_id is not None:
+                        await self._finalize_placeholder(
+                            pr_info,
+                            placeholder_id,
+                            "Review finished, but the walkthrough could not be posted. "
+                            "Any findings are posted as review comments.",
+                        )
         elif placeholder_id is not None:
             # No walkthrough (all files excluded, empty diff, or generation
             # failed) — finalize the placeholder so it doesn't sit on
             # "Reviewing this PR…" forever.
             reason = result.skipped_reason or "Walkthrough was not generated."
-            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
-            try:
-                await self.provider.update_comment(pr_info, placeholder_id, markdown)
-            except Exception as exc:
-                logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
+            await self._finalize_placeholder(pr_info, placeholder_id, reason)
 
         if (
             self.config.review.pr_summary != "disable"

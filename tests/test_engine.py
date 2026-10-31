@@ -713,6 +713,34 @@ class TestReviewEngine:
         assert mock_provider.update_comment.call_count >= 1
 
     @pytest.mark.asyncio
+    async def test_placeholder_finalized_when_walkthrough_post_fails(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """If the final walkthrough can't be posted (e.g. the host rejects the
+        body), the placeholder is replaced with a short note rather than left on
+        an in-progress state, and the review still completes."""
+        mock_provider.find_bot_comment = AsyncMock(return_value=7)
+        bodies: list[str] = []
+
+        async def update(pr_info, comment_id, body):  # noqa: ANN001, ANN202
+            bodies.append(body)
+            if "PR walkthrough summary" in body:
+                raise UnicodeEncodeError("utf-8", "\ud83d", 0, 1, "surrogates not allowed")
+
+        mock_provider.update_comment = AsyncMock(side_effect=update)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        assert any("PR walkthrough summary" in b for b in bodies), "final walkthrough was tried"
+        final = bodies[-1]
+        assert "<!-- mira-walkthrough -->" in final
+        assert "walkthrough could not be posted" in final
+        assert "Reviewing this PR" not in final
+        assert "Code review in progress" not in final
+        mock_provider.post_review.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_placeholder_finalized_when_all_files_excluded(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
