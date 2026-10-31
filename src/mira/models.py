@@ -296,10 +296,10 @@ class WalkthroughResult:
                 link = f"[#{ov.pr_number}]({ov.url})" if ov.url else f"#{ov.pr_number}"
                 line = f"> - {link} ({label}) — {ov.reason}"
                 if ov.shared_files:
-                    shown = ", ".join(f"`{p}`" for p in ov.shared_files[:3])
+                    shown_paths = ", ".join(f"`{p}`" for p in ov.shared_files[:3])
                     if len(ov.shared_files) > 3:
-                        shown += f" +{len(ov.shared_files) - 3} more"
-                    line += f" Shared: {shown}"
+                        shown_paths += f" +{len(ov.shared_files) - 3} more"
+                    line += f" Shared: {shown_paths}"
                 parts.append(line)
             parts.append("")
 
@@ -346,7 +346,7 @@ class WalkthroughResult:
 
         if skipped_paths and not in_progress:
             total = len(total_paths) if total_paths else (reviewed_files + len(skipped_paths))
-            shown = min(8, len(skipped_paths))
+            shown_count = min(8, len(skipped_paths))
             parts.append("")
             parts.append("---")
             parts.append("")
@@ -359,10 +359,10 @@ class WalkthroughResult:
             )
             parts.append("")
             parts.append("**Skipped:**")
-            for p in skipped_paths[:shown]:
+            for p in skipped_paths[:shown_count]:
                 parts.append(f"- `{p}`")
-            if len(skipped_paths) > shown:
-                parts.append(f"- _\u2026and {len(skipped_paths) - shown} more_")
+            if len(skipped_paths) > shown_count:
+                parts.append(f"- _\u2026and {len(skipped_paths) - shown_count} more_")
 
         if index_was_empty and not in_progress:
             parts.append("")
