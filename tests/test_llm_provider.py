@@ -404,8 +404,8 @@ class TestComplete:
                 await provider.complete([{"role": "user", "content": "hi"}])
 
     @pytest.mark.asyncio
-    async def test_empty_content_returns_empty_string(self):
-        config = LLMConfig(model="test-model")
+    async def test_empty_content_raises_after_retries(self):
+        config = LLMConfig(model="test-model", max_retries=2, retry_min_wait=0, retry_max_wait=0)
         provider = LLMProvider(config)
 
         resp_data = {"choices": [{"message": {"content": None}}]}
@@ -418,9 +418,13 @@ class TestComplete:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            result = await provider.complete([{"role": "user", "content": "hi"}])
+            with pytest.raises(LLMError) as error:
+                await provider.complete([{"role": "user", "content": "hi"}])
 
-        assert result == ""
+        assert error.value.code == "completion_failed"
+        assert isinstance(error.value.__cause__, LLMError)
+        assert error.value.__cause__.code == "empty_response"
+        assert mock_client.post.await_count == 2
 
     @pytest.mark.asyncio
     async def test_config_timeout_passed_to_httpx(self):
