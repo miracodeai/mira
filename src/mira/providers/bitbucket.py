@@ -39,6 +39,7 @@ from mira.platforms.bitbucket.auth import (
     bitbucket_auth_headers,
     learned_bot_user,
     remember_bot_user,
+    user_account_id,
     user_handle,
     user_identifiers,
 )
@@ -191,6 +192,9 @@ def from_bitbucket_markdown(raw: str) -> str:
 class BitbucketProvider(BaseProvider):
     """Bitbucket Cloud code hosting provider (REST 2.0)."""
 
+    # Nicknames and display names are not unique across Bitbucket accounts.
+    unique_usernames = False
+
     def __init__(self, token: str) -> None:
         if not token:
             raise ProviderError("Bitbucket token is required")
@@ -303,14 +307,24 @@ class BitbucketProvider(BaseProvider):
         repo: str,
         username: str,
         *,
-        user_id: int | None = None,
+        user_id: int | str | None = None,
     ) -> str | None:
         """A user's effective repository permission, normalized for authz.
 
         Uses the workspace permissions API, which needs a credential with
-        workspace admin rights. Without it, list the user in
+        workspace admin rights. Without it, list the user's account id in
         ``commands.allowed_users`` instead.
+
+        Grants are matched on ``user_id`` (the account id or uuid) only:
+        nicknames and display names are not unique, so matching on
+        ``username`` could pick up another account's grant. Without a
+        ``user_id`` the lookup fails closed.
         """
+        if not user_id:
+            logger.warning(
+                "No Bitbucket account id for %r; denying the permission lookup", username
+            )
+            return "none"
         url = (
             f"{self._api}/workspaces/{quote(owner, safe='')}/permissions/repositories/"
             f"{quote(repo, safe='')}"
@@ -330,9 +344,17 @@ class BitbucketProvider(BaseProvider):
         except Exception as exc:
             raise ProviderError(f"Failed to fetch repo permission for {username}: {exc}") from exc
 
-        wanted = username.lower()
+        wanted = str(user_id).lower()
         grant = next(
-            (g for g in grants if wanted in {i.lower() for i in user_identifiers(g.get("user"))}),
+            (
+                g
+                for g in grants
+                if wanted
+                in {
+                    user_account_id(g.get("user")).lower(),
+                    str((g.get("user") or {}).get("uuid") or "").lower(),
+                }
+            ),
             None,
         )
         if not grant:

@@ -23,6 +23,8 @@ from mira.platforms import profiles
 logger = logging.getLogger(__name__)
 
 _MAX_TREE_PAGES = 1000
+# A full commit hash; Bitbucket refs that match need no branch/tag lookup.
+_COMMIT_HASH = re.compile(r"[0-9a-f]{40}")
 
 
 class EmptyRepoError(Exception):
@@ -506,6 +508,9 @@ class BitbucketRepoFetcher:
         self._token = token
         self._api = base_url.rstrip("/")
         self._auth_headers = bitbucket_auth_headers(token)
+        # ref -> commit hash. Fetchers are built per indexing run, so this also
+        # pins every listing and file read in a run to one snapshot.
+        self._resolved: dict[tuple[str, str, str], str] = {}
 
     def _headers(self) -> dict[str, str]:
         return dict(self._auth_headers)
@@ -530,9 +535,54 @@ class BitbucketRepoFetcher:
             logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
             return "main"
 
+    async def _commit_for(self, owner: str, repo: str, ref: str) -> str:
+        """Resolve a branch or tag to its commit hash.
+
+        ``/src/{ref}/`` 404s when a branch name contains ``/`` (``release/1.0``),
+        encoded or not, while ``/refs/branches/{name}`` resolves it. Returns
+        ``ref`` unchanged when it is already a hash or cannot be resolved, so a
+        repo with no commits still surfaces as a 404 from ``/src``.
+        """
+        if not ref or _COMMIT_HASH.fullmatch(ref):
+            return ref
+        key = (owner, repo, ref)
+        if key in self._resolved:
+            return self._resolved[key]
+        commit = ref
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            for kind in ("branches", "tags"):
+                try:
+                    resp = await client.get(
+                        f"{self._repo(owner, repo)}/refs/{kind}/{quote(ref, safe='')}",
+                        headers=self._headers(),
+                        params={"fields": "target.hash"},
+                        timeout=15,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to resolve %s on %s/%s: %s", ref, owner, repo, exc)
+                    break
+                if resp.status_code == 404:
+                    continue
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Failed to resolve %s on %s/%s: HTTP %d",
+                        ref,
+                        owner,
+                        repo,
+                        resp.status_code,
+                    )
+                    break
+                commit_hash = ((resp.json() or {}).get("target") or {}).get("hash")
+                if isinstance(commit_hash, str) and _COMMIT_HASH.fullmatch(commit_hash):
+                    commit = commit_hash
+                break
+        self._resolved[key] = commit
+        return commit
+
     async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
+        commit = await self._commit_for(owner, repo, branch)
         initial_url = (
-            f"{self._repo(owner, repo)}/src/{quote(branch, safe='')}/?max_depth=100&pagelen=100"
+            f"{self._repo(owner, repo)}/src/{quote(commit, safe='')}/?max_depth=100&pagelen=100"
         )
         endpoint = httpx.URL(initial_url)
         url: str | None = initial_url
@@ -581,10 +631,10 @@ class BitbucketRepoFetcher:
     async def file_content(
         self, owner: str, repo: str, path: str, ref: str, semaphore=None
     ) -> str | None:
-        url = f"{self._repo(owner, repo)}/src/{quote(ref, safe='')}/{quote(path, safe='/')}"
-
         async def _fetch() -> str | None:
             try:
+                commit = await self._commit_for(owner, repo, ref)
+                url = f"{self._repo(owner, repo)}/src/{quote(commit, safe='')}/{quote(path, safe='/')}"
                 async with httpx.AsyncClient(follow_redirects=True) as client:
                     resp = await client.get(url, headers=self._headers(), timeout=30)
                     if resp.status_code == 404:
@@ -610,9 +660,10 @@ class BitbucketRepoFetcher:
     ) -> dict[str, str] | None:
         """Archive download from the web host. Returns None when the credential
         can't download archives, and the indexer falls back to per-file fetches."""
+        commit = await self._commit_for(owner, repo, ref)
         url = (
             f"{self._web_base()}/{quote(owner, safe='')}/{quote(repo, safe='')}"
-            f"/get/{quote(ref, safe='')}.tar.gz"
+            f"/get/{quote(commit, safe='')}.tar.gz"
         )
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:

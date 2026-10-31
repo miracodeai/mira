@@ -341,6 +341,28 @@ class TestCommentHandler:
         assert provider.add_label.await_args.args[1] == "mira-paused"
 
     @pytest.mark.asyncio
+    async def test_commands_authorize_by_account_id(self, bitbucket_auth):
+        """Nicknames are not unique, so every command check carries the account id."""
+        from mira.platforms.bitbucket.webhook import handle_bitbucket_comment
+
+        actor = _actor("alice")
+        provider = self._provider()
+        with (
+            patch(f"{WEBHOOK}.create_provider", return_value=provider),
+            patch(f"{WEBHOOK}.is_command_allowed", new=AsyncMock(return_value=False)) as allowed,
+            patch("mira.platforms.handlers.run_pr_command", new=AsyncMock()) as command,
+        ):
+            await handle_bitbucket_comment(
+                _comment_payload("@{557058:bot} pause", actor), bitbucket_auth, BOT
+            )
+            await handle_bitbucket_comment(
+                _comment_payload("@{557058:bot} review", actor), bitbucket_auth, BOT
+            )
+        provider.add_label.assert_not_awaited()
+        assert allowed.await_args.kwargs["user_id"] == actor["account_id"]
+        assert command.await_args.kwargs["user_id"] == actor["account_id"]
+
+    @pytest.mark.asyncio
     async def test_reply_in_bot_thread_routes_to_thread_reply(self, bitbucket_auth):
         from mira.platforms.bitbucket.webhook import handle_bitbucket_comment
 

@@ -427,7 +427,9 @@ class TestGetRepoPermission:
 
         ctx, _ = _patch(handler)
         with ctx:
-            perm = await BitbucketProvider("tok").get_repo_permission("acme", "widgets", "Alice")
+            perm = await BitbucketProvider("tok").get_repo_permission(
+                "acme", "widgets", "alice", user_id="557058:alice"
+            )
         assert perm == normalized
 
     @pytest.mark.asyncio
@@ -437,8 +439,50 @@ class TestGetRepoPermission:
 
         ctx, _ = _patch(handler)
         with ctx:
+            perm = await BitbucketProvider("tok").get_repo_permission(
+                "acme", "widgets", "alice", user_id="557058:alice"
+            )
+        assert perm == "none"
+
+    @pytest.mark.asyncio
+    async def test_matches_uuid(self):
+        def handler(method, url, **kw):
+            return _FakeResp(json_data=_comments_page({"permission": "write", "user": ALICE}))
+
+        ctx, _ = _patch(handler)
+        with ctx:
+            perm = await BitbucketProvider("tok").get_repo_permission(
+                "acme", "widgets", "alice", user_id="{ALICE-UUID}"
+            )
+        assert perm == "write"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["nickname", "display_name"])
+    async def test_same_name_other_account_gets_no_grant(self, field):
+        """Nicknames and display names are not unique: a namesake gets nothing."""
+        writer = {**ALICE, "display_name": "Alice Smith"}
+        namesake = {"nickname": "alice", "display_name": "Alice Smith"}
+
+        def handler(method, url, **kw):
+            return _FakeResp(json_data=_comments_page({"permission": "admin", "user": writer}))
+
+        ctx, _ = _patch(handler)
+        with ctx:
+            perm = await BitbucketProvider("tok").get_repo_permission(
+                "acme", "widgets", namesake[field], user_id="557058:mallory"
+            )
+        assert perm == "none"
+
+    @pytest.mark.asyncio
+    async def test_without_account_id_fails_closed(self):
+        def handler(method, url, **kw):
+            raise AssertionError("no lookup without an account id")
+
+        ctx, calls = _patch(handler)
+        with ctx:
             perm = await BitbucketProvider("tok").get_repo_permission("acme", "widgets", "alice")
         assert perm == "none"
+        assert calls == []
 
     @pytest.mark.asyncio
     async def test_forbidden_raises_actionable_error(self):
@@ -447,7 +491,9 @@ class TestGetRepoPermission:
 
         ctx, _ = _patch(handler)
         with ctx, pytest.raises(ProviderError, match="allowed_users"):
-            await BitbucketProvider("tok").get_repo_permission("acme", "widgets", "alice")
+            await BitbucketProvider("tok").get_repo_permission(
+                "acme", "widgets", "alice", user_id="557058:alice"
+            )
 
 
 class TestDescriptionAndLabels:
@@ -508,6 +554,8 @@ class TestFetcher:
         page2 = f"{REPO}/src/main/?page=2"
 
         def handler(method, url, **kw):
+            if "/refs/" in url:
+                return _FakeResp(status=404)
             if url == page2:
                 return _FakeResp(json_data={"values": [{"type": "commit_file", "path": "b/c.py"}]})
             assert url == f"{REPO}/src/main/?max_depth=100&pagelen=100"
@@ -538,6 +586,8 @@ class TestFetcher:
     @pytest.mark.asyncio
     async def test_file_content_and_tarball_url(self):
         def handler(method, url, **kw):
+            if "/refs/" in url:
+                return _FakeResp(status=404)
             if "/src/" in url:
                 assert url == f"{REPO}/src/main/dir/my%20file.py"
                 return _FakeResp(text="print(1)")
@@ -551,6 +601,72 @@ class TestFetcher:
                 "print(1)"
             )
             assert await fetcher.repo_tarball("acme", "widgets", "main") is None
+
+
+class TestFetcherResolvesRefs:
+    """``/src/{branch}/`` 404s for branch names with ``/``, so refs resolve to commits."""
+
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    def _handler(self, branches=None, tags=None, calls=None):
+        branches, tags = branches or {}, tags or {}
+
+        def handler(method, url, **kw):
+            for kind, refs in (("branches", branches), ("tags", tags)):
+                prefix = f"{REPO}/refs/{kind}/"
+                if url.startswith(prefix):
+                    assert kw["params"] == {"fields": "target.hash"}
+                    name = url.removeprefix(prefix)
+                    if name in refs:
+                        return _FakeResp(json_data={"target": {"hash": refs[name]}})
+                    return _FakeResp(status=404)
+            if url.startswith(f"{REPO}/src/"):
+                if "?" in url:
+                    return _FakeResp(
+                        json_data={"values": [{"type": "commit_file", "path": "a.py"}]}
+                    )
+                return _FakeResp(text="body")
+            return _FakeResp(status=403)
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_slashed_branch_reads_tree_files_and_archive_at_its_commit(self):
+        handler = self._handler(branches={"release%2F1.0": self.SHA})
+        ctx, calls = _patch(handler, "mira.platforms.fetch")
+        with ctx:
+            fetcher = BitbucketRepoFetcher("tok")
+            assert await fetcher.repo_tree("acme", "widgets", "release/1.0") == ["a.py"]
+            assert await fetcher.file_content("acme", "widgets", "a.py", "release/1.0") == "body"
+            await fetcher.repo_tarball("acme", "widgets", "release/1.0")
+        urls = [c[1] for c in calls]
+        assert f"{REPO}/src/{self.SHA}/?max_depth=100&pagelen=100" in urls
+        assert f"{REPO}/src/{self.SHA}/a.py" in urls
+        assert f"https://bitbucket.org/acme/widgets/get/{self.SHA}.tar.gz" in urls
+        # Resolved once per fetcher, so a run reads one snapshot.
+        assert sum("/refs/" in u for u in urls) == 1
+
+    @pytest.mark.asyncio
+    async def test_tag_is_resolved_after_branch_miss(self):
+        handler = self._handler(tags={"v1.0": self.SHA})
+        ctx, calls = _patch(handler, "mira.platforms.fetch")
+        with ctx:
+            await BitbucketRepoFetcher("tok").file_content("acme", "widgets", "a.py", "v1.0")
+        assert calls[-1][1] == f"{REPO}/src/{self.SHA}/a.py"
+
+    @pytest.mark.asyncio
+    async def test_full_commit_hash_needs_no_lookup(self):
+        ctx, calls = _patch(self._handler(), "mira.platforms.fetch")
+        with ctx:
+            await BitbucketRepoFetcher("tok").file_content("acme", "widgets", "a.py", self.SHA)
+        assert [c[1] for c in calls] == [f"{REPO}/src/{self.SHA}/a.py"]
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_ref_falls_back_to_name(self):
+        ctx, calls = _patch(self._handler(), "mira.platforms.fetch")
+        with ctx:
+            await BitbucketRepoFetcher("tok").file_content("acme", "widgets", "a.py", "main")
+        assert calls[-1][1] == f"{REPO}/src/main/a.py"
 
 
 class TestFileHistory:
@@ -589,6 +705,8 @@ class TestFetcherTreeCompleteness:
 
     async def _tree(self, pages):
         def handler(method, url, **kw):
+            if "/refs/" in url:
+                return _FakeResp(status=404)
             return pages[url]
 
         ctx, _ = _patch(handler, "mira.platforms.fetch")

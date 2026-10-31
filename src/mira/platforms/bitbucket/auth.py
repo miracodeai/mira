@@ -42,6 +42,13 @@ def user_identifiers(user: dict | None) -> set[str]:
     return {str(user[k]) for k in keys if user.get(k)}
 
 
+def user_account_id(user: dict | None) -> str:
+    """The user's immutable id: ``account_id``, else ``uuid``. Use it for authorization."""
+    if not user:
+        return ""
+    return str(user.get("account_id") or user.get("uuid") or "")
+
+
 def user_handle(user: dict | None) -> str:
     """The human-readable handle for a user: nickname, else username, else display name."""
     if not user:

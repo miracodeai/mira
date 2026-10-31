@@ -33,6 +33,7 @@ from mira.platforms.bitbucket import state
 from mira.platforms.bitbucket.auth import (
     bitbucket_auth_headers,
     normalize_mentions,
+    user_account_id,
     user_handle,
     user_identifiers,
 )
@@ -327,7 +328,10 @@ async def handle_bitbucket_comment(
         return
 
     pr_url = _pr_url(payload)
-    actor = user_handle(comment.get("user") or payload.get("actor"))
+    actor_user = comment.get("user") or payload.get("actor")
+    actor = user_handle(actor_user)
+    # Authorization uses the immutable account id: nicknames are not unique.
+    actor_id = user_account_id(actor_user)
     bot_identity = await auth.get_bot_identity()
     bot_ids = await _bot_ids(auth)
     names = mention_names(bot_name, bot_identity)
@@ -344,7 +348,13 @@ async def handle_bitbucket_comment(
 
         if first_word in _PAUSE_KEYWORDS:
             if not await is_command_allowed(
-                config, "pause", actor, provider=provider, owner=owner, repo=repo_name
+                config,
+                "pause",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo_name,
+                user_id=actor_id,
             ):
                 return
             await provider.add_label(pr_info, PAUSE_LABEL)
@@ -355,7 +365,13 @@ async def handle_bitbucket_comment(
             return
         if first_word in _RESUME_KEYWORDS:
             if not await is_command_allowed(
-                config, "resume", actor, provider=provider, owner=owner, repo=repo_name
+                config,
+                "resume",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo_name,
+                user_id=actor_id,
             ):
                 return
             await provider.remove_label(pr_info, PAUSE_LABEL)
@@ -385,7 +401,13 @@ async def handle_bitbucket_comment(
 
         if first_word in _REJECT_KEYWORDS and comment_path:
             if not await is_command_allowed(
-                config, "reject", actor, provider=provider, owner=owner, repo=repo_name
+                config,
+                "reject",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo_name,
+                user_id=actor_id,
             ):
                 return
             store = None
@@ -422,6 +444,7 @@ async def handle_bitbucket_comment(
                 actor=actor,
                 bot_name=bot_name,
                 platform="bitbucket",
+                user_id=actor_id,
             )
             return
 
@@ -435,6 +458,7 @@ async def handle_bitbucket_comment(
             actor,
             bot_name,
             platform="bitbucket",
+            user_id=actor_id,
         )
     except Exception:
         logger.exception("Error handling Bitbucket comment on %s/%s#%d", owner, repo_name, number)
