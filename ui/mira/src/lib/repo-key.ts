@@ -1,5 +1,5 @@
 export function normalizeRepoOwner(owner: string): string {
-  for (const platform of ["gitlab", "forgejo"]) {
+  for (const platform of ["gitlab", "forgejo", "origin"]) {
     const prefix = `_${platform}/`
     if (owner.startsWith(prefix)) return owner.slice(prefix.length)
   }

@@ -40,5 +40,15 @@
     "event_header": "X-Forgejo-Event",
     "terminology": { "pr_short": "PR", "pr": "pull request" },
     "supports": { "installations": false, "token_minting": false }
+  },
+  "origin": {
+    "api_url": "https://api.cursor.com/v1/origin",
+    "graphql_url": null,
+    "webhook_route": "/origin/webhook",
+    "auth_model": "app",
+    "signature": { "scheme": "ed25519-jwks", "header": "webhook-signature", "prefix": "v1ed," },
+    "event_header": "webhook-event-type",
+    "terminology": { "pr_short": "PR", "pr": "pull request" },
+    "supports": { "installations": true, "token_minting": true }
   }
 }

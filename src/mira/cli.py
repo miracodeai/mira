@@ -214,6 +214,8 @@ def review(
             provider_type = "gitlab"
         elif "/pulls/" in pr_url or "forgejo" in pr_url:
             provider_type = "forgejo"
+        elif "origin.cursor.com" in pr_url or "cursor.com/codebase" in pr_url:
+            provider_type = "origin"
         elif "/pull/" in pr_url or "github" in pr_url:
             provider_type = "github"
         else:
@@ -314,6 +316,30 @@ def review(
     help="Forgejo API base, e.g. https://forgejo.example.com/api/v1",
 )
 @click.option(
+    "--origin-app-id",
+    envvar="MIRA_ORIGIN_APP_ID",
+    default=None,
+    help="Cursor Origin App ID (enables the Origin webhook route with --origin-private-key)",
+)
+@click.option(
+    "--origin-private-key",
+    envvar="MIRA_ORIGIN_PRIVATE_KEY",
+    default=None,
+    help="Origin App Ed25519 private key PEM (or @path/to/key.pem)",
+)
+@click.option(
+    "--origin-token",
+    envvar="MIRA_ORIGIN_TOKEN",
+    default=None,
+    help="Origin Bearer token for CLI review / dashboard sync (installation or user access token)",
+)
+@click.option(
+    "--origin-base-url",
+    envvar="MIRA_ORIGIN_API_URL",
+    default=None,
+    help="Origin API base, default https://api.cursor.com/v1/origin",
+)
+@click.option(
     "--bot-name",
     envvar="MIRA_BOT_NAME",
     default=None,
@@ -343,11 +369,15 @@ def serve(
     forgejo_token: str | None,
     forgejo_webhook_secret: str | None,
     forgejo_base_url: str | None,
+    origin_app_id: str | None,
+    origin_private_key: str | None,
+    origin_token: str | None,
+    origin_base_url: str | None,
     bot_name: str | None,
     config_path: str | None,
     verbose: bool,
 ) -> None:
-    """Run the Mira webhook server for GitHub, GitLab, and/or Forgejo."""
+    """Run the Mira webhook server for GitHub, GitLab, Forgejo, and/or Cursor Origin."""
     try:
         import asyncio
 
@@ -357,6 +387,7 @@ def serve(
         from mira.platforms.forgejo.auth import ForgejoTokenAuth
         from mira.platforms.github.auth import GitHubAppAuth
         from mira.platforms.gitlab.auth import GitLabTokenAuth
+        from mira.platforms.origin.auth import OriginAppAuth, OriginTokenAuth
         from mira.platforms.server import create_app
     except ImportError as exc:
         raise click.ClickException(
@@ -379,15 +410,23 @@ def serve(
     github_configured = bool(app_id and private_key and webhook_secret)
     gitlab_configured = bool(gitlab_token and gitlab_webhook_secret)
     forgejo_configured = bool(forgejo_token and forgejo_webhook_secret)
-    if not github_configured and not gitlab_configured and not forgejo_configured:
+    origin_configured = bool(origin_app_id and origin_private_key)
+    if (
+        not github_configured
+        and not gitlab_configured
+        and not forgejo_configured
+        and not origin_configured
+    ):
         raise click.ClickException(
             "No platform configured. Provide GitHub App creds (--app-id, --private-key, "
-            "--webhook-secret) and/or GitLab creds (--gitlab-token, --gitlab-webhook-secret)."
+            "--webhook-secret), GitLab creds (--gitlab-token, --gitlab-webhook-secret), "
+            "Forgejo creds, and/or Origin App creds (--origin-app-id, --origin-private-key)."
         )
 
     app_auth = None
     gitlab_auth = None
     forgejo_auth = None
+    origin_auth = None
 
     if github_configured:
         assert private_key is not None
@@ -411,10 +450,27 @@ def serve(
             forgejo_token, forgejo_base_url or "https://codeberg.org/api/v1"
         )
 
+    if origin_configured:
+        assert origin_app_id is not None
+        assert origin_private_key is not None
+        try:
+            origin_auth = OriginAppAuth(
+                origin_app_id,
+                origin_private_key,
+                origin_base_url or "https://api.cursor.com/v1/origin",
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
+    elif origin_token:
+        # Token-only: dashboard sync / review without webhook App auth.
+        origin_auth = OriginTokenAuth(
+            origin_token, origin_base_url or "https://api.cursor.com/v1/origin"
+        )
+
     # Auto-detect the bot @mention from whichever platform's own identity when
     # the user didn't override it. Falls back to "miracodeai" on a lookup blip.
     if not bot_name:
-        identity_auth = app_auth or gitlab_auth or forgejo_auth
+        identity_auth = app_auth or gitlab_auth or forgejo_auth or origin_auth
         if identity_auth is not None:
             bot_name = asyncio.run(identity_auth.get_bot_identity()) or "miracodeai"
             click.echo(f"Detected bot @mention: @{bot_name}")
@@ -437,6 +493,7 @@ def serve(
         gitlab_webhook_secret=gitlab_webhook_secret,
         forgejo_auth=forgejo_auth,
         forgejo_webhook_secret=forgejo_webhook_secret,
+        origin_auth=origin_auth if origin_configured else None,
     )
 
     platforms = ", ".join(
@@ -445,6 +502,7 @@ def serve(
             ("GitHub", github_configured),
             ("GitLab", gitlab_configured),
             ("Forgejo", forgejo_configured),
+            ("Origin", origin_configured),
         ]
         if on
     )
