@@ -21,6 +21,7 @@ import {
 import { useParams } from "react-router"
 
 import { api } from "@/lib/api"
+import type { IndexingTemperature } from "@/lib/api/settings"
 import { useAuth } from "@/lib/auth"
 import { useDocumentTitle } from "@/lib/hooks"
 
@@ -46,6 +47,13 @@ export function SettingsPage() {
   const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
+  const [temperatureMode, setTemperatureMode] = useState("inherit")
+  const [temperatureInput, setTemperatureInput] = useState("")
+  const [configTemperature, setConfigTemperature] =
+    useState<IndexingTemperature>(0)
+  const [temperatureSource, setTemperatureSource] = useState("config")
+  const [temperatureError, setTemperatureError] = useState("")
+  const [modelsError, setModelsError] = useState("")
 
   const [effective, setEffective] = useState<{
     filter?: Record<string, number | boolean | string>
@@ -84,6 +92,21 @@ export function SettingsPage() {
       setThinkingOptions(m.thinking_options)
       setApiStyle(m.api_style ?? "chat")
       setApiStyleOptions(m.api_style_options ?? [])
+      const temperature = m.indexing_temperature
+      setConfigTemperature(m.config_indexing_temperature)
+      setTemperatureSource(m.indexing_temperature_source)
+      setTemperatureMode(
+        m.indexing_temperature_source === "config"
+          ? "inherit"
+          : temperature === "omit"
+            ? "omit"
+            : temperature === 0
+              ? "default"
+              : "custom"
+      )
+      setTemperatureInput(
+        typeof temperature === "number" ? String(temperature) : ""
+      )
     })
     api.getGlobalSettings().then((s) => {
       setEffective(
@@ -108,17 +131,43 @@ export function SettingsPage() {
   }
 
   const saveModels = async () => {
+    let temperature: IndexingTemperature | null = null
+    const httpBackend = backend !== "bedrock" && backend !== "codex-cli"
+    setTemperatureError("")
+    setModelsError("")
+    if (httpBackend && temperatureMode === "custom") {
+      const value = Number(temperatureInput)
+      if (!temperatureInput.trim() || !Number.isFinite(value) || value < 0) {
+        setTemperatureError("Enter a finite, nonnegative number.")
+        return
+      }
+      temperature = value
+    } else if (temperatureMode === "default") {
+      temperature = 0
+    } else if (temperatureMode === "omit") {
+      temperature = "omit"
+    }
     setSavingModels(true)
-    await api.saveModels(
-      indexingModel,
-      reviewModel,
-      securityModel,
-      thinkingMode,
-      apiStyle
-    )
-    setSavingModels(false)
-    setModelsSaved(true)
-    setTimeout(() => setModelsSaved(false), 2000)
+    setModelsSaved(false)
+    try {
+      await api.saveModels(
+        indexingModel,
+        reviewModel,
+        securityModel,
+        thinkingMode,
+        apiStyle,
+        httpBackend ? temperature : undefined
+      )
+      if (httpBackend) {
+        setTemperatureSource(temperature === null ? "config" : "dashboard")
+      }
+      setModelsSaved(true)
+      setTimeout(() => setModelsSaved(false), 2000)
+    } catch (err) {
+      setModelsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSavingModels(false)
+    }
   }
 
   const setOverride = (
@@ -357,6 +406,80 @@ export function SettingsPage() {
                 model is recommended since it runs over every file.
               </p>
             </div>
+            {backend !== "bedrock" && backend !== "codex-cli" ? (
+              <div className="space-y-2">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="indexing-temperature-mode"
+                >
+                  Indexing Temperature
+                </label>
+                <Select
+                  value={temperatureMode}
+                  onValueChange={(mode) => {
+                    setTemperatureMode(mode)
+                    setTemperatureError("")
+                  }}
+                >
+                  <SelectTrigger id="indexing-temperature-mode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      Inherit deployment config
+                    </SelectItem>
+                    <SelectItem value="default">Mira default (0.0)</SelectItem>
+                    <SelectItem value="omit">
+                      Provider default (omit)
+                    </SelectItem>
+                    <SelectItem value="custom">Custom number</SelectItem>
+                  </SelectContent>
+                </Select>
+                {temperatureMode === "custom" && (
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="indexing-temperature-value"
+                      className="text-sm"
+                    >
+                      Custom indexing temperature
+                    </label>
+                    <Input
+                      id="indexing-temperature-value"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={temperatureInput}
+                      onChange={(e) => setTemperatureInput(e.target.value)}
+                      aria-invalid={!!temperatureError}
+                      aria-describedby="indexing-temperature-error"
+                    />
+                  </div>
+                )}
+                {temperatureError && (
+                  <p
+                    id="indexing-temperature-error"
+                    role="alert"
+                    className="text-xs text-destructive"
+                  >
+                    {temperatureError}
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  Deployment config:{" "}
+                  {configTemperature === "omit" ? "omit" : configTemperature}.{" "}
+                  Saved source:{" "}
+                  {temperatureSource === "config"
+                    ? "deployment config"
+                    : "dashboard"}
+                  . Applies to code-index summaries only. Reasoning effort is
+                  unchanged; existing reasoning policy may omit temperature.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Indexing temperature is managed by this backend.
+              </p>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-medium">Review Model</label>
               <ModelCombobox
@@ -428,6 +551,11 @@ export function SettingsPage() {
                   Chat Completions works everywhere.
                 </p>
               </div>
+            )}
+            {modelsError && (
+              <p role="alert" className="text-sm text-destructive">
+                {modelsError}
+              </p>
             )}
             <div className="flex items-center gap-3">
               <Button size="sm" onClick={saveModels} disabled={savingModels}>

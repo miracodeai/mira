@@ -8,11 +8,28 @@ model there; this file picks it up automatically.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
-from mira.config import LLMConfig
+from pydantic import TypeAdapter, ValidationError
+
+from mira.config import IndexingTemperature, LLMConfig
 from mira.llm import registry
 
 logger = logging.getLogger(__name__)
+_INDEXING_TEMPERATURE: TypeAdapter[IndexingTemperature] = TypeAdapter(IndexingTemperature)
+
+
+def resolve_indexing_temperature(
+    config: LLMConfig, db_value: str | None = None
+) -> tuple[IndexingTemperature, Literal["dashboard", "config"]]:
+    """Resolve a validated indexing temperature: DB → config → 0.0."""
+    if db_value:
+        try:
+            return _INDEXING_TEMPERATURE.validate_json(db_value), "dashboard"
+        except ValidationError:
+            logger.warning("Invalid saved indexing temperature; using deployment config")
+    return config.indexing_temperature, "config"
+
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     model_id: registry.pricing(model_id) for model_id in registry.all_models()
@@ -149,12 +166,14 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     db_thinking: str | None = None
     db_review: str | None = None
     db_style: str | None = None
+    db_temperature: str | None = None
     try:
         from mira.dashboard.api import _app_db
 
         if _app_db is not None:
             if purpose == "indexing":
                 db_model = _app_db.get_setting("indexing_model")
+                db_temperature = _app_db.get_setting("indexing_temperature")
             elif purpose == "review":
                 db_model = _app_db.get_setting("review_model")
                 db_thinking = _app_db.get_setting("review_thinking_mode")
@@ -186,5 +205,14 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     source = "dashboard setting" if db_model else ("mira.yaml" if config_model else "default")
     logger.info("%s model: %s (source: %s)", purpose.capitalize(), resolved, source)
     return base.model_copy(
-        update={"model": resolved, "reasoning_effort": thinking_mode, "api_style": resolved_style}
+        update={
+            "model": resolved,
+            "reasoning_effort": thinking_mode,
+            "api_style": resolved_style,
+            "indexing_temperature": (
+                resolve_indexing_temperature(base, db_temperature)[0]
+                if purpose == "indexing"
+                else base.indexing_temperature
+            ),
+        }
     )

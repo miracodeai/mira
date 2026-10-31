@@ -13,6 +13,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from mira.config import IndexingTemperature
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
 from mira.dashboard.db import AppDatabase, RepoRecord
 from mira.index.relationships import RelationshipStore
@@ -360,6 +361,9 @@ class ModelOption(BaseModel):
 
 class ModelsResponse(BaseModel):
     indexing_model: str
+    indexing_temperature: IndexingTemperature
+    indexing_temperature_source: str
+    config_indexing_temperature: IndexingTemperature
     review_model: str
     security_model: str
     backend: str  # "openrouter" | "bedrock" | "openai-compatible"
@@ -384,6 +388,7 @@ class ModelsResponse(BaseModel):
 
 class ModelsUpdate(BaseModel):
     indexing_model: str
+    indexing_temperature: IndexingTemperature | None = None
     review_model: str
     security_model: str = ""
     review_thinking_mode: str = "off"

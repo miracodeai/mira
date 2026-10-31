@@ -1,10 +1,15 @@
 import { fetchJson, putJson } from "./http"
 
+export type IndexingTemperature = number | "omit"
+
 // Model selection, cost estimate, and admin review-config overrides.
 export const settingsApi = {
   getModels: () =>
     fetchJson<{
       indexing_model: string
+      indexing_temperature: IndexingTemperature
+      indexing_temperature_source: "dashboard" | "config"
+      config_indexing_temperature: IndexingTemperature
       review_model: string
       security_model: string
       backend: string
@@ -20,7 +25,11 @@ export const settingsApi = {
         recommended?: boolean
       }[]
       review_options: { value: string; label: string; recommended?: boolean }[]
-      security_options: { value: string; label: string; recommended?: boolean }[]
+      security_options: {
+        value: string
+        label: string
+        recommended?: boolean
+      }[]
       review_thinking_mode: string
       thinking_options: {
         value: string
@@ -40,7 +49,8 @@ export const settingsApi = {
     review_model: string,
     security_model: string,
     review_thinking_mode: string = "off",
-    api_style: string = "chat"
+    api_style: string = "chat",
+    indexing_temperature?: IndexingTemperature | null
   ) =>
     putJson<{ ok: boolean }>("/api/settings/models", {
       indexing_model,
@@ -48,6 +58,7 @@ export const settingsApi = {
       security_model,
       review_thinking_mode,
       api_style,
+      indexing_temperature,
     }),
 
   getCostEstimate: () =>
