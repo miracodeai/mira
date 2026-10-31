@@ -350,7 +350,7 @@ class WalkthroughResult:
             parts.append("")
             parts.append("---")
             parts.append("")
-            parts.append(f"### \ud83d\udccb Reviewed {reviewed_files} of {total} files")
+            parts.append(f"### \U0001f4cb Reviewed {reviewed_files} of {total} files")
             parts.append("")
             parts.append(
                 "This PR is large enough that some files were skipped to keep the "

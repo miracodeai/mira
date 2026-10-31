@@ -16,6 +16,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Walkthrough verdict reflects what was posted.** When filtering and self-critique leave no comments, a walkthrough the LLM scored 3 or higher now shows 5/5 "No issues to flag" with a neutral reason, instead of a label such as "Safe with minor fixes" promising fixes the PR never shows. Scores of 2 or lower are unchanged, since their concerns are in the reason rather than in line comments.
 - **GitHub App permission: `checks: read & write`** (newly required; earlier releases needed no check permission). Existing installations must add the permission to see review status updates; a missing permission is logged and the review proceeds without the status.
 
+### Fixed
+
+- **Walkthroughs on PRs with skipped files post again.** The "📋 Reviewed N of M files" heading was written as the escapes `\ud83d\udccb`, which Python keeps as two lone UTF-16 surrogates rather than one emoji. Encoding the walkthrough then failed with "surrogates not allowed", so on any PR large enough for files to be skipped the walkthrough was never posted (GitLab, Forgejo and Bitbucket send UTF-8 JSON bodies).
+
 ## [0.10.1] — 2026-10-28
 
 ### Fixed
