@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig
 from mira.core.context import build_file_context_string
+from mira.llm.prompt_cache import split_system_prompt
 from mira.llm.prompts.footguns import get_footguns_for_files
 from mira.llm.prompts.verify_fixes import _extract_issue_description
 from mira.models import FileDiff, UnresolvedThread
@@ -104,7 +105,7 @@ def build_review_prompt(
     user_parts.extend(file_contexts)
 
     return [
-        {"role": "system", "content": system_content},
+        *split_system_prompt(system_content),
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
 
@@ -125,7 +126,7 @@ def build_security_review_prompt(
     file_paths = [f.path for f in files]
     system_content = template.render(pr_title=pr_title, file_paths=file_paths)
     return [
-        {"role": "system", "content": system_content},
+        *split_system_prompt(system_content),
         {"role": "user", "content": "\n\n".join(file_contexts)},
     ]
 

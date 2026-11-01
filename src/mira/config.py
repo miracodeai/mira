@@ -78,6 +78,9 @@ class LLMConfig(BaseModel):
     request_timeout: int = Field(default=120, ge=1)
     retry_min_wait: int = Field(default=2, ge=0)
     retry_max_wait: int = Field(default=30, ge=0)
+    # Send Anthropic prompt-cache breakpoints when the endpoint's provider
+    # profile supports them (OpenRouter) and the model is anthropic/*.
+    prompt_caching: bool = True
     # Codex CLI provider settings. Auth is handled by Codex itself through
     # CODEX_HOME/auth.json from `codex login`; Mira does not need an OpenAI API key.
     codex_command: str = "codex"

@@ -140,6 +140,9 @@ class OpenAICompatibleProvider:
         self.profile = profiles.resolve(config.base_url)
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        # Prompt-cache activity reported by the endpoint (subset of prompt tokens).
+        self.total_cache_read_tokens = 0
+        self.total_cache_write_tokens = 0
         self._no_forced_tool_choice: set[str] = set()
         self._no_reasoning: set[str] = set()
 
@@ -241,6 +244,18 @@ class OpenAICompatibleProvider:
         if usage:
             self.total_prompt_tokens += usage.get("prompt_tokens", 0)
             self.total_completion_tokens += usage.get("completion_tokens", 0)
+            details = usage.get("prompt_tokens_details") or {}
+            cache_read = details.get("cached_tokens") or 0
+            cache_write = details.get("cache_write_tokens") or 0
+            self.total_cache_read_tokens += cache_read
+            self.total_cache_write_tokens += cache_write
+            if cache_read or cache_write:
+                logger.info(
+                    "LLM prompt cache: read=%d write=%d prompt=%d",
+                    cache_read,
+                    cache_write,
+                    usage.get("prompt_tokens", 0),
+                )
 
     @staticmethod
     def _handle_error(resp: httpx.Response) -> None:
