@@ -203,6 +203,36 @@ class TestEvidenceGradedCritique:
         assert entry["reason"] == "unsupported: code contradicts"
 
     @pytest.mark.asyncio
+    async def test_held_back_collects_plausible_drops_only(self, monkeypatch):
+        comments = [
+            _comment(title="proven bug"),
+            _comment(title="maybe", severity=Severity.SUGGESTION, confidence=0.9),
+            _comment(title="wrong", severity=Severity.BLOCKER),
+        ]
+        response = json.dumps(
+            {
+                "verdicts": [
+                    {"index": 0, "evidence": "proven", "reason": "shown"},
+                    {"index": 1, "evidence": "plausible", "reason": "depends on callers"},
+                    {"index": 2, "evidence": "unsupported", "reason": "code contradicts"},
+                ]
+            }
+        )
+        from mira.llm import provider as provider_mod
+
+        async def fake(self, messages, tools, temperature=None):
+            return response
+
+        monkeypatch.setattr(provider_mod.LLMProvider, "complete_with_tools", fake)
+
+        held_back: list[ReviewComment] = []
+        kept = await self_critique(AsyncMock(), comments, held_back=held_back)
+
+        assert [c.title for c in kept] == ["proven bug"]
+        # Structured objects, not audit strings; unsupported drops excluded.
+        assert held_back == [comments[1]]
+
+    @pytest.mark.asyncio
     async def test_audit_records_missing_verdict(self, monkeypatch):
         comments = [_comment(title="no verdict for me")]
         from mira.llm import provider as provider_mod

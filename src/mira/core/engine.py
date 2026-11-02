@@ -126,16 +126,25 @@ def compose_pr_description(current_body: str, summary_block: str, mode: str) -> 
 def _clamp_confidence_to_findings(
     walkthrough: WalkthroughResult,
     comments: list[ReviewComment],
+    unverified: int = 0,
 ) -> None:
     """Tighten the walkthrough confidence score based on actual review findings.
 
     The LLM rates confidence before chunked review runs, so it hasn't yet seen
-    blockers or warnings discovered later. This never *raises* the score — it
-    only lowers it when the findings contradict an optimistic initial read.
+    blockers or warnings discovered later. It lowers the score when the
+    findings contradict an optimistic initial read, and settles it when
+    nothing posted (see the last rule).
 
     Rubric (1=major concerns, 5=safe to merge):
       - ≥1 blocker → score ≤ 2
       - ≥3 warnings (and no blocker) → score ≤ 3
+      - no comments posted and score ≥ 3 → recomputed from what posted:
+        5/5 "No issues to flag", or 4/5 "No confirmed issues" when
+        ``unverified`` plausible drops are listed, with a neutral reason. The
+        LLM's own label (e.g. "Safe with minor fixes") may promise fixes that
+        filtering or self-critique removed, so this rule may *raise* a score.
+        A score ≤ 2 is left alone: its concerns live in the reason (design or
+        risk), not in line comments, and must not be rewritten away.
     """
     cs = walkthrough.confidence_score
     if cs is None:
@@ -156,6 +165,15 @@ def _clamp_confidence_to_findings(
         cs.score = 3
         cs.label = "Needs review"
         cs.reason = f"Found {warnings} warnings that need attention before merge."
+    elif not comments and cs.score >= 3:
+        if unverified:
+            cs.score = 4
+            cs.label = "No confirmed issues"
+            cs.reason = "No confirmed issues; possible issues are listed below for a manual check."
+        else:
+            cs.score = 5
+            cs.label = "No issues to flag"
+            cs.reason = "No issues found in the reviewed changes."
 
     if cs.score != original:
         logger.info(
@@ -943,7 +961,10 @@ class ReviewEngine:
                     result.key_issues = _drop_orphan_key_issues(result.key_issues, kept)
 
         if result.walkthrough:
-            _clamp_confidence_to_findings(result.walkthrough, result.comments)
+            unverified = (
+                result.unverified_findings if self.config.review.show_unverified_findings else []
+            )
+            _clamp_confidence_to_findings(result.walkthrough, result.comments, len(unverified))
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:
@@ -1015,6 +1036,7 @@ class ReviewEngine:
                         index_was_empty=getattr(self, "_index_was_empty", False),
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
                         overlaps=overlaps or None,
+                        unverified_findings=unverified or None,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -1474,6 +1496,7 @@ class ReviewEngine:
         learned_rules: list[str],
         custom_rules: list[dict[str, str]],
         audit: list[dict],
+        held_back: list[ReviewComment],
     ) -> list[ReviewComment]:
         """Severity, noise filter, already-posted dedupe, then self-critique."""
         all_comments = [classify_severity(c) for c in all_comments]
@@ -1521,6 +1544,7 @@ class ReviewEngine:
                     indexing_llm=self.indexing_llm,
                     diff_files=critique_files,
                     audit=audit,
+                    held_back=held_back,
                     llm_config=self.config.llm,
                     critic_llm=self._critic,
                 )
@@ -1647,6 +1671,7 @@ class ReviewEngine:
         base_existing = list(existing_comments) if existing_comments else []
         semaphore = _asyncio.Semaphore(self.config.review.max_concurrent_chunks)
         audit: list[dict] = []
+        held_back: list[ReviewComment] = []
 
         async def _review_chunk(
             idx: int,
@@ -1837,6 +1862,7 @@ class ReviewEngine:
             learned_rules=learned_rules,
             custom_rules=custom_rules,
             audit=audit,
+            held_back=held_back,
         )
 
         all_key_issues = _drop_orphan_key_issues(all_key_issues, final_comments)
@@ -1907,4 +1933,5 @@ class ReviewEngine:
             skipped_paths=skipped_paths_only,
             total_paths=all_paths,
             audit=audit,
+            unverified_findings=held_back,
         )

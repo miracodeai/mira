@@ -100,6 +100,11 @@ review:
   focus_only_on_problems: false
   # Include a summary comment
   include_summary: true
+  # List findings the self-critique graded "plausible" but did not post in a
+  # collapsed "Worth a look (not verified)" walkthrough section (max 5, never
+  # inline). With it shown and nothing posted, the verdict reads
+  # "No confirmed issues".
+  show_unverified_findings: false
   # Generate a PR walkthrough comment (top-level summary)
   walkthrough: true
   # Include a Mermaid sequence diagram in the walkthrough
