@@ -442,8 +442,13 @@ async def self_critique(
     audit: list[dict] | None = None,
     llm_config: LLMConfig | None = None,
     critic_llm: LLMProviderProtocol | None = None,
+    held_back: list[ReviewComment] | None = None,
 ) -> list[ReviewComment]:
     """Grade each draft comment's evidence and drop the unsupported ones.
+
+    ``held_back``, when given, receives the dropped comments the critic graded
+    ``plausible`` (consistent with the code but not proven), for callers that
+    surface them as unverified hints. ``audit`` stays diagnostic only.
 
     The critic grades evidence (proven / plausible / unsupported) rather
     than making keep/drop calls — an adversarial "find why this is wrong"
@@ -559,6 +564,8 @@ async def self_critique(
         v = verdict_by_idx.get(i)
         evidence = v.get("evidence", "keep=false") if v else "no-verdict"
         reason = str(v.get("reason", "no reason")) if v else "critic returned no verdict"
+        if held_back is not None and evidence == "plausible":
+            held_back.append(c)
         if audit is not None:
             audit.append(
                 {
