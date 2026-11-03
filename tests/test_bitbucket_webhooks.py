@@ -406,5 +406,6 @@ async def test_failed_review_dispatches_review_failed(bitbucket_auth):
     assert data == {
         "repo": "acme/widgets",
         "pr_url": "https://bitbucket.org/acme/widgets/pull-requests/7",
+        "number": 7,
         "error": "model returned nothing",
     }

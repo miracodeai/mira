@@ -616,7 +616,7 @@ async def handle_pull_request(
 
             await dispatch_event(
                 REVIEW_FAILED,
-                {"repo": repo_full, "pr_url": pr_url, "error": str(exc)},
+                {"repo": repo_full, "pr_url": pr_url, "number": number, "error": str(exc)},
             )
 
 

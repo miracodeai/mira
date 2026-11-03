@@ -10,6 +10,7 @@ import pytest
 
 from mira.config import CommandsConfig, MiraConfig
 from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
+from mira.outbound_webhooks import sample_data
 from mira.platforms.github.webhook import (
     handle_comment,
     handle_pause_resume,
@@ -250,7 +251,10 @@ async def test_failed_review_fires_review_failed(
 
     data = _data_for(mock_dispatch, "review.failed")
     assert data["repo"] == "testowner/testrepo"
+    assert data["number"] == 42
     assert "boom" in data["error"]
+    # The Settings "Send test" sample must match the real payload shape.
+    assert data.keys() == sample_data("review.failed").keys()
 
 
 @patch("mira.platforms.handlers.ReviewEngine")
