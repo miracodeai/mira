@@ -99,6 +99,7 @@ MIRA_GITHUB_APP_ID=123456
 MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)"
 MIRA_WEBHOOK_SECRET=your-secret
 OPENROUTER_API_KEY=sk-or-...
+MIRA_LINEAR_API_KEY=lin_api-...
 ```
 
 ```bash
@@ -106,6 +107,10 @@ docker run -p 8000:8000 --env-file .env \
   -v "$(pwd)/mira.yaml:/app/mira.yaml" \
   ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
 ```
+
+`MIRA_LINEAR_API_KEY` is optional. A [read-only personal API key](https://linear.app/settings/api)
+enriches reviews with the description, acceptance criteria, metadata, and latest discussion from
+Linear issues referenced in the pull request title, description, or branch name.
 
 **2. Install the app** on your repos — every PR gets reviewed.
 
