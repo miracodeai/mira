@@ -41,6 +41,14 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Model returned neither tool call nor content ({detail})",
         safe="Model returned neither tool call nor content",
     ),
+    "empty_response": ErrorMessage(
+        full="Model returned no usable completion text ({detail})",
+        safe="Model returned no usable completion text",
+    ),
+    "completion_blocked": ErrorMessage(
+        full="Model output was refused or filtered ({protocol})",
+        safe="Model output was refused or filtered",
+    ),
     "no_tools": ErrorMessage(
         full="tools list must not be empty",
         safe="tools list must not be empty",

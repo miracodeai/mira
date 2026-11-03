@@ -14,7 +14,7 @@ from typing import ClassVar
 
 import httpx
 
-from mira.exceptions import LLMError
+from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm.base import (
     OpenAICompatibleProvider,
     _strip_model_prefix,
@@ -77,7 +77,29 @@ class LLMProvider(OpenAICompatibleProvider):
             data = resp.json()
 
         self._account_usage(data)
-        return data["choices"][0]["message"].get("content") or ""
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message.get("content") or ""
+        if not content.strip():
+            refusal = message.get("refusal")
+            if (isinstance(refusal, str) and refusal) or choice.get(
+                "finish_reason"
+            ) == "content_filter":
+                raise NonRetriableLLMError("completion_blocked", protocol="chat")
+            finish_reason = choice.get("finish_reason")
+            if finish_reason not in (
+                "stop",
+                "length",
+                "tool_calls",
+                "function_call",
+                "content_filter",
+            ):
+                finish_reason = "other"
+            raise LLMError(
+                "empty_response",
+                detail=f"protocol=chat status={resp.status_code} finish_reason={finish_reason} content_len={len(content)}",
+            )
+        return content
 
     async def _call_llm_with_tools(
         self,
