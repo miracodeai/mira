@@ -161,7 +161,7 @@ class ForgejoProvider(BaseProvider):
         repo: str,
         username: str,
         *,
-        user_id: int | None = None,
+        user_id: int | str | None = None,
     ) -> str | None:
         """Fetch a user's collaborator permission, normalized for authz."""
         url = (

@@ -48,10 +48,10 @@ def _load() -> dict[str, dict]:
     """Load the registry once per process, overlaying any runtime override.
 
     GitHub's api/graphql urls are seeded from MIRA_GITHUB_API_URL /
-    MIRA_GITHUB_GRAPHQL_URL, GitLab's from MIRA_GITLAB_API_URL, and
-    Forgejo's from MIRA_FORGEJO_API_URL, so existing GitHub Enterprise,
-    self-managed GitLab, and self-hosted Forgejo deployments work without
-    editing the JSON.
+    MIRA_GITHUB_GRAPHQL_URL, GitLab's from MIRA_GITLAB_API_URL,
+    Forgejo's from MIRA_FORGEJO_API_URL, and Bitbucket's from
+    MIRA_BITBUCKET_API_URL, so existing GitHub Enterprise, self-managed
+    GitLab, and self-hosted Forgejo deployments work without editing the JSON.
     """
     profiles = _read(_BUNDLED_PATH)
     override = os.environ.get(_OVERRIDE_ENV)
@@ -92,6 +92,11 @@ def _load() -> dict[str, dict]:
         base_url = os.environ.get("MIRA_FORGEJO_BASE_URL")
         if base_url:
             fj["base_url"] = base_url.rstrip("/")
+    bb = profiles.get("bitbucket")
+    if bb:
+        api = os.environ.get("MIRA_BITBUCKET_API_URL")
+        if api:
+            bb["api_url"] = api.rstrip("/")
     return profiles
 
 

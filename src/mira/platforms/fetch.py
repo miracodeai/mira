@@ -23,6 +23,8 @@ from mira.platforms import profiles
 logger = logging.getLogger(__name__)
 
 _MAX_TREE_PAGES = 1000
+# A full commit hash; Bitbucket refs that match need no branch/tag lookup.
+_COMMIT_HASH = re.compile(r"[0-9a-f]{40}")
 
 
 class EmptyRepoError(Exception):
@@ -59,6 +61,31 @@ def _tree_paths(entries: object) -> tuple[list[str], set[str]]:
             raise IncompleteTreeError("Duplicate repository tree entry")
         paths.add(path)
         if kind == "blob":
+            files.append(path)
+    return files, paths
+
+
+# Bitbucket lists submodules as ``commit_link``; like GitHub's ``commit`` they aren't files.
+_BITBUCKET_TREE_KINDS = ("commit_file", "commit_directory", "commit_link")
+
+
+def _bitbucket_tree_paths(entries: object) -> tuple[list[str], set[str]]:
+    """Like ``_tree_paths`` for Bitbucket's ``src`` listing entry types."""
+    if not isinstance(entries, list):
+        raise IncompleteTreeError("Invalid repository tree entries")
+    files: list[str] = []
+    paths: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise IncompleteTreeError("Invalid repository tree entry")
+        path = entry.get("path")
+        kind = entry.get("type")
+        if not isinstance(path, str) or not path or kind not in _BITBUCKET_TREE_KINDS:
+            raise IncompleteTreeError("Invalid repository tree entry")
+        if path in paths:
+            raise IncompleteTreeError("Duplicate repository tree entry")
+        paths.add(path)
+        if kind == "commit_file":
             files.append(path)
     return files, paths
 
@@ -468,6 +495,191 @@ class ForgejoRepoFetcher:
         return _strip_tarball(blob, max_file_size, f"{owner}/{repo}", indexable_paths)
 
 
+class BitbucketRepoFetcher:
+    """Fetches repo content via the Bitbucket Cloud REST 2.0 API.
+
+    ``owner`` is the workspace slug, ``repo`` the repository slug. Listings are
+    paginated through the ``next`` URL in each JSON page.
+    """
+
+    def __init__(self, token: str, base_url: str = "https://api.bitbucket.org/2.0") -> None:
+        from mira.platforms.bitbucket.auth import bitbucket_auth_headers
+
+        self._token = token
+        self._api = base_url.rstrip("/")
+        self._auth_headers = bitbucket_auth_headers(token)
+        # ref -> commit hash. Fetchers are built per indexing run, so this also
+        # pins every listing and file read in a run to one snapshot.
+        self._resolved: dict[tuple[str, str, str], str] = {}
+
+    def _headers(self) -> dict[str, str]:
+        return dict(self._auth_headers)
+
+    def _repo(self, owner: str, repo: str) -> str:
+        return f"{self._api}/repositories/{quote(owner, safe='')}/{quote(repo, safe='')}"
+
+    def _web_base(self) -> str:
+        # api.bitbucket.org/2.0 → bitbucket.org, where archive downloads live.
+        host = self._api.split("://", 1)[-1].split("/", 1)[0]
+        return f"https://{host.removeprefix('api.')}"
+
+    async def default_branch(self, owner: str, repo: str) -> str:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    self._repo(owner, repo), headers=self._headers(), timeout=15
+                )
+                resp.raise_for_status()
+                return str((resp.json().get("mainbranch") or {}).get("name") or "main")
+        except Exception as exc:
+            logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
+            return "main"
+
+    async def _commit_for(self, owner: str, repo: str, ref: str) -> str:
+        """Resolve a branch or tag to its commit hash.
+
+        ``/src/{ref}/`` 404s when a branch name contains ``/`` (``release/1.0``),
+        encoded or not, while ``/refs/branches/{name}`` resolves it. Returns
+        ``ref`` unchanged when it is already a hash or cannot be resolved, so a
+        repo with no commits still surfaces as a 404 from ``/src``.
+        """
+        if not ref or _COMMIT_HASH.fullmatch(ref):
+            return ref
+        key = (owner, repo, ref)
+        if key in self._resolved:
+            return self._resolved[key]
+        commit = ref
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            for kind in ("branches", "tags"):
+                try:
+                    resp = await client.get(
+                        f"{self._repo(owner, repo)}/refs/{kind}/{quote(ref, safe='')}",
+                        headers=self._headers(),
+                        params={"fields": "target.hash"},
+                        timeout=15,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to resolve %s on %s/%s: %s", ref, owner, repo, exc)
+                    break
+                if resp.status_code == 404:
+                    continue
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Failed to resolve %s on %s/%s: HTTP %d",
+                        ref,
+                        owner,
+                        repo,
+                        resp.status_code,
+                    )
+                    break
+                commit_hash = ((resp.json() or {}).get("target") or {}).get("hash")
+                if isinstance(commit_hash, str) and _COMMIT_HASH.fullmatch(commit_hash):
+                    commit = commit_hash
+                break
+        self._resolved[key] = commit
+        return commit
+
+    async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
+        commit = await self._commit_for(owner, repo, branch)
+        initial_url = (
+            f"{self._repo(owner, repo)}/src/{quote(commit, safe='')}/?max_depth=100&pagelen=100"
+        )
+        endpoint = httpx.URL(initial_url)
+        url: str | None = initial_url
+        paths: list[str] = []
+        seen_urls: set[str] = set()
+        seen_paths: set[str] = set()
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            while url:
+                if url in seen_urls:
+                    raise IncompleteTreeError("Repository tree pagination is cyclic")
+                if len(seen_urls) >= _MAX_TREE_PAGES:
+                    raise IncompleteTreeError("Repository tree page limit exceeded")
+                seen_urls.add(url)
+                resp = await client.get(url, headers=self._headers(), timeout=30)
+                # A repo with no commits (or a missing ref) 404s.
+                if resp.status_code == 404:
+                    raise EmptyRepoError(owner, repo)
+                resp.raise_for_status()
+                data = _tree_json(resp)
+                if not isinstance(data, dict):
+                    raise IncompleteTreeError("Invalid repository tree page")
+                files, entries = _bitbucket_tree_paths(data.get("values"))
+                if seen_paths & entries:
+                    raise IncompleteTreeError("Duplicate repository tree page entries")
+                seen_paths.update(entries)
+                paths.extend(files)
+                url = data.get("next")
+                if url is None:
+                    break
+                if not isinstance(url, str) or not url or not entries:
+                    raise IncompleteTreeError("Repository tree pagination made no progress")
+                try:
+                    target = httpx.URL(url)
+                except httpx.InvalidURL as exc:
+                    raise IncompleteTreeError("Invalid repository tree pagination link") from exc
+                # `next` must stay on the same listing; the page token is opaque.
+                if (target.scheme, target.host, target.port, target.path) != (
+                    endpoint.scheme,
+                    endpoint.host,
+                    endpoint.port,
+                    endpoint.path,
+                ) or target.userinfo:
+                    raise IncompleteTreeError("Invalid repository tree pagination target")
+        return paths
+
+    async def file_content(
+        self, owner: str, repo: str, path: str, ref: str, semaphore=None
+    ) -> str | None:
+        async def _fetch() -> str | None:
+            try:
+                commit = await self._commit_for(owner, repo, ref)
+                url = f"{self._repo(owner, repo)}/src/{quote(commit, safe='')}/{quote(path, safe='/')}"
+                async with httpx.AsyncClient(follow_redirects=True) as client:
+                    resp = await client.get(url, headers=self._headers(), timeout=30)
+                    if resp.status_code == 404:
+                        return None
+                    resp.raise_for_status()
+                    return resp.text
+            except Exception as exc:
+                logger.warning("Failed to fetch %s: %s", path, exc)
+                return None
+
+        if semaphore:
+            async with semaphore:
+                return await _fetch()
+        return await _fetch()
+
+    async def repo_tarball(
+        self,
+        owner: str,
+        repo: str,
+        ref: str,
+        max_file_size: int = 1_048_576,
+        indexable_paths: set[str] | None = None,
+    ) -> dict[str, str] | None:
+        """Archive download from the web host. Returns None when the credential
+        can't download archives, and the indexer falls back to per-file fetches."""
+        commit = await self._commit_for(owner, repo, ref)
+        url = (
+            f"{self._web_base()}/{quote(owner, safe='')}/{quote(repo, safe='')}"
+            f"/get/{quote(commit, safe='')}.tar.gz"
+        )
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
+                resp = await client.get(url, headers=self._headers())
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Tarball fetch failed for %s/%s: %d", owner, repo, resp.status_code
+                    )
+                    return None
+                blob = resp.content
+        except Exception as exc:
+            logger.warning("Tarball fetch failed for %s/%s: %s", owner, repo, exc)
+            return None
+        return _strip_tarball(blob, max_file_size, f"{owner}/{repo}", indexable_paths)
+
+
 def _next_link(link_header: str) -> str | None:
     """Extract the rel="next" URL from a Link header (GitLab keyset pagination)."""
     if not link_header:
@@ -492,4 +704,6 @@ def make_fetcher(platform: str, token: str) -> RepoFetcher:
         return GitLabRepoFetcher(token, api_url or "https://gitlab.com/api/v4")
     if platform == "forgejo":
         return ForgejoRepoFetcher(token, api_url or "https://codeberg.org/api/v1")
+    if platform == "bitbucket":
+        return BitbucketRepoFetcher(token, api_url or "https://api.bitbucket.org/2.0")
     return GitHubRepoFetcher(token, api_url or "https://api.github.com")

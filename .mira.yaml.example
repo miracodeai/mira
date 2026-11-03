@@ -65,6 +65,9 @@ filter:
 # not in a repository's `.mira.yaml`.
 commands:
   # Extra users allowed to run any command, including read-only users.
+  # On Bitbucket, list account ids (e.g. "557058:0a1b…"), not nicknames:
+  # nicknames are not unique, so they never grant access there. Blocking by
+  # nickname still works.
   allowed_users: []
   # Applies to every command. Users with write/admin access to the repository
   # may invoke commands. If the bot cannot read collaborator/member roles from

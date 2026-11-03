@@ -21,6 +21,10 @@ CHECK_RUN_NAME = "Mira"
 class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
 
+    # Whether a username identifies exactly one account. When False (Bitbucket
+    # nicknames), command authorization matches ``user_id`` only, never the name.
+    unique_usernames: bool = True
+
     @abc.abstractmethod
     def __init__(self, token: str) -> None:
         """Configure the API client with an auth token."""
@@ -143,13 +147,15 @@ class BaseProvider(abc.ABC):
         repo: str,
         username: str,
         *,
-        user_id: int | None = None,
+        user_id: int | str | None = None,
     ) -> str | None:
         """Normalized repo permission for a user.
 
         Returns ``"write"``, ``"read"``, ``"none"``, or ``None`` when the
         platform cannot determine it. Command authorization treats anything
-        other than ``"write"`` as a denial.
+        other than ``"write"`` as a denial. ``user_id`` is the platform's
+        immutable user id when known (an int on GitHub, the account id string
+        on Bitbucket).
         """
         return None
 
