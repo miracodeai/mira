@@ -200,7 +200,12 @@ async def handle_bitbucket_pr(payload: dict[str, Any], auth: PlatformAuth, bot_n
 
         await dispatch_event(
             REVIEW_FAILED,
-            {"repo": f"{owner}/{repo_name}", "pr_url": _pr_url(payload), "error": str(exc)},
+            {
+                "repo": f"{owner}/{repo_name}",
+                "pr_url": _pr_url(payload),
+                "number": number,
+                "error": str(exc),
+            },
         )
 
 
