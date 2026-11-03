@@ -43,6 +43,7 @@ dev = [
     "ruff>=0.4",
     "types-PyYAML>=6.0",
     "cryptography>=42.0",
+    "graphql-core>=3.2",
 ]
 serve = [
     "fastapi>=0.110",

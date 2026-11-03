@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +123,40 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS registry_conflict_prompts_session "
     "ON registry_conflict_prompts (session)",
+    # Comments mirrored from a source system (HAI-11606). ``parent_source_id`` is
+    # the source id of the object the comment sits on, so a comment can arrive
+    # before its parent and still attach once the parent is imported.
+    """
+    CREATE TABLE IF NOT EXISTS registry_comments (
+        id TEXT PRIMARY KEY,
+        source_system TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        parent_source_id TEXT NOT NULL,
+        author TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL DEFAULT '',
+        source_version BIGINT NOT NULL DEFAULT 0,
+        source_created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+        archived BIGINT NOT NULL DEFAULT 0,
+        synced_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+        UNIQUE (source_system, source_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS registry_comments_parent "
+    "ON registry_comments (source_system, parent_source_id)",
+    # Resumable import walks: one row per (source system, stream).
+    """
+    CREATE TABLE IF NOT EXISTS registry_sync_state (
+        source_system TEXT NOT NULL,
+        stream TEXT NOT NULL,
+        watermark DOUBLE PRECISION NOT NULL DEFAULT 0,
+        walk_since DOUBLE PRECISION NOT NULL DEFAULT 0,
+        walk_started_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+        after_cursor TEXT NOT NULL DEFAULT '',
+        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_system, stream)
+    )
+    """,
 ]
 
 
@@ -129,6 +165,7 @@ class RegistryDB:
 
     def __init__(self, *, url: str | None = None, path: str | None = None) -> None:
         self._lock = threading.RLock()
+        self._depth = 0
         self.postgres = bool(url)
         self._url = url
         if url:
@@ -148,6 +185,12 @@ class RegistryDB:
 
     def execute(self, sql: str, params: tuple | list = ()) -> list[tuple]:
         with self._lock:
+            if self.postgres and self._depth:
+                # Inside a transaction a reconnect would silently drop the
+                # statements already run, so a dropped connection raises instead.
+                with self._conn.cursor() as cur:
+                    cur.execute(self._sql(sql), tuple(params))
+                    return [tuple(r) for r in cur.fetchall()] if cur.description else []
             if self.postgres:
                 from mira.db.postgres import ReconnectingCursor, reconnect
 
@@ -161,6 +204,40 @@ class RegistryDB:
             cur = self._conn.execute(sql, tuple(params))
             return [tuple(r) for r in cur.fetchall()]
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Run the enclosed statements atomically. Nested calls join the outer one.
+
+        Holds the connection lock for the whole block, so other threads wait.
+        """
+        with self._lock:
+            if self._depth:
+                self._depth += 1
+                try:
+                    yield
+                finally:
+                    self._depth -= 1
+                return
+            if self.postgres:
+                with self._conn.transaction():
+                    self._depth = 1
+                    try:
+                        yield
+                    finally:
+                        self._depth = 0
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._depth = 1
+            try:
+                yield
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
+            finally:
+                self._depth = 0
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -172,3 +249,14 @@ def default_location() -> tuple[str | None, str]:
     url = db_url if db_url.startswith(("postgresql://", "postgres://")) else None
     index_dir = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
     return url, os.path.join(index_dir, "registry.db")
+
+
+def is_unique_violation(exc: BaseException) -> bool:
+    """True when ``exc`` is a unique-constraint failure on either backend."""
+    if isinstance(exc, sqlite3.IntegrityError):
+        return "UNIQUE" in str(exc)
+    try:
+        from psycopg.errors import UniqueViolation
+    except ImportError:  # pragma: no cover - psycopg is a dependency
+        return False
+    return isinstance(exc, UniqueViolation)

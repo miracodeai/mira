@@ -353,6 +353,60 @@ The HAI-11606 import seam is `Registry.import_items()`, exposed to admins
 at `POST /api/registry/import`. `/api/*` requires a dashboard session, so
 an out-of-process sync job calls the Python seam or uses an admin session.
 
+### Linear import (HAI-11606)
+
+Fork-owned, with no upstream drift:
+
+- **`src/mira/registry/linear.py`** is the read-only Linear client, the
+  inventory, and the resumable importer.
+  - The client uses its own key, `LINEAR_SYNC_API_KEY`, so it is never counted
+    as an agent Linear call. It refuses GraphQL mutations.
+  - Commands: `python -m mira.registry.linear inventory` and
+    `python -m mira.registry.linear import [--apply]`. Both cover every team in
+    the workspace and every state, archived and trashed included. `--team KEY`
+    (repeatable) narrows them to the named teams.
+  - The inventory also counts the workspace's teams and its documents, and
+    lists the documents linked to issues. Documents are not imported yet.
+- **Each Linear issue becomes a `work` object** with source id = issue UUID
+  and `ticket` = the identifier.
+  - Delivery state follows Linear's state type (`duplicate` maps to
+    `canceled`), or `archived`.
+  - A trashed issue becomes `retired` with reason `source_deleted`, and
+    untrashing restores it.
+- **Comments go in `registry_comments`.** `get_context` returns them and also
+  accepts `ticket`.
+- **Walk cursors are saved in `registry_sync_state`.**
+- **Linear is authoritative.** `update_work` refuses to change `title`,
+  `owner`, or `delivery_state` on a Linear-mirrored work object. `link_work`
+  refuses `parent_of`, `blocks`, and `relates` between two Linear tickets.
+  Registry-only fields and links are still allowed: `plan`, `goal`,
+  `records`, and `addresses`.
+- **Seam fixes:**
+  - An import item with links is written as `pending_links` and only marked
+    `synced` after its links commit, so a crash between the two passes is
+    retried rather than skipped.
+  - Each item is one transaction (`RegistryDB.transaction()`).
+  - Imported links are owned per item (`origin = import:{system}#{source_id}`),
+    so a reversed parent link is replaced when the child is re-parented.
+  - A concurrent insert of the same source row retries the item against the
+    winner's row instead of failing the batch.
+- **Pending links resolve on the next issue walk.** Linear does not resend an
+  issue when its parent or blocker arrives, so each issue walk re-reads the
+  issues still `pending_links` (`id: {in: [...]}`, same team filter). This
+  also covers a crash between pages.
+- **`--team` walks filter on team.** Comments are filtered by `issue.team`, and
+  the client-side team check is kept as a backstop. Without `--team` no team
+  filter is sent. A cursor is restarted only when
+  Linear rejects it on the first page of a resumed walk; retries running out
+  keep the saved cursor.
+- **Query shapes are checked against Linear's schema.**
+  `tests/fixtures/linear_schema.graphql.gz` is Linear's published SDL (from
+  `github.com/linear/linear`, `packages/sdk/src/schema.graphql` at `3ce13b6`).
+  The tests validate every query and every filter the importer sends against
+  it. Refresh the fixture when Linear's schema changes.
+- **CI runs the Postgres registry tests** against a `postgres:16` service
+  (`REGISTRY_TEST_POSTGRES_URL`).
+
 Drift, measured with `git diff --stat upstream/main -- src tests ui` at
 upstream `e01f1e062c49536c7e12b6b7fa383e2dd28da14b`: **100 paths, 17,840
 insertions, 5,856 deletions**. The total includes upstream commits that

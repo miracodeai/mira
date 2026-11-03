@@ -111,11 +111,19 @@ TOOLS = [
     ),
     _tool(
         "get_context",
-        "Call before the first source edit. With work_id: the plan, then requirements, "
-        "decisions, children, dependencies, and evidence. With repo plus paths, symbols, "
-        "or concepts: claims in play with approval status, realization, and confidence, "
-        "proposals flagged.",
-        {"work_id": _STR, "repo": _STR, "paths": _STRS, "symbols": _STRS, "concepts": _STRS},
+        "Call before the first source edit. With work_id, or ticket (a Linear key such as "
+        "HAI-123): the plan, then requirements, decisions, children, dependencies, "
+        "evidence, and the ticket's comments. With repo plus paths, symbols, or concepts: "
+        "claims in play with approval status, realization, and confidence, proposals "
+        "flagged.",
+        {
+            "work_id": _STR,
+            "ticket": _STR,
+            "repo": _STR,
+            "paths": _STRS,
+            "symbols": _STRS,
+            "concepts": _STRS,
+        },
         [],
     ),
     _tool(
@@ -229,6 +237,8 @@ async def call_tool(name: str, args: dict, actor: Actor) -> Any:
     if name == "get_context":
         if args.get("work_id"):
             return reg.work_context(args["work_id"])
+        if args.get("ticket"):
+            return reg.work_context(reg.work_by_ticket(str(args["ticket"]))["id"])
         return reg.context_for_paths(
             str(args.get("repo") or ""),
             args.get("paths") or [],

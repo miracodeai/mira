@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from mira.registry.conflicts import MAX_CANDIDATES, Judge
-from mira.registry.db import RegistryDB
+from mira.registry.db import RegistryDB, is_unique_violation
 from mira.registry.model import (
     CLAIM_KINDS,
     DELIVERY_STATES,
@@ -135,6 +135,18 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _DAY = 86400.0
 
 AnchorLookup = Callable[[str, str], "dict | None"]
+
+# Reasons an import may retire an approved object, and so may later undo.
+_SOURCE_RETIRE_REASONS = ("source_retired", "source_deleted")
+# Work fields the Linear importer writes. While Linear is authoritative an edit
+# to them through the registry would be overwritten or drift (HAI-11606).
+_MIRRORED_WORK_FIELDS = ("title", "owner", "delivery_state")
+# Work links that mirror a Linear relation when both ends came from Linear.
+_MIRRORED_WORK_LINKS = ("parent_of", "blocks", "relates")
+
+
+class _ConcurrentInsert(Exception):
+    """Another writer inserted the same source row first; retry the item."""
 
 
 def new_id(prefix: str = "reg_") -> str:
@@ -546,6 +558,17 @@ class Registry:
         obj = self.get(work_id)
         if obj["kind"] != "work":
             raise RegistryError(f"{work_id} is not a work object")
+        if obj["source_system"] == "linear":
+            changed = [
+                k
+                for k in _MIRRORED_WORK_FIELDS
+                if fields.get(k) is not None and fields[k] != obj[k]
+            ]
+            if changed:
+                raise RegistryError(
+                    f"{work_id} mirrors Linear ticket {obj['ticket']}; Linear is authoritative "
+                    f"for {', '.join(changed)}, so change them in Linear"
+                )
         for key in ("title", "summary", "goal", "work_scope", "plan", "owner", "delivery_state"):
             if fields.get(key) is not None:
                 obj[key] = fields[key]
@@ -562,6 +585,15 @@ class Registry:
             raise RegistryError(f"{work_id} is a {work['kind']}, not work")
         if target["kind"] not in target_kinds:
             raise RegistryError(f"{type} links work to {' or '.join(target_kinds)}")
+        if (
+            type in _MIRRORED_WORK_LINKS
+            and work["source_system"] == "linear"
+            and target["source_system"] == "linear"
+        ):
+            raise RegistryError(
+                f"{work['ticket']} and {target['ticket']} are Linear tickets; Linear is "
+                f"authoritative for {type} between them, so link them in Linear"
+            )
         self._check_work_link(work_id, target_id, type)
         self._add_rel(work_id, target_id, type, actor)
         return {"source_id": work_id, "target_id": target_id, "type": type}
@@ -1317,6 +1349,7 @@ class Registry:
                 "relates": self._linked(work_id, "relates"),
             },
             "evidence": evidence,
+            "comments": self.comments_for(work),
         }
 
     def work_view(self, work_id: str) -> dict:
@@ -1415,6 +1448,10 @@ class Registry:
         Same version is a no-op, an older one is ignored, a newer one updates the
         row and replaces its imported links. Links whose target has not arrived
         yet leave ``sync_status = pending_links`` and are retried on the next run.
+
+        An item with links is written as ``pending_links`` and only marked
+        ``synced`` once its links are in, so a crash between the two passes is
+        retried by the next run instead of being skipped as unchanged.
         """
         if not source_system or ":" in source_system:
             raise RegistryError("source_system is required and may not contain ':'")
@@ -1422,7 +1459,16 @@ class Registry:
         touched: list[tuple[dict, dict]] = []
         for item in items:
             try:
-                outcome, obj = self._upsert_import(source_system, item, actor, status, basis)
+                try:
+                    with self.db.transaction():
+                        outcome, obj = self._upsert_import(
+                            source_system, item, actor, status, basis
+                        )
+                except _ConcurrentInsert:
+                    with self.db.transaction():
+                        outcome, obj = self._upsert_import(
+                            source_system, item, actor, status, basis
+                        )
             except RegistryError as exc:
                 results.append(
                     {"source_id": item.get("source_id"), "outcome": "error", "error": str(exc)}
@@ -1437,7 +1483,8 @@ class Registry:
             ):
                 touched.append((item, obj))
         for item, obj in touched:
-            sync, errors = self._import_links(source_system, item, obj, actor)
+            with self.db.transaction():
+                sync, errors = self._import_links(source_system, item, obj, actor)
             for res in results:
                 if res.get("object_id") == obj["id"]:
                     res["sync_status"] = sync
@@ -1489,14 +1536,32 @@ class Registry:
                 obj[key] = item[key]
         if item.get("status") == "retired" and obj["status"] == "approved":
             # A source may withdraw what it holds approved; it never approves a proposal.
-            obj.update(status="retired", status_reason="source_retired")
+            reason = item.get("status_reason")
+            reason = reason if reason in _SOURCE_RETIRE_REASONS else "source_retired"
+            obj.update(status="retired", status_reason=reason)
+        elif (
+            item.get("status") == "approved"
+            and obj["status"] == "retired"
+            and obj["status_reason"] in _SOURCE_RETIRE_REASONS
+        ):
+            # The source restored what it had withdrawn (an untrashed ticket).
+            obj.update(status="approved", status_reason="")
         if isinstance(obj["alternatives"], str):
             obj["alternatives"] = [obj["alternatives"]]
         if not obj["repo"]:
             obj["scope"] = "org"
         self._validate(obj)
-        obj.update(source_version=version, sync_status="synced", synced_at=self.clock())
-        self._write(obj, insert=outcome == "created")
+        sync = "pending_links" if item.get("links") else "synced"
+        obj.update(source_version=version, sync_status=sync, synced_at=self.clock())
+        try:
+            self._write(obj, insert=outcome == "created")
+        except Exception as exc:
+            if outcome != "created" or not is_unique_violation(exc):
+                raise
+            # Another importer inserted this source row between our read and
+            # our insert. Its row stands. The transaction is rolled back and
+            # the caller retries the item, which compares versions against it.
+            raise _ConcurrentInsert(source_id) from exc
         if item.get("concepts"):
             self._attach_concepts(obj["id"], item["concepts"], actor)
         return outcome, obj
@@ -1504,10 +1569,18 @@ class Registry:
     def _import_links(
         self, system: str, item: dict, obj: dict, actor: Actor
     ) -> tuple[str, list[str]]:
-        origin = f"import:{system}"
+        """Replace the links this item owns.
+
+        A link with ``"reverse": true`` is stored target -> this object (a child
+        naming its parent). Ownership is the per-item ``origin``, so re-parenting
+        drops the old reversed link even though its ``source_id`` is the parent.
+        """
+        origin = f"import:{system}#{obj['source_id']}"
+        self.db.execute("DELETE FROM registry_relationships WHERE origin = ?", (origin,))
+        # Links written before per-item origins were tagged ``import:{system}``.
         self.db.execute(
             "DELETE FROM registry_relationships WHERE source_id = ? AND origin = ?",
-            (obj["id"], origin),
+            (obj["id"], f"import:{system}"),
         )
         missing: list[str] = []
         errors: list[str] = []
@@ -1518,12 +1591,15 @@ class Registry:
                 missing.append(target_source)
                 continue
             type = str(link.get("type") or "")
+            src, dst = (
+                (target["id"], obj["id"]) if link.get("reverse") else (obj["id"], target["id"])
+            )
             try:
                 if type == "conflicts_with":
                     raise RegistryError("imports cannot assert conflicts")
                 if type in WORK_LINKS:
-                    self._check_work_link(obj["id"], target["id"], type)
-                self._add_rel(obj["id"], target["id"], type, actor, origin=origin)
+                    self._check_work_link(src, dst, type)
+                self._add_rel(src, dst, type, actor, origin=origin)
             except RegistryError as exc:
                 errors.append(f"{type} -> {target_source}: {exc}")
         obj = self.get(obj["id"])
@@ -1532,6 +1608,90 @@ class Registry:
         self._write(obj)
         return obj["sync_status"], errors
 
+    # ── mirrored comments (HAI-11606) ─────────────────────────────────
+
+    def import_comments(self, source_system: str, comments: list[dict]) -> list[dict]:
+        """Upsert comments keyed by ``(source_system, source_id)`` with the same
+        version rules as objects. A comment whose parent is not imported yet is
+        stored anyway and attaches when the parent arrives.
+        """
+        results: list[dict] = []
+        for c in comments:
+            source_id = str(c.get("source_id") or "")
+            parent = str(c.get("parent_source_id") or "")
+            if not source_id or not parent:
+                results.append(
+                    {"source_id": source_id, "outcome": "error", "error": "source ids required"}
+                )
+                continue
+            version = int(c.get("source_version") or 0)
+            values = (
+                str(c.get("author") or ""),
+                str(c.get("body") or ""),
+                str(c.get("source_url") or ""),
+                version,
+                float(c.get("source_created_at") or 0),
+                1 if c.get("archived") else 0,
+                self.clock(),
+            )
+            with self.db.transaction():
+                outcome = self._upsert_comment(source_system, source_id, parent, version, values)
+            results.append({"source_id": source_id, "outcome": outcome})
+        return results
+
+    def _upsert_comment(
+        self, source_system: str, source_id: str, parent: str, version: int, values: tuple
+    ) -> str:
+        select = (
+            "SELECT source_version FROM registry_comments WHERE source_system = ? AND source_id = ?"
+        )
+        rows = self.db.execute(select, (source_system, source_id))
+        if not rows:
+            # ON CONFLICT DO NOTHING: when a concurrent importer inserted the row
+            # first, nothing is returned and the outcome is read from its row.
+            inserted = self.db.execute(
+                "INSERT INTO registry_comments (id, source_system, source_id, "
+                "parent_source_id, author, body, source_url, source_version, "
+                "source_created_at, archived, synced_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (source_system, source_id) DO NOTHING RETURNING id",
+                (new_id("cmt_"), source_system, source_id, parent, *values),
+            )
+            if inserted:
+                return "created"
+            rows = self.db.execute(select, (source_system, source_id))
+        if version == rows[0][0]:
+            return "unchanged"
+        if version < rows[0][0]:
+            return "stale"
+        self.db.execute(
+            "UPDATE registry_comments SET parent_source_id = ?, author = ?, "
+            "body = ?, source_url = ?, source_version = ?, source_created_at = ?, "
+            "archived = ?, synced_at = ? WHERE source_system = ? AND source_id = ?",
+            (parent, *values, source_system, source_id),
+        )
+        return "updated"
+
+    def comments_for(self, obj: dict) -> list[dict]:
+        """Mirrored comments on ``obj``, oldest first. Archived ones are left out."""
+        if not obj.get("source_system"):
+            return []
+        rows = self.db.execute(
+            "SELECT id, source_id, author, body, source_url, source_created_at "
+            "FROM registry_comments WHERE source_system = ? AND parent_source_id = ? "
+            "AND archived = 0 ORDER BY source_created_at, source_id",
+            (obj["source_system"], obj["source_id"]),
+        )
+        keys = ("id", "source_id", "author", "body", "source_url", "created_at")
+        return [dict(zip(keys, r, strict=True)) for r in rows]
+
+    def work_by_ticket(self, ticket: str) -> dict:
+        """The work object mirrored for a ticket key such as ``HAI-123``."""
+        rows = self._select("kind = 'work' AND ticket = ? AND source_system <> ''", (ticket,))
+        if not rows:
+            raise NotFound(f"no imported work for ticket {ticket}")
+        return rows[0]
+
     def sync_status(self, source_system: str) -> dict:
         rows = self.db.execute(
             "SELECT sync_status, COUNT(*) FROM registry_objects WHERE source_system = ? "
@@ -1539,3 +1699,12 @@ class Registry:
             (source_system,),
         )
         return {r[0]: r[1] for r in rows}
+
+    def pending_link_sources(self, source_system: str) -> list[str]:
+        """Source ids of imported work still waiting on a link target."""
+        rows = self.db.execute(
+            "SELECT source_id FROM registry_objects WHERE source_system = ? AND kind = 'work' "
+            "AND sync_status = 'pending_links' ORDER BY source_id",
+            (source_system,),
+        )
+        return [r[0] for r in rows]

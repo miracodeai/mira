@@ -20,6 +20,25 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
 
+    # Throwaway Postgres for the opt-in registry tests (concurrent importers,
+    # transaction rollback). They skip when REGISTRY_TEST_POSTGRES_URL is unset.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: registry
+          POSTGRES_PASSWORD: registry
+          POSTGRES_DB: registry_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U registry -d registry_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REGISTRY_TEST_POSTGRES_URL: postgresql://registry:registry@localhost:5432/registry_test
+
     steps:
       - uses: actions/checkout@v7
 

@@ -460,6 +460,15 @@ wheels = [
 ]
 
 [[package]]
+name = "graphql-core"
+version = "3.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/91/223fbace7c8648690d7fb77855e29bd248c9ed1e0833ed3002ab29bc1441/graphql_core-3.3.1.tar.gz", hash = "sha256:8d9b6f95fb66b58b260904cf9e191f422782620533ec8fa0c96ab941b6659a2a", size = 751402 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/0e/e51b006267e7fa785abf5d1f86a7d60b84f7f893e3ba4fe23df9be2000cf/graphql_core-3.3.1-py3-none-any.whl", hash = "sha256:43ebcd0d9a0662a71b1a2f6562ba863d253057ec11cbc45835b2e2683a0a3770", size = 349047 },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -749,6 +758,7 @@ bedrock = [
 ]
 dev = [
     { name = "cryptography" },
+    { name = "graphql-core" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -771,6 +781,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "cryptography", marker = "extra == 'dev'", specifier = ">=42.0" },
     { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.110" },
+    { name = "graphql-core", marker = "extra == 'dev'", specifier = ">=3.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
