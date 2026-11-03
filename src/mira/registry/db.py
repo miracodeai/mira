@@ -157,6 +157,19 @@ SCHEMA = [
         PRIMARY KEY (source_system, stream)
     )
     """,
+    # Latest relay agent-call report. One row. days_json is the healthy
+    # window only; an unhealthy reading keeps the previous window.
+    """
+    CREATE TABLE IF NOT EXISTS registry_agent_call_snapshot (
+        id INTEGER PRIMARY KEY,
+        healthy INTEGER NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        consecutive_zero_days INTEGER NOT NULL,
+        tracked_since TEXT NOT NULL DEFAULT '',
+        days_json TEXT NOT NULL,
+        ingested_at DOUBLE PRECISION NOT NULL
+    )
+    """,
 ]
 
 

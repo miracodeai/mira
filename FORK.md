@@ -353,6 +353,13 @@ The HAI-11606 import seam is `Registry.import_items()`, exposed to admins
 at `POST /api/registry/import`. `/api/*` requires a dashboard session, so
 an out-of-process sync job calls the Python seam or uses an admin session.
 
+The same exit needs three consecutive UTC days with no agent Linear calls.
+`python -m mira.registry.agent_calls ingest --url <relay /api/linear/agent-calls>`
+copies that relay report into `registry_agent_call_snapshot`. It does not
+call Linear. The command is a dry run unless `--apply` is given. An
+unhealthy ledger is stored as not meeting the exit, and it does not replace
+the days already stored.
+
 ### Linear import (HAI-11606)
 
 Fork-owned, with no upstream drift:
