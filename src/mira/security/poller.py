@@ -131,6 +131,13 @@ async def poll_org_wide() -> dict[str, int]:
         results = await query_batch(batch)
         all_results.update(results)
 
+    missing_results = len(unique_packages.keys() - all_results.keys())
+    if missing_results:
+        logger.warning(
+            "Vuln poll incomplete: preserving alerts for %d packages without scan results",
+            missing_results,
+        )
+
     # Persist per-(repo, package) so each repo's vulnerabilities row stays
     # accurate even if the same package version appears in multiple repos.
     severity_counts: dict[str, int] = defaultdict(int)
@@ -138,7 +145,9 @@ async def poll_org_wide() -> dict[str, int]:
 
     for key, repos in unique_packages.items():
         ecosystem, name, version = key
-        vulns = all_results.get(key, [])
+        if key not in all_results:
+            continue
+        vulns = all_results[key]
         vuln_dicts = [
             {
                 "cve_id": v.cve_id,
@@ -164,7 +173,7 @@ async def poll_org_wide() -> dict[str, int]:
             ", ".join(f"{n} {sev}" for sev, n in sorted(counts.items())),
             len(repos_processed),
         )
-    else:
+    elif not missing_results:
         logger.info("Vuln poll: no open vulnerabilities found")
 
     return counts
@@ -215,13 +224,23 @@ async def poll_repo(owner: str, repo: str) -> dict[str, int]:
     store.prune_stale_vulnerabilities(active)
 
     results = await query_batch(queries)
+    missing_results = sum((q.ecosystem, q.name, q.version) not in results for q in queries)
+    if missing_results:
+        logger.warning(
+            "Vuln poll incomplete for %s/%s: preserving alerts for %d queries without results",
+            owner,
+            repo,
+            missing_results,
+        )
 
     severity_counts: dict[str, int] = defaultdict(int)
     for r in deduped:
         if not osv_ecosystem(r["kind"]):
             continue
         key = (r["kind"], r["name"], r["version"])
-        vulns = results.get(key, [])
+        if key not in results:
+            continue
+        vulns = results[key]
         vuln_dicts = [
             {
                 "cve_id": v.cve_id,
