@@ -170,7 +170,7 @@ class GitLabProvider(BaseProvider):
         repo: str,
         username: str,
         *,
-        user_id: int | None = None,
+        user_id: int | str | None = None,
     ) -> str | None:
         """Fetch a user's project access level, normalized for authz."""
         pid = quote(f"{owner}/{repo}", safe="")

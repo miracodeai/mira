@@ -194,7 +194,7 @@ async def run_pr_command(
     bot_name: str,
     platform: str = "github",
     pr_title: str = "",
-    user_id: int | None = None,
+    user_id: int | str | None = None,
 ) -> None:
     """Platform-neutral handler for an @-mention command on a PR/MR.
 
@@ -318,7 +318,7 @@ async def run_thread_reply(
     actor: str = "",
     bot_name: str = "miracodeai",
     platform: str = "github",
-    user_id: int | None = None,
+    user_id: int | str | None = None,
 ) -> None:
     """Platform-neutral free-form thread reply with intent classification.
 

@@ -52,9 +52,16 @@ async def is_command_allowed(
     provider: BaseProvider,
     owner: str,
     repo: str,
-    user_id: int | None = None,
+    user_id: int | str | None = None,
 ) -> bool:
-    """Whether ``actor`` may run ``command`` on ``owner/repo``."""
+    """Whether ``actor`` may run ``command`` on ``owner/repo``.
+
+    On platforms whose usernames are not unique (``provider.unique_usernames``
+    is False, e.g. Bitbucket nicknames), ``allowed_users`` grants match
+    ``user_id`` only, so another account with the same name cannot claim
+    them. ``blocked_users`` matches the name or the id, so blocking still
+    errs on the side of denial.
+    """
     if command not in COMMANDS:
         logger.warning("Unknown Mira command %r; denying", command)
         return False
@@ -62,7 +69,18 @@ async def is_command_allowed(
         return False
 
     commands = config.commands
-    if _matches(actor, commands.blocked_users):
+    unique_names = getattr(provider, "unique_usernames", True)
+    user_key = str(user_id) if user_id not in (None, "") else ""
+    # The identifiers an allowlist entry may match for this actor.
+    grant_keys = [actor, user_key] if unique_names else [user_key]
+
+    def blocked(names: list[str]) -> bool:
+        return _matches(actor, names) or _matches(user_key, names)
+
+    def granted(names: list[str]) -> bool:
+        return any(_matches(key, names) for key in grant_keys)
+
+    if blocked(commands.blocked_users):
         logger.info(
             "Command %s denied for @%s on %s/%s — user is in commands.blocked_users",
             command,
@@ -72,7 +90,7 @@ async def is_command_allowed(
         )
         return False
 
-    if _matches(actor, _blocked_users(commands, command)):
+    if blocked(_blocked_users(commands, command)):
         logger.info(
             "Command %s denied for @%s on %s/%s — user is in commands.%s.blocked_users",
             command,
@@ -83,7 +101,7 @@ async def is_command_allowed(
         )
         return False
 
-    if _matches(actor, _allowed_users(commands, command)):
+    if granted(_allowed_users(commands, command)):
         return True
 
     if not commands.allow_repo_write_access:

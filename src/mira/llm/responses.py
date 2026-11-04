@@ -15,7 +15,7 @@ from typing import ClassVar
 import httpx
 
 from mira.config import LLMConfig
-from mira.exceptions import LLMError
+from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm.base import OpenAICompatibleProvider, _strip_model_prefix
 from mira.llm.utils import _ensure_json_hint
 
@@ -234,7 +234,39 @@ class ResponsesProvider(OpenAICompatibleProvider):
             data = resp.json()
 
         self._account_usage(data)
-        return _output_text(data)
+        text = _output_text(data) or ""
+        if not text.strip():
+            refused = any(
+                item.get("type") == "message"
+                and item.get("role") == "assistant"
+                and isinstance(item.get("content"), list)
+                and any(
+                    isinstance(part, dict) and part.get("type") == "refusal"
+                    for part in item["content"]
+                )
+                for item in data.get("output") or []
+            )
+            filtered = (
+                data.get("status") == "incomplete"
+                and (data.get("incomplete_details") or {}).get("reason") == "content_filter"
+            )
+            if refused or filtered:
+                raise NonRetriableLLMError("completion_blocked", protocol="responses")
+            response_status = data.get("status")
+            if response_status not in (
+                "completed",
+                "incomplete",
+                "failed",
+                "in_progress",
+                "queued",
+                "cancelled",
+            ):
+                response_status = "other"
+            raise LLMError(
+                "empty_response",
+                detail=f"protocol=responses status={resp.status_code} response_status={response_status} content_len={len(text)}",
+            )
+        return text
 
     async def _call_llm_with_tools(
         self,
