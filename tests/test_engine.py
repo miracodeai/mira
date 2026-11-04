@@ -1204,6 +1204,7 @@ class TestDryRun:
             return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
         )
         llm.review = AsyncMock(return_value=sample_llm_response_text)
+        llm.complete_agentic = AsyncMock(return_value={"content": "", "tool_calls": []})
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider, bot_name="mira", dry_run=True
@@ -1319,6 +1320,7 @@ class TestThreadResolution:
             return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
         )
         llm.review = AsyncMock(return_value=sample_llm_response_text)
+        llm.complete_agentic = AsyncMock(return_value={"content": "", "tool_calls": []})
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
@@ -1347,6 +1349,7 @@ class TestThreadResolution:
             return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
         )
         llm.review = AsyncMock(return_value=sample_llm_response_text)
+        llm.complete_agentic = AsyncMock(return_value={"content": "", "tool_calls": []})
 
         config = MiraConfig()
         config.review.auto_resolve_conversations = False
@@ -1382,6 +1385,7 @@ class TestThreadResolution:
             return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
         )
         llm.review = AsyncMock(return_value=sample_llm_response_text)
+        llm.complete_agentic = AsyncMock(return_value={"content": "", "tool_calls": []})
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
@@ -1417,6 +1421,7 @@ class TestThreadResolution:
             return_value=json.dumps({"summary": "walkthrough", "change_groups": []})
         )
         llm.review = AsyncMock(return_value=sample_llm_response_text)
+        llm.complete_agentic = AsyncMock(return_value={"content": "", "tool_calls": []})
 
         engine = ReviewEngine(
             config=MiraConfig(), llm=llm, provider=provider_with_threads, bot_name="mira"
