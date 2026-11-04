@@ -312,8 +312,13 @@ Upstream files touched, and why:
   engine prepends after critique so the noise filter cannot drop the
   blocker. The security pass keeps a plain executor (an upstream test
   asserts its type). If that pass calls the tool, it gets an
-  `unknown tool` reply. The fork-delta cap is `engine.py` < 46 against
-  `567ed7e`; the measured total is 45.
+  `unknown tool` reply. HAI-12775 turns the post-critique line into
+  `finish_registry`, which prepends the blockers and posts the
+  uncited-decision comment; it replaces a fork line. A PR with no
+  reviewable file returns before that hook, and its description can still
+  state a decision, so `review_pr` adds 2 lines that call `finish_registry`
+  when `reviewed_files` is 0. The fork-delta cap is `engine.py` < 48 against
+  `567ed7e`; the measured total is 47.
 - `src/mira/platforms/server.py` (10 lines): `install_registry(app)`
   (mounts `/api/registry` and `/mcp`), `observe_github` on every GitHub
   webhook as a background task, and the hourly registry job in the
@@ -330,17 +335,24 @@ These files are new and fork-owned:
   evidence, import), `conflicts.py` (seat judge), `learned.py` (read-only
   learned-rule mirror), `prompt.py`, `review_gate.py` (review-time
   contradiction findings; they are comments only and do not write a
-  registry object), `realization.py`, `auth.py` (registry JWT), `mcp.py`,
-  and `api.py`.
+  registry object), `uncited.py` (HAI-12775: advisory findings for
+  decisions in the PR body or a mirrored Linear ticket that cite no registry
+  ID; the review API runner appends them as findings, and a review that
+  posts to GitHub gets them as one general PR comment, edited in place on
+  re-review, because an inline comment needs a diff line),
+  `realization.py`, `auth.py` (registry JWT), `mcp.py`, and `api.py`.
 - `ui/mira/src/pages/registry.tsx` and `ui/mira/src/lib/api/registry.ts`.
 - `docs/registry-conflict-gate.md` (the client contract the hickory-ai
   push hook calls).
-- `tests/test_decision_registry.py` and `tests/test_contradiction_gate.py`.
-  The registry test asserts the `engine.py` (<46) and `server.py` (<25)
+- `tests/test_decision_registry.py`, `tests/test_contradiction_gate.py`, and
+  `tests/test_uncited_decisions.py`.
+  The registry test asserts the `engine.py` (<48) and `server.py` (<25)
   caps against the fork base. The engine cap moved from 40 to 47 when
   HAI-12286 added `review_snapshot` (28 lines) beside the registry block.
   HAI-12196 fits the contradiction check into that block; the measured
-  total is 45, so the cap is the next integer, 46.
+  total is 45, so the cap is the next integer, 46. HAI-12775 adds 2 lines
+  for PRs with no reviewable file (measured 47), and the cap moves by
+  exactly those 2, to 48.
 
 MCP is streamable HTTP at `POST /mcp` and returns JSON responses with no
 SSE. Bearer JWT claims are `kind` (human|agent), `sub`, `model` (required

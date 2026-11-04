@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mira.exceptions import LLMError, MiraError
+from mira.registry.uncited import advisory_findings
 from mira.review_api.snapshot import (
     FrozenSnapshot,
     ReadOnlySnapshotProvider,
@@ -285,6 +286,10 @@ async def run_job(
         if failure is not None:
             raise failure
         set_stage("persisting")
+        # Advisory only, and appended here so a PR with no reviewable file
+        # still gets them. A GitHub-posting review gets them as one general PR
+        # comment instead (registry.review_gate.finish).
+        result.comments.extend(advisory_findings(snapshot.pr_info()))
         findings = [_finding(i, c) for i, c in enumerate(result.comments)]
         return JobOutcome(
             state="succeeded",

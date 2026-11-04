@@ -1140,3 +1140,98 @@ async def test_crashed_runner_is_reported_as_internal_error(env):
     final = store.get(job.id)
     assert final is not None
     assert (final.state, final.error_code, final.result_json) == ("failed", "internal_error", "")
+
+
+# ── uncited-decision advisories (HAI-12775) ────────────────────────
+
+
+ADVISORY_BODY = (
+    "Adds a division.\n\n"
+    "## Decisions I made\n"
+    "- Divide before returning\n"
+    "- Keep the handler sync (reg_0123456789ab)\n"
+)
+
+
+def _advisories(done: dict[str, Any]) -> list[dict[str, Any]]:
+    return [f for f in done["findings"] if f["source_pass"] == "registry_uncited_decision"]
+
+
+def test_uncited_decision_is_an_advisory_finding(env):
+    env["seat"].findings = []
+    env["github"].pulls[7]["body"] = ADVISORY_BODY
+    with _client() as client:
+        done = _wait(client, _submit(client).json()["id"])
+        assert done["state"] == "succeeded", done["error"]
+        [finding] = done["findings"]
+        assert finding == {
+            "id": "f1",
+            "path": "",
+            "line": 1,
+            "end_line": None,
+            "severity": "suggestion",
+            "category": "registry",
+            "title": "Decision lacks a registry citation",
+            "body": finding["body"],
+            "confidence": finding["confidence"],
+            "suggestion": None,
+            "source_pass": "registry_uncited_decision",
+            "registry_ids": [],
+        }
+        assert finding["body"].startswith("The pull request body, line 4, ")
+        assert '"Divide before returning"' in finding["body"]
+        assert "handler sync" not in finding["body"]
+        report = client.get(done["report_url"].replace("https://testserver", ""), headers=_auth())
+        assert "<i>pull request</i>" in report.text
+        assert "<code>:1</code>" not in report.text
+    _assert_no_side_effects(env)
+
+
+def test_advisories_survive_a_diff_with_no_reviewable_file(env):
+    github = env["github"]
+    github.pulls[7]["body"] = ADVISORY_BODY
+    github.pulls[7]["changed_files"] = 1
+    github.compares[HEAD] = [{"filename": "assets/logo.png", "status": "added"}]
+    with _client() as client:
+        done = _wait(client, _submit(client).json()["id"])
+    assert done["state"] == "succeeded", done["error"]
+    assert [f["source_pass"] for f in done["findings"]] == ["registry_uncited_decision"]
+    assert done["coverage"]["reviewed_files"] == 0
+    _assert_no_side_effects(env)
+
+
+def test_advisory_sits_beside_a_contradiction_blocker(env, monkeypatch):
+    from mira.registry import set_registry
+    from mira.registry.db import RegistryDB
+    from mira.registry.service import Registry
+
+    registry = Registry(RegistryDB(path=str(env["tmp"] / "registry.db")))
+
+    async def contradiction(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "relation": "narrows",
+                "approved_id": "reg_aaaaaaaaaaaa",
+                "existing_clause": "handlers stay sync",
+                "new_clause": "divide before returning",
+                "path": "app/handler.py",
+                "line": 2,
+            }
+        ]
+
+    monkeypatch.setattr(registry, "review_findings", contradiction)
+    set_registry(registry)
+    env["seat"].findings = []
+    env["github"].pulls[7]["body"] = ADVISORY_BODY
+    try:
+        rows = len(registry._select("1=1"))
+        with _client() as client:
+            done = _wait(client, _submit(client).json()["id"])
+        assert len(registry._select("1=1")) == rows
+    finally:
+        set_registry(None)
+    assert done["state"] == "succeeded", done["error"]
+    by_pass = {f["source_pass"]: f for f in done["findings"]}
+    assert by_pass["registry"]["severity"] == "blocker"
+    assert "reg_aaaaaaaaaaaa" in by_pass["registry"]["body"]
+    assert by_pass["registry_uncited_decision"]["severity"] == "suggestion"

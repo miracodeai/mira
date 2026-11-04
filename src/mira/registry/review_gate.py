@@ -109,3 +109,20 @@ async def attach(
         engine._registry_findings = [finding_comment(hit) for hit in hits]
     except Exception as exc:
         logger.debug("Registry contradiction check skipped: %s", exc)
+
+
+async def finish(engine: Any, comments: list[ReviewComment]) -> list[ReviewComment]:
+    """After critique: put contradiction blockers first and post advisories.
+
+    A review that posts to GitHub gets the uncited-decision advisories as one
+    general PR comment (an inline comment needs a diff line). A dry run, such
+    as the review API, posts nothing; its runner returns them as findings.
+    """
+    blockers = engine.__dict__.pop("_registry_findings", [])
+    pr_info = getattr(engine, "_pr_info", None)
+    provider = getattr(engine, "provider", None)
+    if pr_info is not None and provider is not None and not getattr(engine, "dry_run", True):
+        from mira.registry.uncited import post_general_comment, uncited_decisions
+
+        await post_general_comment(provider, pr_info, uncited_decisions(pr_info))
+    return [*blockers, *comments]

@@ -362,3 +362,34 @@ async def test_http_and_mcp_session_query(gate: Registry):
     assert prompts["structuredContent"]["prompts"] == body["prompts"]
     refused = _rpc(client, agent, "resolve_conflict", {"id": "reg_missing", "choice": "defer"})
     assert refused["isError"] is True
+
+
+async def test_posting_review_keeps_the_blocker_and_posts_the_advisory(gate: Registry):
+    """HAI-12775: an uncited decision is a general comment beside the inline blocker."""
+    from mira.registry.uncited import COMMENT_MARKER
+
+    class Provider:
+        def __init__(self) -> None:
+            self.posted: list[str] = []
+
+        async def find_bot_comment(self, pr_info, marker):  # type: ignore[no-untyped-def]
+            return None
+
+        async def post_comment(self, pr_info, body):  # type: ignore[no-untyped-def]
+            self.posted.append(body)
+
+    approved = await _approve(gate)
+    before = len(gate._select("1=1"))
+    engine = _quiet_engine()
+    engine.provider = Provider()  # type: ignore[assignment]
+    engine.dry_run = False
+    body = NARROW + "\n\nDecisions I made:\n- Artifact Apps get a separate edit check\n"
+    result = await engine.review_snapshot(_pr(body), DIFF)
+    [blocker] = [c for c in result.comments if c.source_pass == "registry"]
+    assert blocker.severity == Severity.BLOCKER
+    assert approved["id"] in blocker.body
+    assert all(c.path for c in result.comments)
+    [posted] = engine.provider.posted  # type: ignore[attr-defined]
+    assert posted.startswith(COMMENT_MARKER)
+    assert '"Artifact Apps get a separate edit check"' in posted
+    assert len(gate._select("1=1")) == before

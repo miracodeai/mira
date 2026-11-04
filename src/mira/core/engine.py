@@ -64,7 +64,7 @@ from mira.models import (
     build_review_stats,
 )
 from mira.providers.base import BaseProvider
-from mira.registry.prompt import SEARCH_DECISIONS_TOOL, apply_registry
+from mira.registry.prompt import SEARCH_DECISIONS_TOOL, apply_registry, finish_registry
 from mira.security.secrets_scan import scan_secrets
 
 logger = logging.getLogger(__name__)
@@ -772,6 +772,8 @@ class ReviewEngine:
 
             raise
 
+        if not result.reviewed_files:  # Kory Source: returned before the registry hook
+            await finish_registry(self, [])
         # The final walkthrough must land after the in-progress one, or it gets
         # overwritten on fast PRs and stays stuck on "in progress".
         notify_task = getattr(self, "_walkthrough_notify_task", None)
@@ -1644,7 +1646,7 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
 
-        final_comments = [*self.__dict__.pop("_registry_findings", []), *final_comments]
+        final_comments = await finish_registry(self, final_comments)
         all_key_issues = _drop_orphan_key_issues(all_key_issues, final_comments)
 
         if self.config.review.include_summary:

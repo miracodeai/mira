@@ -287,9 +287,10 @@ def review_report(job_id: str, request: Request) -> HTMLResponse:
     e = html.escape
     rows: list[str] = []
     for f in sorted(view["findings"] or [], key=lambda f: _SEVERITY_ORDER.get(f["severity"], 9)):
+        # An empty path is a finding on the PR as a whole, such as its description.
+        where = f"<code>{e(f['path'])}:{f['line']}</code>" if f["path"] else "<i>pull request</i>"
         rows.append(
-            f"<li><b>[{e(f['severity'])}] {e(f['title'])}</b> "
-            f"<code>{e(f['path'])}:{f['line']}</code><p>{e(f['body'])}</p></li>"
+            f"<li><b>[{e(f['severity'])}] {e(f['title'])}</b> {where}<p>{e(f['body'])}</p></li>"
         )
     if view["findings"] is None:
         findings_html = "<p><i>No findings: the review has not succeeded.</i></p>"

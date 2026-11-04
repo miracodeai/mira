@@ -153,3 +153,10 @@ async def apply_registry(
     from mira.registry.review_gate import attach
 
     await attach(engine, pr_info, files, custom_rules, diff_text, pr_title, pr_body)
+
+
+async def finish_registry(engine: Any, comments: list[Any]) -> list[Any]:
+    """Engine hook after critique: blockers first, advisories posted. No registry writes."""
+    from mira.registry.review_gate import finish
+
+    return await finish(engine, comments)

@@ -710,9 +710,11 @@ def _diff_lines(path: str) -> int | None:
 # Measured against 567ed7e: engine.py is 45. HAI-12286 set the cap at 47 when
 # review_snapshot (28) sat beside the registry block. HAI-12196 moved the
 # contradiction check into that same block and the measured total is 45.
-# 46 is the next integer, so another edit still fails. server.py is 15.
+# 46 is the next integer, so another edit still fails. HAI-12775 adds 2 lines
+# so a PR with no reviewable file still gets the uncited-decision comment: 47,
+# and the cap moves by exactly those 2, to 48. server.py is 15.
 @pytest.mark.parametrize(
-    ("path", "cap"), [("src/mira/core/engine.py", 46), ("src/mira/platforms/server.py", 25)]
+    ("path", "cap"), [("src/mira/core/engine.py", 48), ("src/mira/platforms/server.py", 25)]
 )
 def test_upstream_edit_stays_under_cap(path, cap):
     changed = _diff_lines(path)

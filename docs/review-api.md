@@ -219,6 +219,9 @@ Errors use one shape:
   `[]` means the review succeeded and found nothing.
 - `registry_ids` is always `[]` for now. Validated registry citations arrive
   with HAI-11605.
+- A finding with an empty `path` is about the PR as a whole, not a line of
+  the diff. Its `line` is `1` and means nothing. See
+  [Uncited decisions](#uncited-decisions).
 - `coverage.skipped[].reason` is one of `patch_unavailable` (GitHub returned
   no patch: binary or too large), `excluded_by_filter` (matched the review
   file filter), or `size_or_priority_cap` (cut by the diff size budget).
@@ -229,6 +232,57 @@ Errors use one shape:
   this job asked for and got. `model_calls` lists each logical completion
   with its outcome and attempt count. They cover this job only, even when
   other jobs run at the same time.
+
+### Uncited decisions
+
+The PR body, and the description of each Linear ticket the PR title or body
+names, can state a decision with no registry ID next to it. The job adds one
+advisory finding per such decision (HAI-12775):
+
+```json
+{
+  "id": "f2",
+  "path": "",
+  "line": 1,
+  "end_line": null,
+  "severity": "suggestion",
+  "category": "registry",
+  "title": "Decision lacks a registry citation",
+  "body": "The pull request body, line 4, states a decision without a registry ID:\n\"Divide before returning\"\n...",
+  "confidence": 0.7,
+  "suggestion": null,
+  "source_pass": "registry_uncited_decision",
+  "registry_ids": []
+}
+```
+
+- Identify these by `source_pass == "registry_uncited_decision"`. Do not
+  match on `title`, or on an empty `registry_ids`.
+- The first body line names the source and its 1-based line: `The pull
+  request body, line N` or `The Linear HAI-123 description (<url>), line N`.
+  The second line quotes the decision.
+- A decision is an explicit commitment ("we decided", "we chose", "we
+  opted", "the decision was to", a line starting `Decision:`) or an item
+  under a "Decisions I made" heading or label. Questions, hypotheticals,
+  negations, empty or `None` sections, explicit no-decision statements ("No
+  new product behavior is ratified here", "No product behavior changed"),
+  test and lint notes, fenced code,
+  blockquotes, inline code, quoted text, and HTML comments do not count.
+- A citation is `reg_` plus 12 hex digits in the same item or sentence (or
+  the sentence right after it), Markdown links included. `reg_...` is not a
+  citation. The check is syntax only: it does not look up the id.
+- Linked tickets are read from the registry's Linear mirror only, at most
+  five per job. A ticket with no mirror, a retired (deleted) mirror, or an
+  unreadable registry yields no finding. Mirrors are as fresh as the last
+  Linear import, so a ticket edited since then is checked as it was.
+- At most ten of these findings per job. They are advisory: they never fail
+  the job, are not model calls, and write nothing to the registry. They are
+  added even when no file was reviewable. Contradiction blockers
+  (`source_pass == "registry"`) are unchanged.
+- A review that posts to GitHub (the webhook path) cannot post an inline
+  comment with no diff line. It gets the same decisions as one general PR
+  comment with a hidden marker, edited in place on the next review. That
+  includes PRs with no reviewable file.
 
 ### States and stages
 
