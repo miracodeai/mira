@@ -536,3 +536,21 @@ class TestBuildReviewStats:
         comments = [self._make_comment(Severity.SUGGESTION)] * 3
         stats = build_review_stats(comments)
         assert stats == {Severity.SUGGESTION: 3}
+
+
+def test_markdown_with_skipped_files_is_utf8_encodable():
+    """The "Reviewed N of M files" heading must be a real emoji, not two UTF-16 halves.
+
+    Python doesn't combine "\\ud83d\\udccb" escapes, so the heading used to make
+    the whole walkthrough unencodable ("surrogates not allowed") on any PR with
+    skipped files.
+    """
+    wt = WalkthroughResult(summary="s")
+    md = wt.to_markdown(
+        bot_name="mira",
+        reviewed_files=1,
+        skipped_paths=["b.py"],
+        total_paths=["a.py", "b.py"],
+    )
+    assert "### \U0001f4cb Reviewed 1 of 2 files" in md
+    md.encode("utf-8")
