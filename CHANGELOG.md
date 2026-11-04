@@ -19,6 +19,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A walkthrough that fails to post no longer leaves the PR on "Reviewing this PR…".** When the final walkthrough comment is rejected (for example, by an encoding error), the placeholder is replaced with a note that the review finished and any findings are posted as review comments.
 - **Walkthroughs on PRs with skipped files post again.** The "📋 Reviewed N of M files" heading was written as the escapes `\ud83d\udccb`, which Python keeps as two lone UTF-16 surrogates rather than one emoji. Encoding the walkthrough then failed with "surrogates not allowed", so on any PR large enough for files to be skipped the walkthrough was never posted (GitLab, Forgejo and Bitbucket send UTF-8 JSON bodies).
 
 ## [0.10.1] — 2026-10-28
