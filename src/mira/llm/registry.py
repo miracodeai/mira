@@ -73,6 +73,28 @@ def get(model_id: str) -> dict | None:
     return _load().get(model_id)
 
 
+def reasoning_levels(info: dict, effort_map: dict[str, str]) -> list[str] | None:
+    """Efforts advertised by an OpenAI-style catalog, including provider aliases."""
+    levels = (info.get("reasoning") or {}).get("supported_efforts")
+    if levels is not None:
+        return list(
+            dict.fromkeys(
+                [
+                    "off",
+                    *(
+                        level
+                        for level in [*levels, *effort_map]
+                        if effort_map.get(level, level) in levels
+                    ),
+                ]
+            )
+        )
+    parameters = info.get("supported_parameters")
+    if parameters is not None and not {"reasoning", "reasoning.effort"}.intersection(parameters):
+        return ["off"]
+    return info.get("reasoning_levels")
+
+
 def is_supported(model_id: str, purpose: str | None = None) -> bool:
     """``True`` iff ``model_id`` is in the registry. If ``purpose`` is given,
     additionally require that the model is allowed for that purpose
@@ -127,6 +149,12 @@ def pricing(model_id: str) -> tuple[float, float]:
     zero and a partial custom entry can't crash registry load.
     """
     info = get(model_id) or {}
+    from mira.llm import SUBSCRIPTION_PREFIXES, api_providers
+
+    if model_id.startswith(tuple(SUBSCRIPTION_PREFIXES)):
+        return (0.0, 0.0)  # subscription models: no per-token spend
+    if model_id.startswith("@") and model_id[1:].partition("/")[0] in api_providers.LOCAL_IDS:
+        return (0.0, 0.0)  # runs on the user's machine
     return (
         float(info.get("input_cost_per_1m", 3.00)),
         float(info.get("output_cost_per_1m", 15.00)),

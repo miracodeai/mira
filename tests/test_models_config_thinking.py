@@ -55,10 +55,8 @@ class TestGetReviewThinkingMode:
     def test_off_and_empty_normalize_to_none(self, value: str):
         assert get_review_thinking_mode(LLMConfig(), value) is None
 
-    @pytest.mark.parametrize("db_value", ["off", "", None])
-    def test_off_db_value_does_not_shadow_config(self, db_value: str | None):
-        # Saving the models form always writes "off" by default; that must not
-        # permanently disable a mira.yaml-level reasoning effort.
+    @pytest.mark.parametrize("db_value", ["", None])
+    def test_default_db_value_does_not_shadow_config(self, db_value: str | None):
         cfg = LLMConfig(review_reasoning_effort="high")
         assert get_review_thinking_mode(cfg, db_value) == "high"
 
@@ -108,13 +106,11 @@ class TestSetModelsThinkingValidation:
         assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_thinking_mode") == "xhigh"
 
-    def test_off_clears_setting_so_config_can_win(self, in_memory_db: AppDatabase):
-        # "off" must not be persisted as a literal — it'd shadow a mira.yaml
-        # override. It's stored as "" (the column is NOT NULL) and reads as unset.
+    def test_default_clears_setting_so_config_can_win(self, in_memory_db: AppDatabase):
         body = ModelsUpdate(
             indexing_model="anthropic/claude-haiku-4-5",
             review_model="anthropic/claude-sonnet-4-6",
-            review_thinking_mode="off",
+            review_thinking_mode="",
         )
         assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_thinking_mode") == ""

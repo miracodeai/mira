@@ -2,6 +2,7 @@ import { Loader2 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useNavigate } from "react-router"
 
+import { ProvidersPanel } from "@/components/providers-panel"
 import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
 import { Button } from "@/components/ui/button"
 import {
@@ -28,16 +29,22 @@ export function SetupPage() {
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
 
-  useEffect(() => {
+  // Provider changes refresh only the catalog so unsaved picks survive.
+  const loadModels = (withSelections = true) =>
     api.getModels().then((data) => {
-      setIndexingModel(data.indexing_source === "config" ? "" : data.indexing_model)
-      setReviewModel(data.review_source === "config" ? "" : data.review_model)
+      if (withSelections) {
+        setIndexingModel(data.indexing_source === "config" ? "" : data.indexing_model)
+        setReviewModel(data.review_source === "config" ? "" : data.review_model)
+      }
       setConfigIndexingModel(data.config_indexing_model)
       setConfigReviewModel(data.config_review_model)
       setIndexingOptions(data.indexing_options)
       setReviewOptions(data.review_options)
       setLoading(false)
     })
+
+  useEffect(() => {
+    loadModels()
   }, [])
 
   const handleSave = async () => {
@@ -63,9 +70,12 @@ export function SetupPage() {
           Welcome to Mira
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Choose which models to use for indexing and reviews
+          Choose a model provider, then the models to use for indexing and
+          reviews
         </p>
       </div>
+
+      <ProvidersPanel onChanged={() => loadModels(false)} />
 
       <Card>
         <CardHeader className="pb-3">
