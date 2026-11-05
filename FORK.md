@@ -431,3 +431,29 @@ upstream `e01f1e062c49536c7e12b6b7fa383e2dd28da14b`: **100 paths, 17,840
 insertions, 5,856 deletions**. The total includes upstream commits that
 have not been synced. Compared with this branch's base `b238ff1`, the
 registry adds 18 paths and 4,107 insertions, all listed above.
+
+## Greptile parity harness (HAI-11607)
+
+These files are fork-owned and new. No upstream file is edited.
+`tests/benchmarks/runner.py`, `judge.py`, and `scripts/run_benchmark.py`
+are unchanged. The harness reuses `judge.prf1` and builds its own matched-
+snapshot runner and blind pooled judge beside them.
+
+- `tests/benchmarks/parity_snapshot.py`: units at the commits Greptile
+  reviewed, neutral comment text, `PinnedGitHubProvider`, and the
+  later-fix and revert evidence.
+- `tests/benchmarks/parity_judge.py`: the blind pooled judge and pure
+  scoring.
+- `tests/benchmarks/parity_stats.py`: the parity verdict (cluster
+  bootstrap), the registry A/B 2σ rule, and model families.
+- `tests/benchmarks/parity_runner.py`: arms × runs × units, the registry
+  arm switch (it swaps `mira.registry.prompt.registry_rule`), the artifact,
+  `summarize`, and the Markdown report.
+- `tests/benchmarks/parity_export.py`: exports a merged-PR window to the
+  manifest shape, for the nightly run.
+- `tests/benchmarks/fixtures/hickory/run_parity.py`: the CLI (`plan`,
+  `run`, `rescore`, `export`). HAI-11608 depends on this interface.
+- `tests/benchmarks/test_parity_unit.py`.
+
+The design, the rules, and the commands are in
+`tests/benchmarks/fixtures/hickory/README.md`.
