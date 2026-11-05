@@ -4,11 +4,17 @@ Public interface for later callers (indexing relink, reviews, the benchmark):
 
 * ``RouterAcpProvider`` implements ``LLMProviderProtocol``.
 * ``complete``, ``complete_with_tools``, ``review``, and ``walkthrough``
-  return a string. ``complete_agentic`` returns no tool calls and does not
-  call the relay, so the engine performs one forced review.
-* ``supports_tool_calling`` and ``supports_temperature`` are false. Ensemble
-  sampling stays off. This provider does not map ``read_file`` or
-  ``grep_repo`` onto the seat.
+  return a string.
+* ``complete_agentic`` is a JSON tool-call adapter (HAI-12817). Each hop is
+  one ordinary completion: the prompt carries the tool schemas and the whole
+  call/result history, and the seat answers with exactly one
+  ``{"tool": name, "arguments": {...}}`` object. The provider checks the name
+  and arguments against the supplied schemas and returns an OpenAI-shaped
+  assistant message with one tool call. A reply it cannot use returns no tool
+  calls, so the engine falls back to one forced review. The seat never runs
+  the tools: Mira's own executor answers ``read_file`` and ``grep_repo``.
+* ``supports_tool_calling`` (native tool calling) and ``supports_temperature``
+  are false. Ensemble sampling stays off.
 * A model pin is a router candidate id (``grok/grok-4.6``). ``auto``,
   ``default``, ``router-default``, and ``router-acp-default`` are unpinned.
   A pin that does not run raises ``router_acp_model_mismatch``. The provider
@@ -529,7 +535,78 @@ class RouterAcpProvider:
         tools: list[dict],
         temperature: float | None = None,
     ) -> dict:
-        return {"content": "", "tool_calls": []}
+        """One agentic hop: ask the seat for one tool call, as JSON.
+
+        Returns ``{"role": "assistant", "content": "", "tool_calls": [call]}``,
+        or no tool calls when the reply is not one valid call. The caller's loop
+        owns hop caps, tool execution, and the forced-review fallback.
+        """
+        specs = _tool_specs(tools)
+        if not specs:
+            return {"role": "assistant", "content": "", "tool_calls": []}
+        prompt = self._agentic_prompt(messages, specs)
+        raw, usage = await self._generate(prompt)
+        self._account(prompt, raw, usage)
+        try:
+            name, arguments = _parse_tool_call(self._extract_json_object(raw), specs)
+        except LLMError as exc:
+            self._record(
+                state="bad_response",
+                requested=self._requested_model(),
+                actual="unknown",
+                attempts=1,
+            )
+            logger.info("router agentic reply unusable: %s", exc)
+            return {"role": "assistant", "content": "", "tool_calls": []}
+        call_id = f"router_call_{_prior_tool_calls(messages) + 1}"
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                }
+            ],
+        }
+
+    def _agentic_prompt(self, messages: list, specs: dict[str, dict]) -> str:
+        parts = [
+            "You are running as Mira's model backend through a router-acp seat.",
+            "Follow the Mira review instructions exactly.",
+            "Mira runs the tools listed below for you and returns their results in the next request.",
+            "Do not use any other tools, files, or commands of your own.",
+            "",
+            "## Mira messages",
+        ]
+        for index, message in enumerate(messages, 1):
+            role = message.get("role", "user")
+            content = message.get("content") or ""
+            if role == "tool":
+                call_id = message.get("tool_call_id") or ""
+                parts.append(f"\n### Message {index}: tool result for `{call_id}`\n{content}")
+                continue
+            parts.append(f"\n### Message {index}: {role}\n{content}".rstrip())
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                parts.append(
+                    f"Tool call `{call.get('id') or ''}`: "
+                    + json.dumps({"tool": fn.get("name"), "arguments": _loads_args(fn)})
+                )
+        parts += ["", "## Tools"]
+        for name, spec in specs.items():
+            parts.append(f"\n### `{name}`\n{spec.get('description') or ''}".rstrip())
+            parts.append("Arguments schema:\n" + json.dumps(spec["parameters"], sort_keys=True))
+        parts += [
+            "",
+            "## Required output",
+            "Choose exactly one tool call as your next action.",
+            'Return ONLY one JSON object: {"tool": "<tool name>", "arguments": {...}}.',
+            "The arguments must conform to that tool's schema.",
+            "Do not wrap the JSON in markdown fences. Do not include explanatory text.",
+        ]
+        return "\n".join(parts)
 
     async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL
@@ -542,6 +619,86 @@ class RouterAcpProvider:
         from mira.llm.tool_schemas import SUBMIT_WALKTHROUGH_TOOL
 
         return await self.complete_with_tools(messages, tools=[SUBMIT_WALKTHROUGH_TOOL])
+
+
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def _tool_specs(tools: list[dict]) -> dict[str, dict]:
+    specs: dict[str, dict] = {}
+    for tool in tools or []:
+        fn = tool.get("function") or {}
+        name = fn.get("name")
+        if name:
+            specs[name] = {
+                "description": fn.get("description") or "",
+                "parameters": fn.get("parameters") or {"type": "object"},
+            }
+    return specs
+
+
+def _prior_tool_calls(messages: list) -> int:
+    return sum(len(m.get("tool_calls") or []) for m in messages if m.get("role") == "assistant")
+
+
+def _loads_args(fn: dict) -> Any:
+    raw = fn.get("arguments")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    return raw if raw is not None else {}
+
+
+def _type_ok(value: Any, expected: Any) -> bool:
+    names = expected if isinstance(expected, list) else [expected]
+    for name in names:
+        if name == "null":
+            if value is None:
+                return True
+            continue
+        kinds = _JSON_TYPES.get(name)
+        if kinds is None:
+            return True  # a type this adapter does not check
+        if isinstance(value, bool) and name in {"integer", "number"}:
+            continue
+        if isinstance(value, kinds):
+            return True
+    return False
+
+
+def _parse_tool_call(text: str, specs: dict[str, dict]) -> tuple[str, dict]:
+    """``{"tool": name, "arguments": {...}}`` checked against ``specs``."""
+    obj = json.loads(text)
+    name = obj.get("tool")
+    if not isinstance(name, str) or name not in specs:
+        raise LLMError("router_acp_bad_response", detail=f"unknown tool {name!r}")
+    arguments = obj.get("arguments", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except Exception as exc:
+            raise LLMError("router_acp_bad_response", detail=f"{name}: arguments not JSON") from exc
+    if not isinstance(arguments, dict):
+        raise LLMError("router_acp_bad_response", detail=f"{name}: arguments not an object")
+    schema = specs[name]["parameters"]
+    for key in schema.get("required") or []:
+        if key not in arguments:
+            raise LLMError("router_acp_bad_response", detail=f"{name}: missing {key}")
+    properties = schema.get("properties") or {}
+    for key, value in arguments.items():
+        expected = (properties.get(key) or {}).get("type")
+        if expected is not None and not _type_ok(value, expected):
+            raise LLMError("router_acp_bad_response", detail=f"{name}: {key} is not {expected}")
+    return name, arguments
 
 
 def _is_router_acp(config: LLMConfig) -> bool:

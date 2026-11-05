@@ -132,3 +132,76 @@ class TestExecutorBudget:
         ex.bytes_used = 1_000_000  # simulate exhaustion
         out = await ex.execute("read_file", {"path": "a.py"})
         assert "budget exhausted" in out
+
+
+# --------------------------------------- router-acp seat retrieval (HAI-12817)
+
+_PRODUCER_DIFF = "-    return {'amount': cents}\n+    return {'amount_cents': cents}\n"
+_DEFECT_CONSUMER = "def charge(payload):\n    return bill(payload['amount'])\n"
+_CLEAN_CONSUMER = "def charge(payload):\n    return bill(payload['amount_cents'])\n"
+
+
+def _seat_that_follows_results():
+    """A stand-in seat: greps for the consumer, reads it, files only what it saw."""
+    import json as _json
+
+    prompts: list[str] = []
+
+    async def transport(request):
+        prompt = request["body"]["prompt"]
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            reply = {"tool": "grep_repo", "arguments": {"pattern": "payload\\[", "path_only": None}}
+        elif len(prompts) == 2:
+            reply = {"tool": "read_file", "arguments": {"path": "billing/consumer.py"}}
+        else:
+            stale = "bill(payload['amount'])" in prompt
+            comments = (
+                [
+                    {
+                        "path": "billing/consumer.py",
+                        "line": 2,
+                        "severity": "blocker",
+                        "category": "bug",
+                        "title": "Consumer still reads removed `amount` key",
+                        "body": "`charge` reads `payload['amount']`, which the producer renamed.",
+                        "confidence": 0.9,
+                    }
+                ]
+                if stale
+                else []
+            )
+            reply = {"tool": "submit_review", "arguments": {"comments": comments, "summary": "s"}}
+        return {"text": _json.dumps(reply), "actual_model": "claude@x/opus"}
+
+    return transport, prompts
+
+
+@pytest.mark.parametrize(("consumer", "expect"), [(_DEFECT_CONSUMER, 1), (_CLEAN_CONSUMER, 0)])
+@pytest.mark.asyncio
+async def test_router_seat_retrieves_the_consumer_before_submitting(monkeypatch, consumer, expect):
+    import json as _json
+
+    from mira.config import LLMConfig
+    from mira.core.passes import agentic_review_loop
+    from mira.llm.router_acp import RouterAcpProvider
+
+    monkeypatch.setenv("MIRA_ROUTER_ACP_ALLOW_UNTRACED", "1")
+    monkeypatch.delenv("LLM_OTLP_ENDPOINT", raising=False)
+    transport, prompts = _seat_that_follows_results()
+    provider = RouterAcpProvider(
+        LLMConfig(provider="router-acp", model="claude@x/opus"), transport=transport, relay=False
+    )
+    sources = {"billing/producer.py": "def build(cents):\n    return {'amount_cents': cents}\n"}
+    sources["billing/consumer.py"] = consumer
+    executor = _executor(sources, sorted(sources))
+    messages = [
+        {"role": "system", "content": "Review the diff."},
+        {"role": "user", "content": _PRODUCER_DIFF},
+    ]
+    raw = await agentic_review_loop(provider, messages, executor)
+    assert len(_json.loads(raw)["comments"]) == expect
+    assert len(prompts) == 3
+    assert "billing/consumer.py:2" in prompts[1]  # grep hit reached the seat
+    assert "    2  " in prompts[2] and consumer.splitlines()[1].strip() in prompts[2]
+    assert [c["tool"] for c in executor.call_log] == ["grep_repo", "read_file"]

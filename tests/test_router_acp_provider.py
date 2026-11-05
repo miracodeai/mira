@@ -209,15 +209,176 @@ async def test_timeout_and_model_mismatch_are_not_retried():
     assert calls["n"] == 1
 
 
-async def test_complete_agentic_does_not_call_the_relay():
+async def test_complete_agentic_without_tools_does_not_call_the_relay():
     async def transport(_request):
         raise AssertionError("relay called")
 
     provider = _provider(transport)
-    assert await provider.complete_agentic([{"role": "user", "content": "review"}], tools=[]) == {
-        "content": "",
-        "tool_calls": [],
-    }
+    msg = await provider.complete_agentic([{"role": "user", "content": "review"}], tools=[])
+    assert msg["tool_calls"] == []
+
+
+# ------------------------------------------------- JSON tool-call adapter (HAI-12817)
+
+
+def _scripted(replies: list[str], model: str = "claude@x/opus"):
+    prompts: list[str] = []
+    requests: list[dict] = []
+
+    async def transport(request):
+        requests.append(request)
+        prompts.append(request["body"]["prompt"])
+        text = replies[min(len(prompts), len(replies)) - 1]
+        return {
+            "text": text,
+            "actual_model": model,
+            "usage": {"input_tokens": 5, "output_tokens": 2},
+        }
+
+    return transport, prompts, requests
+
+
+class _RecordingExecutor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.call_log: list[dict] = []
+
+    async def execute(self, name: str, args: dict) -> str:
+        self.calls.append((name, args))
+        return f"RESULT-{len(self.calls)} for {name}"
+
+
+_REVIEW = {"comments": [], "summary": "ok"}
+_SYSTEM = [{"role": "system", "content": "sys"}, {"role": "user", "content": "the diff"}]
+
+
+def _call(tool: str, **arguments) -> str:
+    return json.dumps({"tool": tool, "arguments": arguments})
+
+
+async def test_agentic_loop_reads_then_submits_through_the_seat():
+    from mira.core.passes import agentic_review_loop
+
+    transport, prompts, requests = _scripted(
+        [_call("read_file", path="src/consumer.py"), _call("submit_review", **_REVIEW)]
+    )
+    provider = RouterAcpProvider(
+        _config(model="claude@x/opus"), transport=transport, sleep=_no_sleep, relay=False
+    )
+    executor = _RecordingExecutor()
+    token = attribution_key.set("review|unit")
+    try:
+        raw = await agentic_review_loop(provider, _SYSTEM, executor)
+    finally:
+        attribution_key.reset(token)
+
+    assert json.loads(raw) == _REVIEW
+    assert executor.calls == [("read_file", {"path": "src/consumer.py"})]
+    assert len(prompts) == 2
+    # Every tool schema is offered; the second hop carries the call and its result.
+    for name in ("read_file", "grep_repo", "submit_review"):
+        assert f"### `{name}`" in prompts[0]
+    assert "Tool call `router_call_1`" in prompts[1]
+    assert "tool result for `router_call_1`" in prompts[1]
+    assert "RESULT-1 for read_file" in prompts[1]
+    # Requester transport: no relay URL or credentials, pinned model on every hop.
+    assert all(set(r) == {"body", "timeout"} for r in requests)
+    assert all(r["body"]["model"] == "claude@x/opus" for r in requests)
+    assert [e["state"] for e in provider.call_log] == ["ok", "ok"]
+    assert all(e["attribution"] == "review|unit" for e in provider.call_log)
+    assert provider.usage["prompt_tokens"] == 10 and provider.usage["completion_tokens"] == 4
+
+
+async def test_agentic_call_ids_follow_the_history():
+    transport, _prompts, _ = _scripted([_call("grep_repo", pattern="amount", path_only=None)])
+    provider = _provider(transport)
+    history = [
+        *_SYSTEM,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "router_call_1", "function": {"name": "read_file", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "router_call_1", "content": "x"},
+    ]
+    from mira.llm.agentic_tools import AGENTIC_TOOLS
+
+    msg = await provider.complete_agentic(history, tools=list(AGENTIC_TOOLS))
+    (call,) = msg["tool_calls"]
+    assert call["id"] == "router_call_2"
+    assert call["function"]["name"] == "grep_repo"
+    assert json.loads(call["function"]["arguments"]) == {"pattern": "amount", "path_only": None}
+
+
+async def test_agentic_accepts_string_encoded_arguments():
+    reply = json.dumps({"tool": "read_file", "arguments": json.dumps({"path": "a.py"})})
+    transport, _, _ = _scripted([reply])
+    provider = _provider(transport)
+    from mira.llm.agentic_tools import AGENTIC_TOOLS
+
+    msg = await provider.complete_agentic(list(_SYSTEM), tools=list(AGENTIC_TOOLS))
+    assert json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"path": "a.py"}
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "I would like to read the consumer first.",
+        _call("run_shell", cmd="cat /etc/passwd"),
+        _call("read_file"),
+        _call("read_file", path=3),
+        _call("grep_repo", pattern="x", path_only="yes"),
+        json.dumps([{"tool": "read_file", "arguments": {"path": "a.py"}}]),
+        json.dumps({"tool": "read_file", "arguments": ["a.py"]}),
+    ],
+)
+async def test_unusable_agentic_reply_falls_back_to_one_forced_review(reply):
+    from mira.core.passes import agentic_review_loop
+
+    transport, prompts, _ = _scripted([reply])
+    provider = _provider(transport)
+    executor = _RecordingExecutor()
+    assert await agentic_review_loop(provider, list(_SYSTEM), executor) == ""
+    assert executor.calls == []
+    assert len(prompts) == 1
+    assert [e["state"] for e in provider.call_log] == ["ok", "bad_response"]
+
+
+async def test_agentic_loop_stops_at_the_hop_cap():
+    from mira.core.passes import agentic_review_loop
+
+    transport, prompts, _ = _scripted([_call("read_file", path="a.py")])
+    provider = _provider(transport)
+    executor = _RecordingExecutor()
+    assert await agentic_review_loop(provider, list(_SYSTEM), executor) == ""
+    assert len(prompts) == 6 and len(executor.calls) == 6
+    assert "router_call_5" in prompts[-1] and "router_call_6" not in prompts[-1]
+
+
+async def test_agentic_hop_with_the_wrong_model_is_refused_and_falls_back():
+    from mira.core.passes import agentic_review_loop
+
+    transport, _, _ = _scripted([_call("read_file", path="a.py")], model="grok/grok-4.7")
+    provider = _provider(transport, model="claude@x/opus", router_acp_max_retries=0)
+    executor = _RecordingExecutor()
+    assert await agentic_review_loop(provider, list(_SYSTEM), executor) == ""
+    assert executor.calls == []
+    assert provider.call_log[-1]["state"] == "model_mismatch"
+
+
+async def test_factory_provider_agentic_hop_needs_a_requester(monkeypatch):
+    async def dial(self, request):  # type: ignore[no-untyped-def]
+        raise AssertionError("factory provider dialed the relay")
+
+    monkeypatch.setattr(RouterAcpProvider, "_http_transport", dial)
+    from mira.llm.agentic_tools import AGENTIC_TOOLS
+
+    provider = create_llm(_config())
+    with pytest.raises(LLMError) as exc:
+        await provider.complete_agentic(list(_SYSTEM), tools=list(AGENTIC_TOOLS))
+    assert exc.value.code == "seat_provider_unconfigured"
 
 
 async def test_env_fills_unset_auth_and_ignores_the_live_session(monkeypatch: pytest.MonkeyPatch):

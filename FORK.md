@@ -61,7 +61,15 @@ the intentional delta after the baseline snapshot:
 - `tests/benchmarks/fixtures/hickory/run_router_acp.py`.
 
 `src/mira/core/engine.py` is unchanged. Ensemble stays off because the
-provider reports `supports_temperature = false`. Tool calling stays off.
+provider reports `supports_temperature = false`. Native tool calling stays
+off (`supports_tool_calling = false`). Since HAI-12817 `complete_agentic` is a
+JSON tool-call adapter: each hop is one seat completion whose prompt carries
+the tool schemas and the call/result history, and whose reply is one
+`{"tool", "arguments"}` object checked against those schemas. The engine's
+existing loop (`passes.agentic_review_loop`, six hops) and executor run the
+tools; a reply that is not one valid call falls back to the forced review.
+Rollback is returning no tool calls from `complete_agentic`. Tests:
+`tests/test_router_acp_provider.py`, `tests/test_agentic_tools.py`.
 
 Measure source drift with:
 
