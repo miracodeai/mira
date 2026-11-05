@@ -61,9 +61,24 @@ unit of comparison is therefore **one PR at one commit Greptile reviewed**:
   of both reviewers' scores.
 
 The frozen manifest yields 46 units (25 held-out, 21 development). The
-reviewer sees only the PR title, the description minus lines that mention
-Greptile, and the snapshot diff. It sees no bot threads, so the engine stays
-in round one.
+reviewer sees only the fixture's PR title and the snapshot diff. It sees no
+PR description and no bot threads, so the engine stays in round one.
+
+Every reviewer read is pinned to the unit's commit (HAI-12817). The engine
+reads sources and the repo tree at `pr_info.head_branch`, the live branch;
+`PinnedGitHubProvider` rewrites that ref to `unit.sha`, and lists file
+history from `unit.sha` instead of the default branch. Before HAI-12817 the
+diff was pinned but source reads, the tree, history, title, and description
+were live, so artifacts without `"harness": "hai-12817-pinned-reads"` came
+from different reviewer inputs. Compare a baseline and a candidate only when
+both ran on the same harness.
+
+Since HAI-12817 the router-acp provider answers the engine's agentic loop
+with JSON tool calls, so the reviewer can call `read_file`, `grep_repo`, and
+`search_decisions`. The harness answers `search_decisions` with
+`[registry unavailable]` in both arms: the live search has no as-of filter,
+and in `registry_off` it would leak the registry. The A/B still measures the
+prompt block only.
 
 ### Blind judge
 
@@ -181,6 +196,11 @@ GITHUB_TOKEN="$(gh auth token)" uv run python tests/benchmarks/fixtures/hickory/
 - for every (unit, arm, run): the exact judge prompt, its SHA-256, the
   shuffle seed, the pool with owners, the raw and parsed judge responses, the
   neutral Kory comments, latency, and seat calls;
+- for every review: the engine's audit trail (per-chunk drafts, the
+  reviewer's tool calls, and each comment a filter or critique stage
+  dropped), plus reviewed and skipped paths. The report summarizes them
+  under "Pipeline (informational)". Scoring never reads them, and artifacts
+  without them still rescore;
 - the later-fix evidence and the reverts.
 
 `rescore` uses nothing else. `run` aborts before any call if the seat-session
@@ -188,6 +208,9 @@ estimate exceeds `--seat-budget`. The budget is also a hard cap during the
 run: every relay request counts as one seat session, and once the count
 reaches the budget each further request fails with `seat_budget_exhausted`
 and no new unit starts. A run that hits the cap is `inconclusive`.
+The `plan` estimate counts one-shot reviews only. With agentic hops a review
+can take up to six more seat calls per chunk, so set the budget from the
+worst case, not the estimate.
 
 Both arms replace the engine's whole registry hook with the prompt block
 alone. The contradiction check (HAI-12196) does not run in either arm: it

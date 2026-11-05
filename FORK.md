@@ -455,5 +455,11 @@ snapshot runner and blind pooled judge beside them.
   `run`, `rescore`, `export`). HAI-11608 depends on this interface.
 - `tests/benchmarks/test_parity_unit.py`.
 
+HAI-12817 edits `parity_snapshot.py` (reviewer source, tree, and history
+reads pinned to the unit commit; fixture title; no live description) and
+`parity_runner.py` (`search_decisions` answers nothing in both arms; the
+review's audit trail and reviewed/skipped paths are recorded; the artifact
+carries a `harness` marker). Scoring is unchanged.
+
 The design, the rules, and the commands are in
 `tests/benchmarks/fixtures/hickory/README.md`.

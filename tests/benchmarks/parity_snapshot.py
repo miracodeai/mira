@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from mira.models import PRInfo
+from mira.models import FileHistoryEntry, PRInfo
 from mira.providers.github import GitHubProvider
 
 _SHA_IN_SUMMARY = re.compile(r"Last reviewed commit:.*?/commit/([0-9a-f]{40})", re.S)
@@ -190,34 +190,78 @@ def load_units(fixtures: list[dict], split: str = "all") -> list[Unit]:
     return out
 
 
-_GREPTILE_LINE = re.compile(r"greptile", re.I)
-
-
 class PinnedGitHubProvider(GitHubProvider):
     """A read-only GitHub provider pinned to one unit's snapshot.
 
     The diff is ``base...sha`` (GitHub three-dot compare, the same merge-base
     diff a PR shows). No bot threads are visible, so the engine stays in round
-    one, and description lines that mention Greptile are dropped so later
-    "addressed review" notes cannot leak findings.
+    one.
+
+    Every reviewer read is pinned to ``unit.sha`` (HAI-12817). The engine reads
+    sources and the repo tree at ``pr_info.head_branch``, which is the live
+    branch; the provider rewrites that ref to the snapshot. File history is
+    listed from the snapshot commit, not the default branch. The title is the
+    fixture's and the description is empty: the live description can be edited
+    after Greptile's review (for example "addressed review" notes).
     """
 
     def __init__(self, token: str, unit: Unit) -> None:
         super().__init__(token=token)
         self.unit = unit
+        self._live_refs: set[str] = set()
+
+    def _pin(self, ref: str) -> str:
+        return self.unit.sha if not ref or ref in self._live_refs else ref
 
     async def get_pr_info(self, pr_url: str) -> PRInfo:
         info = await super().get_pr_info(pr_url)
+        if info.head_branch:
+            self._live_refs.add(info.head_branch)
         info.head_sha = self.unit.sha
-        info.description = "\n".join(
-            line
-            for line in (info.description or "").splitlines()
-            if not _GREPTILE_LINE.search(line)
-        )
+        info.title = self.unit.pr_title or info.title
+        info.description = ""
         return info
 
     async def get_pr_diff(self, pr_info: PRInfo) -> str:
         return await self.get_compare_diff(pr_info, self.unit.base_sha, self.unit.sha)
+
+    async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
+        return await super().get_file_content(pr_info, path, self._pin(ref))
+
+    async def get_repo_tree(self, pr_info: PRInfo, ref: str) -> list[str]:
+        return await super().get_repo_tree(pr_info, self._pin(ref))
+
+    async def get_file_history(
+        self, pr_info: PRInfo, paths: list[str], max_per_file: int = 5
+    ) -> dict[str, list[FileHistoryEntry]]:
+        """Recent commits per file, walking back from the snapshot commit."""
+        import asyncio
+
+        import httpx
+
+        if not paths:
+            return {}
+        token = await self._resolve_token()
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        url = f"https://api.github.com/repos/{pr_info.owner}/{pr_info.repo}/commits"
+        sem = asyncio.Semaphore(8)
+
+        async def one(client: httpx.AsyncClient, path: str) -> tuple[str, list]:
+            async with sem:
+                try:
+                    resp = await client.get(
+                        url,
+                        headers=headers,
+                        params={"path": path, "sha": self.unit.sha, "per_page": max_per_file},
+                    )
+                    data = resp.json() if resp.status_code == 200 else []
+                except Exception:
+                    return path, []
+            return path, [_history_entry(item) for item in data[:max_per_file]]
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            results = await asyncio.gather(*(one(client, p) for p in paths))
+        return {path: hist for path, hist in results if hist}
 
     async def get_all_bot_threads(self, pr_info: PRInfo, bot_login: str | None = None) -> list:
         return []
@@ -229,6 +273,18 @@ class PinnedGitHubProvider(GitHubProvider):
 
     async def get_pr_description(self, pr_info: PRInfo) -> str:
         return pr_info.description
+
+
+def _history_entry(item: dict) -> FileHistoryEntry:
+    commit = item.get("commit") or {}
+    author = commit.get("author") or {}
+    message = (commit.get("message") or "").strip().split("\n\n", 1)[0][:300]
+    return FileHistoryEntry(
+        sha=str(item.get("sha", ""))[:8],
+        message=message,
+        author=str(author.get("name", "")),
+        date=str(author.get("date", "")),
+    )
 
 
 # ---------------------------------------------------------------- later evidence

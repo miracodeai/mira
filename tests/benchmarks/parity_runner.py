@@ -44,6 +44,10 @@ from .parity_stats import (
 )
 
 SCHEMA_VERSION = 1
+# Reviewer inputs changed in HAI-12817: reads pinned to the snapshot, fixture
+# title, no live description, no registry search. Scores from artifacts
+# without this marker came from a different harness; do not compare directly.
+HARNESS = "hai-12817-pinned-reads"
 ARMS = ("registry_on", "registry_off")
 
 _as_of: contextvars.ContextVar[float | None] = contextvars.ContextVar("parity_as_of", default=None)
@@ -219,6 +223,35 @@ async def _apply_registry_arm(
         custom_rules.insert(0, block)
 
 
+class _NoRegistrySearch:
+    """Reviewer tool executor for both arms: ``search_decisions`` finds nothing.
+
+    The A/B measures the prompt block. The live search has no as-of filter, so
+    in ``registry_on`` it could return decisions approved after Greptile's
+    review, and in ``registry_off`` it would leak the registry into the off arm.
+    Since HAI-12817 a router-acp seat can call tools, so the harness answers
+    the call itself. ``read_file`` and ``grep_repo`` go to the real executor.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def execute(self, name: str, args: dict) -> str:
+        from mira.registry.prompt import SEARCH_DECISIONS_TOOL
+
+        if name != SEARCH_DECISIONS_TOOL["function"]["name"]:
+            return await self._inner.execute(name, args)
+        self._inner.call_log.append({"tool": name, "arg": (args or {}).get("query") or ""})
+        return "[registry unavailable]"
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _no_registry_search(executor: Any, pr_info: Any) -> Any:
+    return _NoRegistrySearch(executor)
+
+
 def install_arm(arm: str) -> None:
     import mira.core.engine as engine_module
     import mira.registry.prompt as registry_prompt
@@ -227,6 +260,7 @@ def install_arm(arm: str) -> None:
     registry_prompt.registry_rule = (
         _registry_rule_as_of if arm == "registry_on" else _registry_rule_off
     )
+    registry_prompt.with_registry_tool = _no_registry_search
 
 
 def _seat_calls(attribution: str) -> list[dict]:
@@ -309,6 +343,13 @@ async def review_unit(
     start = time.monotonic()
     comments: list[dict] = []
     error = ""
+    # HAI-12817: where each draft went. Additive; scoring never reads these.
+    trail: dict[str, Any] = {
+        "audit": [],
+        "reviewed_paths": [],
+        "skipped_paths": [],
+        "skipped_reason": "",
+    }
     try:
         engine = ReviewEngine(
             config=config,
@@ -317,6 +358,12 @@ async def review_unit(
             dry_run=True,
         )
         result = await engine.review_pr(unit.pr_url)
+        trail = {
+            "audit": list(getattr(result, "audit", None) or []),
+            "reviewed_paths": list(getattr(result, "reviewed_paths", None) or []),
+            "skipped_paths": list(getattr(result, "skipped_paths", None) or []),
+            "skipped_reason": getattr(result, "skipped_reason", None) or "",
+        }
         for c in result.comments:
             comments.append(
                 {
@@ -339,6 +386,7 @@ async def review_unit(
         "duration_s": round(time.monotonic() - start, 2),
         "registry_blocks": blocks,
         "seat_calls": _seat_calls(attribution),
+        **trail,
     }
 
 
@@ -495,6 +543,7 @@ async def run_parity(
             "rule": cfg.rule,
         },
         "seat_meter": meter.as_dict(),
+        "harness": HARNESS,
         "units": [u.as_dict() for u in units],
         "snapshots": {
             uid: {
@@ -554,6 +603,36 @@ def _seat_usage(records: list[dict]) -> dict:
         }
 
     return {"review": _block(review_calls), "judge": _block(judge_calls)}
+
+
+def _pipeline(arm_rows: list[dict]) -> dict:
+    """Drafts, drops by stage, and reviewer tool calls. Informational only."""
+    drafted = 0
+    dropped: Counter = Counter()
+    tools: Counter = Counter()
+    with_tools = 0
+    for r in arm_rows:
+        review = r["rec"]["review"]
+        used = False
+        for entry in review.get("audit") or []:
+            stage = entry.get("stage")
+            if stage == "drafted":
+                drafted += int(entry.get("count") or 0)
+            elif stage == "agentic":
+                calls = entry.get("calls") or []
+                tools.update(str(c.get("tool")) for c in calls)
+                used = used or bool(calls)
+            elif "path" in entry:
+                dropped[str(stage)] += 1
+        with_tools += int(used)
+    return {
+        "reviews_with_audit": sum(1 for r in arm_rows if "audit" in r["rec"]["review"]),
+        "drafted": drafted,
+        "dropped_by_stage": dict(dropped),
+        "tool_calls": dict(tools),
+        "reviews_using_tools": with_tools,
+        "skipped_paths": sum(len(r["rec"]["review"].get("skipped_paths") or []) for r in arm_rows),
+    }
 
 
 def summarize(artifact: dict) -> dict:
@@ -666,6 +745,7 @@ def summarize(artifact: dict) -> dict:
                 budget_exhausted=bool(meter.get("exhausted")),
             ),
             "per_unit": per_unit,
+            "pipeline": _pipeline(arm_rows),
         }
 
     ab = None
@@ -686,6 +766,7 @@ def summarize(artifact: dict) -> dict:
     missing = [u["unit_id"] for u in units if not u["greptile_reviewed"]]
     return {
         "ticket": "HAI-11607",
+        "harness": artifact.get("harness", ""),
         "inputs": artifact.get("inputs", {}),
         "judge": {
             "config": cfg["judge_llm"],
@@ -808,6 +889,16 @@ def render_markdown(summary: dict) -> str:
         lines.append(f"- {key}: {value}")
     for key, value in sorted(arm.get("cross_check", {}).items()):
         lines.append(f"- {key}: {value}")
+    lines += ["", "## Pipeline (informational)", ""]
+    if summary.get("harness"):
+        lines.append(f"- Harness: `{summary['harness']}`")
+    for name, a in summary["arms"].items():
+        pipe = a.get("pipeline") or {}
+        lines.append(
+            f"- {name}: {pipe.get('drafted')} drafted; dropped {pipe.get('dropped_by_stage')}; "
+            f"tool calls {pipe.get('tool_calls')} in {pipe.get('reviews_using_tools')} reviews; "
+            f"{pipe.get('skipped_paths')} skipped paths"
+        )
     usage = summary["seat_usage"]
     lines += [
         "",

@@ -50,6 +50,7 @@ def _restore_registry_hooks(monkeypatch):
 
     monkeypatch.setattr(engine_module, "apply_registry", engine_module.apply_registry)
     monkeypatch.setattr(registry_prompt, "registry_rule", registry_prompt.registry_rule)
+    monkeypatch.setattr(registry_prompt, "with_registry_tool", registry_prompt.with_registry_tool)
 
 
 GREPTILE_BODY = (
@@ -191,14 +192,14 @@ async def test_later_evidence_reads_snapshot_and_merged_file():
     assert "gone.py" in ev["error"]
 
 
-async def test_pinned_provider_diffs_the_snapshot_and_drops_greptile_lines(monkeypatch):
+async def test_pinned_provider_diffs_the_snapshot_with_fixture_text_only(monkeypatch):
     (unit,) = units_for_fixture(_fixture())
     calls = {}
 
     async def fake_info(self, url):
         return PRInfo(
-            title="t",
-            description="Fix auth\nAddressed Greptile P1 on refresh",
+            title="Live title edited after review",
+            description="Fix auth\nAddressed Greptile P1 on refresh\nAlso guards the null token",
             base_branch="main",
             head_branch="h",
             url=url,
@@ -216,10 +217,87 @@ async def test_pinned_provider_diffs_the_snapshot_and_drops_greptile_lines(monke
     monkeypatch.setattr("mira.providers.github.GitHubProvider.get_compare_diff", fake_compare)
     provider = PinnedGitHubProvider("tok", unit)
     info = await provider.get_pr_info(unit.pr_url)
-    assert info.head_sha == SHA_B and info.description == "Fix auth"
+    assert info.head_sha == SHA_B
+    # HAI-12817: the fixture title, and no live description at all.
+    assert info.title == "t" and info.description == ""
+    assert await provider.get_pr_description(info) == ""
     assert await provider.get_pr_diff(info) == "diff"
     assert calls["range"] == (unit.base_sha, SHA_B)
     assert await provider.get_all_bot_threads(info, "bot") == []
+
+
+async def test_pinned_provider_reads_source_tree_and_history_at_the_snapshot(monkeypatch):
+    """The live branch has moved on; every reviewer read still sees ``unit.sha``."""
+    (unit,) = units_for_fixture(_fixture())
+    refs: list[tuple[str, str]] = []
+    history_params: list[dict] = []
+
+    async def fake_info(self, url):
+        return PRInfo(
+            title="t",
+            description="",
+            base_branch="main",
+            head_branch="feature/moving",
+            url=url,
+            number=1,
+            owner="o",
+            repo="r",
+            head_sha=HEAD,
+        )
+
+    async def fake_content(self, info, path, ref):
+        refs.append(("content", ref))
+        return "x"
+
+    async def fake_tree(self, info, ref):
+        refs.append(("tree", ref))
+        return ["a.py"]
+
+    async def fake_token(self):
+        return "tok"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        history_params.append(dict(request.url.params))
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "sha": SHA_A,
+                    "commit": {
+                        "message": "Add refresh\n\nbody",
+                        "author": {"name": "dev", "date": "2026-09-30T00:00:00Z"},
+                    },
+                }
+            ],
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+    )
+    monkeypatch.setattr("mira.providers.github.GitHubProvider.get_pr_info", fake_info)
+    monkeypatch.setattr("mira.providers.github.GitHubProvider.get_file_content", fake_content)
+    monkeypatch.setattr("mira.providers.github.GitHubProvider.get_repo_tree", fake_tree)
+    monkeypatch.setattr("mira.providers.github.GitHubProvider._resolve_token", fake_token)
+
+    provider = PinnedGitHubProvider("tok", unit)
+    info = await provider.get_pr_info(unit.pr_url)
+
+    from mira.index.context import ProviderSourceFetcher
+
+    # Exactly what the engine does: fetch at pr_info.head_branch.
+    await ProviderSourceFetcher(provider, info, info.head_branch).fetch("a.py")
+    await provider.get_repo_tree(info, info.head_branch)
+    # Explicit SHAs (later evidence reads the merged head) are left alone.
+    await provider.get_file_content(info, "a.py", HEAD)
+    assert refs == [("content", SHA_B), ("tree", SHA_B), ("content", HEAD)]
+
+    history = await provider.get_file_history(info, ["a.py"], max_per_file=3)
+    assert history_params == [{"path": "a.py", "sha": SHA_B, "per_page": "3"}]
+    (entry,) = history["a.py"]
+    assert entry.sha == SHA_A[:8] and entry.message == "Add refresh"
 
 
 # ---------------------------------------------------------------------- judge
@@ -528,8 +606,9 @@ class FakeRegistry:
         ]
 
 
-async def _artifact(monkeypatch, fail_on=frozenset()):
-    monkeypatch.setattr(parity_runner, "ReviewEngine", FakeEngine)
+async def _artifact(monkeypatch, fail_on=frozenset(), engine=None):
+    engine = engine or FakeEngine
+    monkeypatch.setattr(parity_runner, "ReviewEngine", engine)
     monkeypatch.setattr(FakeEngine, "fail_on", set(fail_on))
     monkeypatch.setattr("mira.registry.get_registry", lambda create=True: FakeRegistry())
     judge = FakeJudge()
@@ -625,6 +704,88 @@ async def test_arm_owns_the_engine_registry_hook(monkeypatch):
         await engine_module.apply_registry(engine, pr_info, files, rules, "", "t", "b")
         assert engine._registry_findings == []  # no contradiction check in either arm
         assert bool(rules) is expect_block
+
+
+async def test_registry_search_answers_nothing_in_both_arms(monkeypatch):
+    import mira.registry.prompt as registry_prompt
+
+    def no_registry(create=True):
+        raise AssertionError("the harness must not search the live registry")
+
+    monkeypatch.setattr("mira.registry.get_registry", no_registry)
+
+    class Inner:
+        call_log: list = []
+
+        async def execute(self, name, args):
+            return f"inner {name}"
+
+    for arm in ("registry_off", "registry_on"):
+        parity_runner.install_arm(arm)
+        inner = Inner()
+        inner.call_log = []
+        executor = registry_prompt.with_registry_tool(inner, SimpleNamespace(owner="o", repo="r"))
+        assert (
+            await executor.execute("search_decisions", {"query": "q"}) == "[registry unavailable]"
+        )
+        assert await executor.execute("read_file", {"path": "a.py"}) == "inner read_file"
+        assert executor.call_log == [{"tool": "search_decisions", "arg": "q"}]
+
+
+class TrailEngine(FakeEngine):
+    async def review_pr(self, url):
+        result = await super().review_pr(url)
+        result.audit = [
+            {"stage": "agentic", "chunk": 0, "calls": [{"tool": "read_file", "arg": "b.py"}]},
+            {"stage": "drafted", "chunk": 0, "count": 3},
+            {"stage": "noise_filter", "path": "a.py", "line": 9, "title": "x"},
+            {"stage": "critique", "path": "a.py", "line": 12, "title": "y"},
+        ]
+        result.reviewed_paths = ["a.py"]
+        result.skipped_paths = ["big.lock"]
+        result.skipped_reason = None
+        return result
+
+
+async def test_review_records_the_pipeline_trail_without_changing_scores(monkeypatch):
+    plain, _ = await _artifact(monkeypatch)
+    art, _ = await _artifact(monkeypatch, engine=TrailEngine)
+    assert art["harness"] == parity_runner.HARNESS
+    review = art["records"][0]["review"]
+    assert review["reviewed_paths"] == ["a.py"] and review["skipped_paths"] == ["big.lock"]
+    assert review["skipped_reason"] == "" and len(review["audit"]) == 4
+
+    summary = json.loads(json.dumps(parity_runner.summarize(art)))
+    pipe = summary["arms"]["registry_off"]["pipeline"]
+    assert pipe == {
+        "reviews_with_audit": 2,
+        "drafted": 6,
+        "dropped_by_stage": {"noise_filter": 2, "critique": 2},
+        "tool_calls": {"read_file": 2},
+        "reviews_using_tools": 2,
+        "skipped_paths": 2,
+    }
+    assert "## Pipeline (informational)" in parity_runner.render_markdown(summary)
+    base = json.loads(json.dumps(parity_runner.summarize(plain)))
+    for arm in ("registry_on", "registry_off"):
+        assert summary["arms"][arm]["kory_totals"] == base["arms"][arm]["kory_totals"]
+        assert summary["arms"][arm]["parity"] == base["arms"][arm]["parity"]
+
+
+async def test_artifact_from_before_the_trail_still_rescores(monkeypatch):
+    art, _ = await _artifact(monkeypatch)
+    new = parity_runner.summarize(json.loads(json.dumps(art)))
+    old = json.loads(json.dumps(art))
+    old.pop("harness")
+    for rec in old["records"]:
+        for key in ("audit", "reviewed_paths", "skipped_paths", "skipped_reason"):
+            rec["review"].pop(key)
+    summary = parity_runner.summarize(old)
+    assert summary["harness"] == ""
+    assert summary["arms"]["registry_off"]["pipeline"]["reviews_with_audit"] == 0
+    for arm in ("registry_on", "registry_off"):
+        assert summary["arms"][arm]["kory_totals"] == new["arms"][arm]["kory_totals"]
+    parity_runner.render_markdown(summary)
 
 
 async def test_seat_meter_refuses_past_the_cap():
