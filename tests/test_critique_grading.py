@@ -41,6 +41,9 @@ class TestKeepRule:
     def test_plausible_kept_only_when_severe_and_confident(self):
         assert _critique_keep({"evidence": "plausible"}, _comment(Severity.WARNING, confidence=0.8))
         assert _critique_keep({"evidence": "plausible"}, _comment(Severity.BLOCKER, 0.95))
+        # 0.75 sits above the 0.7 posting floor: a warning the reviewer rated
+        # there and the critic could not contradict is posted.
+        assert _critique_keep({"evidence": "plausible"}, _comment(Severity.WARNING, 0.75))
         assert not _critique_keep({"evidence": "plausible"}, _comment(Severity.WARNING, 0.7))
         assert not _critique_keep({"evidence": "plausible"}, _comment(Severity.SUGGESTION, 0.95))
 

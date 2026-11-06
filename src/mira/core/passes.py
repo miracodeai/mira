@@ -49,55 +49,120 @@ def cap_review_summary(text: str) -> str:
     return prefix + _SUMMARY_TRUNCATION_MARKER
 
 
+DEFAULT_AGENTIC_MAX_HOPS = 10
+
+_REASONING_REPLAY_KEYS = (
+    "reasoning_content",
+    "reasoning",
+    "reasoning_details",
+    "reasoning_items",
+    "reasoning_blocks",
+)
+
+_FORCED_SUBMIT_PROMPT = (
+    "Your investigation budget is spent; no further tool calls will be "
+    "answered. Using everything already in this conversation — the diff plus "
+    "every file and search result you fetched — call `submit_review` now with "
+    "all the findings you can defend. Do not drop a finding merely because you "
+    "could not fetch one more file: if the evidence you already have supports "
+    "it, file it with a confidence that reflects the remaining uncertainty."
+)
+
+
+def _tools_system_suffix(max_hops: int) -> str:
+    return (
+        "\n\n## Tools\n\n"
+        "You have two helpers for cross-file checks: "
+        "`read_file(path, start_line?, end_line?)` and "
+        "`grep_repo(pattern, path_glob?, path_only?)`. Use them to verify a "
+        "cross-file claim before filing it (*does the called function actually "
+        "raise X?*, *do all implementations of this interface take the new "
+        "parameter?*, *does the consumer handle the new value?*). Fetch what you "
+        "specifically need rather than browsing; `read_file` returns a window of "
+        "the file, so pass `start_line`/`end_line` to read a specific function in "
+        "a large file. Skip the tools entirely when the diff alone is enough. "
+        f"You have at most {max_hops} investigation turns; when they run out you "
+        "will be asked to submit, so start filing once your evidence is in hand. "
+        "Finish by calling `submit_review` with ALL your findings — findings "
+        "written in prose and never submitted are lost."
+    )
+
+
+async def _force_submit(llm: LLMProviderProtocol, convo: list[dict], why: str) -> str:
+    """Ask for the structured submission over the full investigation transcript.
+
+    The conversation carries every tool result the model fetched, so the
+    submission is grounded in that evidence. Returns "" when the provider
+    rejects the forced call, which the caller treats as a bail.
+    """
+    logger.info("Agentic loop forcing submit_review (%s) after %d messages", why, len(convo))
+    try:
+        raw = await llm.complete_with_tools(
+            messages=[*convo, {"role": "user", "content": _FORCED_SUBMIT_PROMPT}],
+            tools=[SUBMIT_REVIEW_TOOL],
+        )
+    except Exception as exc:
+        logger.warning("Forced submit_review failed (%s): %s", why, exc)
+        return ""
+    return raw or ""
+
+
 async def agentic_review_loop(
     llm: LLMProviderProtocol,
     messages: list[dict],
     executor: object,
+    max_hops: int = DEFAULT_AGENTIC_MAX_HOPS,
 ) -> str:
     """Run an agentic tool-use loop until the LLM submits a review.
 
     Hands the model `read_file` and `grep_repo` alongside the terminal
-    `submit_review` tool. Caps at 6 hops to bound token spend; returns the
-    JSON args of the final `submit_review` call (same shape `llm.review`
-    returns), or "" if the loop exited without one — caller falls back to
-    a forced single-tool call.
+    `submit_review` tool. Returns the JSON args of the final `submit_review`
+    call (same shape `llm.review` returns).
+
+    The loop never discards an investigation: when the model stops calling
+    tools without submitting, or the hop cap is reached, the structured
+    submission is forced over the full transcript (diff + every tool result)
+    rather than re-reviewing the bare diff from scratch. Only when the
+    provider fails outright does it return "" so the caller can fall back to
+    a single forced-tool call.
     """
     from mira.llm.agentic_tools import AGENTIC_TOOLS
 
+    max_hops = max(1, int(max_hops))
     tools = [*AGENTIC_TOOLS, SUBMIT_REVIEW_TOOL]
     convo: list[dict] = [dict(m) for m in messages]
     if convo and convo[0].get("role") == "system":
-        convo[0]["content"] = (
-            convo[0]["content"] + "\n\n## Tools\n\n"
-            "You have two helpers for "
-            "cross-file checks: `read_file(path)` and "
-            "`grep_repo(pattern, path_glob?, path_only?)`. Use them when, "
-            "and ONLY when, you need to verify a cross-file claim before "
-            "filing a comment (e.g. *does the called function actually "
-            "raise X?*, *is this symbol defined elsewhere?*). Don't browse — "
-            "fetch what you specifically need. Skip the tools entirely if "
-            "the diff alone is enough. Once you're ready, call "
-            "`submit_review` with all your findings."
-        )
+        convo[0]["content"] = convo[0]["content"] + _tools_system_suffix(max_hops)
 
-    max_hops = 6
+    investigated = False
     for hop in range(max_hops):
         try:
             msg = await llm.complete_agentic(convo, tools=tools)
         except Exception as exc:
             logger.warning("Agentic hop %d failed: %s", hop + 1, exc)
-            return ""
+            # Evidence already gathered is worth a submission; an untouched
+            # conversation is better served by the caller's single-shot path.
+            return await _force_submit(llm, convo, "hop failed") if investigated else ""
 
         tool_calls = msg.get("tool_calls") or []
         content = msg.get("content") or ""
 
         if not tool_calls:
+            # The model answered in prose instead of calling a tool. Keep its
+            # words in the transcript and force the structured submission so
+            # any findings it wrote out are captured rather than lost.
             logger.debug(
-                "Agentic loop exited at hop %d without submit_review (content=%d chars)",
+                "Agentic hop %d returned no tool call (content=%d chars); forcing submit",
                 hop + 1,
                 len(content),
             )
-            return ""
+            if content.strip():
+                prose: dict = {"role": "assistant", "content": content}
+                for key in _REASONING_REPLAY_KEYS:
+                    if msg.get(key):
+                        prose[key] = msg[key]
+                convo.append(prose)
+            return await _force_submit(llm, convo, "no tool call")
 
         assistant_message = {
             "role": "assistant",
@@ -107,13 +172,7 @@ async def agentic_review_loop(
         # Providers that think with tools require their reasoning payload to be
         # replayed unchanged on the next turn (DeepSeek, MiniMax, OpenRouter,
         # Responses reasoning items, Bedrock reasoningContent blocks).
-        for key in (
-            "reasoning_content",
-            "reasoning",
-            "reasoning_details",
-            "reasoning_items",
-            "reasoning_blocks",
-        ):
+        for key in _REASONING_REPLAY_KEYS:
             value = msg.get(key)
             if value:
                 assistant_message[key] = value
@@ -132,6 +191,7 @@ async def agentic_review_loop(
                 args = {}
 
             tool_result = await executor.execute(name, args)  # type: ignore[attr-defined]
+            investigated = True
             convo.append(
                 {
                     "role": "tool",
@@ -140,8 +200,8 @@ async def agentic_review_loop(
                 }
             )
 
-    logger.debug("Agentic loop hit %d-hop cap without submit_review", max_hops)
-    return ""
+    logger.info("Agentic loop hit %d-hop cap without submit_review; forcing submit", max_hops)
+    return await _force_submit(llm, convo, "hop cap")
 
 
 def _indexing_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
@@ -167,6 +227,7 @@ async def security_review_pass(
     pr_title: str = "",
     security_llm: LLMProviderProtocol | None = None,
     agentic_executor_factory: Callable[[], object] | None = None,
+    max_hops: int = DEFAULT_AGENTIC_MAX_HOPS,
 ) -> list[ReviewComment]:
     """Dedicated security review on the security tier (``security_model`` → review model).
 
@@ -206,6 +267,7 @@ async def security_review_pass(
             target_files,
             pr_title,
             executor=agentic_executor_factory() if agentic_executor_factory else None,
+            max_hops=max_hops,
         )
 
     logger.info(
@@ -224,6 +286,7 @@ async def security_review_pass(
                 chunk_files_list,
                 pr_title,
                 executor=agentic_executor_factory() if agentic_executor_factory else None,
+                max_hops=max_hops,
             )
 
     results = await asyncio.gather(*[_bounded(c.files) for c in chunks])
@@ -236,6 +299,7 @@ async def _security_scan_once(
     files: list,
     pr_title: str,
     executor: object | None = None,
+    max_hops: int = DEFAULT_AGENTIC_MAX_HOPS,
 ) -> list[ReviewComment]:
     """Run the security scan on a single chunk of files.
 
@@ -250,7 +314,7 @@ async def _security_scan_once(
     raw = ""
     if executor is not None:
         try:
-            raw = await agentic_review_loop(sec_llm, messages, executor)
+            raw = await agentic_review_loop(sec_llm, messages, executor, max_hops=max_hops)
         except Exception as exc:
             logger.warning(
                 "Security pass agentic loop failed (%s); falling back to one-shot",
@@ -374,6 +438,9 @@ async def dependency_review_pass(
 
 
 _MAX_HUNK_EVIDENCE_CHARS = 1200
+# Confidence floor for keeping a warning-or-worse finding the critic graded
+# "plausible" (consistent with the code, not contradicted, but not proven).
+_PLAUSIBLE_MIN_CONF = 0.75
 
 
 def _hunk_evidence(comment: ReviewComment, diff_files: list | None) -> str:
@@ -405,7 +472,11 @@ def _critique_keep(verdict: dict, comment: ReviewComment) -> bool:
     if evidence == "proven":
         return True
     if evidence == "plausible":
-        return comment.severity >= Severity.WARNING and comment.confidence >= 0.8
+        # "Plausible" means the critic could not contradict the claim from the
+        # hunk alone. A warning-or-worse finding the reviewer rated at least
+        # 0.75 — above the 0.7 posting floor — is worth the reader's time; the
+        # lower-confidence or low-severity ones stay held back.
+        return comment.severity >= Severity.WARNING and comment.confidence >= _PLAUSIBLE_MIN_CONF
     if evidence == "unsupported":
         return False
     # Older binary shape (model fallback): honor it.

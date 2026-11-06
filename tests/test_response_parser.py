@@ -150,33 +150,96 @@ def _make_diff_files(path: str, hunk_content: str) -> list[FileDiff]:
     ]
 
 
+def _single_comment(existing_code: str, suggestion: str | None = None, line: int = 2) -> str:
+    comment: dict = {
+        "path": "a.py",
+        "line": line,
+        "title": "Problem",
+        "body": "This is wrong",
+        "severity": "warning",
+        "confidence": 0.9,
+        "existing_code": existing_code,
+    }
+    if suggestion is not None:
+        comment["suggestion"] = suggestion
+    return json.dumps({"comments": [comment], "summary": "", "metadata": {"reviewed_files": 1}})
+
+
 class TestExistingCodeValidation:
-    def test_drops_comment_with_hallucinated_existing_code(self):
-        data = json.dumps(
-            {
-                "comments": [
-                    {
-                        "path": "a.py",
-                        "line": 2,
-                        "title": "Problem",
-                        "body": "This is wrong",
-                        "severity": "warning",
-                        "confidence": 0.9,
-                        "existing_code": "code_not_in_diff()",
-                    }
-                ],
-                "summary": "",
-                "metadata": {"reviewed_files": 1},
-            }
-        )
+    def test_hallucinated_existing_code_keeps_comment_but_clears_citation(self):
+        """A quote that cannot be located is not grounds to lose the finding:
+        the path and line were already validated, so the comment is kept and
+        only the unverifiable citation (and any suggestion anchored on it)
+        is dropped."""
         diff_files = _make_diff_files("a.py", "@@ -1,5 +1,5 @@\n-old\n+new_line()")
-        response = parse_llm_response(data)
+        response = parse_llm_response(_single_comment("code_not_in_diff()", "replacement()"))
         comments = convert_to_review_comments(
             response,
             valid_paths={"a.py"},
             diff_files=diff_files,
         )
-        assert len(comments) == 0
+        assert len(comments) == 1
+        assert comments[0].existing_code == ""
+        assert comments[0].suggestion is None
+        assert comments[0].body == "This is wrong"
+
+    def test_quote_spanning_a_removed_line_matches_new_file_view(self):
+        """Models quote code as it reads in the new file; a `-` line sitting
+        between a context line and the `+` line must not break the match."""
+        hunk = (
+            "@@ -1,4 +1,4 @@\n"
+            "     const selected = externalId\n"
+            "       ? externalId\n"
+            "-      : calendars?.externalId;\n"
+            "+      : calendars?.find((cal) => cal.externalId === externalId)?.externalId;"
+        )
+        diff_files = _make_diff_files("a.py", hunk)
+        quote = (
+            "    const selected = externalId\n"
+            "      ? externalId\n"
+            "      : calendars?.find((cal) => cal.externalId === externalId)?.externalId;"
+        )
+        comments = convert_to_review_comments(
+            parse_llm_response(_single_comment(quote, "fixed()")),
+            valid_paths={"a.py"},
+            diff_files=diff_files,
+        )
+        assert len(comments) == 1
+        assert comments[0].existing_code == quote
+        assert comments[0].suggestion == "fixed()"
+
+    def test_quote_of_removed_code_matches_old_file_view(self):
+        hunk = "@@ -1,3 +1,2 @@\n context()\n-    old_guard(value)\n-    more()\n+new()"
+        diff_files = _make_diff_files("a.py", hunk)
+        quote = "context()\n    old_guard(value)\n    more()"
+        comments = convert_to_review_comments(
+            parse_llm_response(_single_comment(quote)),
+            valid_paths={"a.py"},
+            diff_files=diff_files,
+        )
+        assert comments[0].existing_code == quote
+
+    def test_whitespace_differences_are_tolerated(self):
+        diff_files = _make_diff_files(
+            "a.py", "@@ -1,2 +1,2 @@\n+    result = compute(a,   b)\n+    return result"
+        )
+        quote = "result = compute(a, b)\nreturn result"
+        comments = convert_to_review_comments(
+            parse_llm_response(_single_comment(quote)),
+            valid_paths={"a.py"},
+            diff_files=diff_files,
+        )
+        assert comments[0].existing_code == quote
+
+    def test_generic_short_lines_do_not_anchor_a_bogus_quote(self):
+        diff_files = _make_diff_files("a.py", "@@ -1,3 +1,3 @@\n+def f():\n+    return 1\n+}")
+        quote = "}\nsomething_entirely_different(x, y, z)"
+        comments = convert_to_review_comments(
+            parse_llm_response(_single_comment(quote)),
+            valid_paths={"a.py"},
+            diff_files=diff_files,
+        )
+        assert comments[0].existing_code == ""
 
     def test_keeps_comment_with_valid_existing_code(self):
         data = json.dumps(

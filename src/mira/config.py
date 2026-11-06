@@ -288,6 +288,12 @@ class ReviewConfig(BaseModel):
     # thorough).
     agentic_tools: bool = True
 
+    # Investigation turns the reviewer gets per chunk before it is asked to
+    # submit. Each turn is one model call that may issue several tool calls.
+    # The submission is always forced over the full investigation transcript
+    # when the budget runs out, so a low cap costs depth, never the review.
+    agentic_max_hops: int = Field(default=10, ge=1, le=30)
+
     # Whether the JIT cross-file resolver should attempt Java + Go imports.
     # Resolution for those languages is heuristic (we can't see the build
     # system), and a wrong-file pick pollutes the prompt with off-topic
