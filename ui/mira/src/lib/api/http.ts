@@ -5,6 +5,19 @@
 // In dev, set VITE_API_URL=http://localhost:8100 in ui/mira/.env.local.
 export const API_BASE = import.meta.env.VITE_API_URL || ""
 
+// Errors below read "API error <status>: <body>"; show FastAPI's detail when present.
+export function errorText(e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e)
+  try {
+    const { detail } = JSON.parse(msg.replace(/^API error \d+: /, ""))
+    if (detail)
+      return typeof detail === "string" ? detail : JSON.stringify(detail)
+  } catch {
+    /* not JSON */
+  }
+  return msg
+}
+
 export async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { credentials: "include" })
   if (!res.ok) {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import ClassVar, Protocol, runtime_checkable
 
 import httpx
@@ -29,11 +30,17 @@ class LLMProviderProtocol(Protocol):
         supports_tool_calling: Provider supports function/tool calling.
     """
 
-    supports_json_mode: bool
-    supports_tool_calling: bool
-
-    total_prompt_tokens: int
-    total_completion_tokens: int
+    # Read-only to callers; providers may implement these as plain or class attributes.
+    @property
+    def config(self) -> LLMConfig: ...
+    @property
+    def supports_json_mode(self) -> bool: ...
+    @property
+    def supports_tool_calling(self) -> bool: ...
+    @property
+    def total_prompt_tokens(self) -> int: ...
+    @property
+    def total_completion_tokens(self) -> int: ...
 
     async def complete(
         self,
@@ -75,12 +82,15 @@ class LLMProviderProtocol(Protocol):
 def _get_api_key(config: LLMConfig, profile: dict | None = None) -> str:
     """Resolve the API key for the configured endpoint.
 
-    Reads `config.api_key_env` first, then the matched provider profile's
+    A direct `config.api_key` (set for providers connected in Settings) wins.
+    Otherwise reads `config.api_key_env`, then the matched provider profile's
     `api_key_env`, then the legacy `OPENROUTER_API_KEY` / `OPENAI_API_KEY`
     lookup for backward compatibility. If `api_key_env` is explicitly "" the
     empty string is returned without error — useful for local endpoints
     (Ollama, llama.cpp server) that don't require auth.
     """
+    if config.api_key:
+        return config.api_key
     if config.api_key_env == "":
         return ""
     key = os.environ.get(config.api_key_env, "")
@@ -173,6 +183,12 @@ class OpenAICompatibleProvider:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         headers.update(self.profile.get("extra_headers", {}))
+        if "://opencode.ai/" in self.config.base_url:
+            # OpenCode Go rejects requests without these: opencode.ai/docs/go/#where-can-i-use-it
+            from mira import __version__
+
+            headers["User-Agent"] = f"mira/{__version__}"
+            headers["x-opencode-session"] = uuid.uuid4().hex  # cached: one session per provider
         self._cached_headers = headers
         return dict(headers)
 

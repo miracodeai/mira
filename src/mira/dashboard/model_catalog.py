@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -37,6 +38,17 @@ def active_backend(config: LLMConfig) -> str:
         return "codex-cli"
     profile = profiles.resolve(config.base_url)
     return "openrouter" if profile.get("name") == "openrouter" else "openai-compatible"
+
+
+def missing_api_key(config: LLMConfig) -> str:
+    """Env var name when the API endpoint needs a key that isn't set, else ""."""
+    if active_backend(config) in {"bedrock", "codex-cli"}:
+        return ""
+    try:
+        _get_api_key(config, profiles.resolve(config.base_url))
+    except Exception:
+        return config.api_key_env
+    return ""
 
 
 def _norm(model_id: str) -> str:
@@ -106,27 +118,35 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
     else:
         cache_key = config.base_url
 
-    def cached() -> tuple[float, list[dict] | None] | None:
-        hit = _cache.get(cache_key)
-        if hit is None:
-            return None
-        ttl = _CATALOG_TTL if hit[1] is not None else _FAILURE_TTL
-        return hit if time.time() - hit[0] < ttl else None
+    async def fetch() -> list[dict]:
+        if backend == "bedrock":
+            return await asyncio.to_thread(_fetch_bedrock_sync, config)
+        return await _fetch_openai_style(config, tools_only=backend == "openrouter")
 
-    if (hit := cached()) is not None:
+    return await _cached(cache_key, fetch, backend)
+
+
+def _fresh(cache_key: str) -> tuple[float, list[dict] | None] | None:
+    hit = _cache.get(cache_key)
+    if hit is None:
+        return None
+    ttl = _CATALOG_TTL if hit[1] is not None else _FAILURE_TTL
+    return hit if time.time() - hit[0] < ttl else None
+
+
+async def _cached(
+    cache_key: str, fetch: Callable[[], Awaitable[list[dict]]], name: str
+) -> list[dict] | None:
+    """Run fetch through the TTL cache; the per-key lock coalesces concurrent cold fetches."""
+    if (hit := _fresh(cache_key)) is not None:
         return hit[1]
     async with _locks[cache_key]:
-        if (hit := cached()) is not None:
+        if (hit := _fresh(cache_key)) is not None:
             return hit[1]
         try:
-            if backend == "bedrock":
-                models = await asyncio.to_thread(_fetch_bedrock_sync, config)
-            elif backend == "openrouter":
-                models = await _fetch_openai_style(config, tools_only=True)
-            else:
-                models = await _fetch_openai_style(config, tools_only=False)
+            models: list[dict] | None = await fetch()
         except Exception as exc:
-            logger.warning("Model catalog fetch failed (%s): %s", backend, exc)
+            logger.warning("%s model list failed: %s", name, exc)
             models = None
         _cache[cache_key] = (time.time(), models)
         return models
@@ -168,3 +188,33 @@ def build_options(backend: str, dynamic: list[dict] | None, purpose: str) -> lis
         options += [{**d, "recommended": False} for d in dynamic if _norm(d["value"]) not in seen]
     options.sort(key=lambda m: (not m["recommended"], m["label"].lower()))
     return options
+
+
+_SUBSCRIPTIONS = {"chatgpt": ("chatgpt/", "ChatGPT"), "anthropic": ("claude/", "Claude")}
+
+
+async def subscription_options() -> list[dict]:
+    """Models from every signed-in subscription account and connected API/local provider,
+    prefixed so create_llm routes them."""
+    from mira.llm import api_providers, oauth_accounts
+
+    sources = [
+        (account, prefix, name, lambda a=account: oauth_accounts.list_models(a))
+        for account, (prefix, name) in _SUBSCRIPTIONS.items()
+        if oauth_accounts.has_account(account)
+    ]
+    for p in api_providers.public():
+        sources.append(
+            (
+                f"api:{p['id']}",
+                f"@{p['id']}/",
+                p["label"],
+                lambda pid=p["id"]: api_providers.list_models(api_providers.get(pid) or {}, pid),
+            )
+        )
+    results = await asyncio.gather(*(_cached(key, fetch, name) for key, _, name, fetch in sources))
+    return [
+        {"value": prefix + m["value"], "label": f"{m['label']} ({name})", "recommended": False}
+        for (_, prefix, name, _), models in zip(sources, results, strict=True)
+        for m in models or []
+    ]
