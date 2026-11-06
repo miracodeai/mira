@@ -24,7 +24,7 @@
     "lucide-react": "^1.61.0",
     "radix-ui": "^1.8.1",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "react-dom": "^19.3.1",
     "react-router": "^7.17.0",
     "recharts": "^3.10.1",
     "shadcn": "^4.22.1",
