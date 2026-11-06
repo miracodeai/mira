@@ -734,7 +734,15 @@ async def self_critique(
         "Grade the evidence; do NOT construct counter-arguments. A subtle "
         "issue clearly visible in the code (a predicate with side effects, "
         "an idiom misuse) is `proven` even if reasonable people might ship "
-        "it anyway.\n\n" + rules_block + "## Draft comments\n\n" + "\n".join(draft_lines)
+        "it anyway. Grade the code fact, not the consequence: when the shown "
+        "code does what the comment says it does (returns a fresh instance "
+        "instead of the receiver, skips a guard, compares a value to itself), "
+        "that is `proven` even though the effect on callers or tests is "
+        "inferred. Reserve `plausible` for comments whose claimed behaviour "
+        "itself, not merely its impact, depends on code you cannot see.\n\n"
+        + rules_block
+        + "## Draft comments\n\n"
+        + "\n".join(draft_lines)
     )
 
     critic_llm = indexing_llm or _indexing_llm(llm)
