@@ -297,8 +297,11 @@ class ReviewConfig(BaseModel):
     # After the reviewer submits, ask it once more — over the same transcript —
     # for the concrete defects it analysed but withheld as minor or uncertain,
     # and append them. One extra model call per chunk (prompt-cached by most
-    # providers); recovers findings the model had already established.
-    second_look: bool = True
+    # providers). On the five-PR sample it raised recall (50% → 56-59% pooled
+    # over two flash models) at a precision cost that left F1 flat, and added
+    # ~25 s per DeepSeek review, so it is the opt-in "thorough" setting, like
+    # ensemble_runs, rather than the default.
+    second_look: bool = False
 
     # Whether the JIT cross-file resolver should attempt Java + Go imports.
     # Resolution for those languages is heuristic (we can't see the build
