@@ -31,7 +31,7 @@ Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https
 - **Learns from your context** — Mira synthesizes rules from your merged PRs: rejected comments and human review patterns become team rules that shape future reviews.
 - **You set the rules** — Define custom and org-wide review rules in plain language, per-repo via `.mira.yaml` or from the dashboard.
 - **Privacy first** — Self-hosted by default. Diffs, indexes, review history, and CVE data live in your SQLite or Postgres, on infra you own. No phone-home, no required telemetry, no "is this used for training?"
-- **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — and Mira is the fastest tool on the public [Code Review Bench](#benchmark).
+- **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — Mira has the best precision of any top-tier tool on the public [Code Review Bench](#benchmark), on a model that costs cents per review.
 - **Catches PRs stepping on each other** — While reviewing, Mira checks the repo's other open PRs and flags merge-conflict risk and duplicate effort right in the walkthrough.
 - **Indexed, cross-file context** — A full-repo code index gives the model real project context, not just the diff — plus org-wide package search and hourly OSV.dev CVE scanning across every repo.
 - **GitHub, GitLab, Forgejo, and Bitbucket Cloud** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline across GitHub, GitLab, Forgejo (incl. Codeberg), and Bitbucket Cloud. The engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
@@ -59,24 +59,35 @@ If your engineering team needs answers like *"which of our repos are exposed to 
 
 ## Benchmark
 
-Mira is **the fastest tool measured** on the public [Code Review Bench](https://codereview.withmartian.com/?mode=offline), and the only one on the speed/quality Pareto frontier: every tool that scores higher on F1 takes **5–14× longer per PR**.
+On a **20-PR held-out sample** of the public [Martian Code Review Bench](https://github.com/withmartian/code-review-benchmark/tree/e616e849755441da38f18bf3adba2c9583b03803/offline), Mira running an inexpensive model (**DeepSeek v4.1 flash**) ranks **first on F1 of 23 published reviewers**, with the highest precision of any tool above 50% recall. Run on 6 November 2026.
 
-![Median review time per PR, Mira vs every published competitor](.github/assets/benchmark-frontier.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/benchmark-f1-dark.svg">
+  <img alt="F1 per code reviewer on 20 held-out pull requests; Mira ranks first" src=".github/assets/benchmark-f1-light.svg" width="760">
+</picture>
 
-Plotted against every published competitor on the same subset, Mira sits in the upper-left corner: everything to the right is slower; everything above it pays 5–14× the wall time for the extra F1.
+| Reviewer | Precision | Recall | F1 | TP / FP / FN |
+|---|---:|---:|---:|---|
+| **Mira · DeepSeek v4.1 flash** | **68.1%** | 51.6% | **58.7** | 32 / 15 / 30 |
+| Qodo Extended v2 | 63.5% | 53.2% | 57.9 | 33 / 19 / 29 |
+| Cubic v2 | 47.9% | 56.5% | 51.9 | 35 / 38 / 27 |
+| Devin | 66.7% | 38.7% | 49.0 | 24 / 12 / 38 |
+| Qodo v2 | 45.1% | 51.6% | 48.1 | 32 / 39 / 30 |
+| Cursor Bugbot | 58.1% | 40.3% | 47.6 | 25 / 18 / 37 |
+| GitLab Duo | 47.5% | 46.8% | 47.2 | 29 / 32 / 33 |
+| Augment | 49.1% | 45.2% | 47.1 | 28 / 29 / 34 |
+| Greptile v4.1 | 43.1% | 45.2% | 44.1 | 28 / 37 / 34 |
+| Claude Code | 37.5% | 38.7% | 38.1 | 24 / 40 / 38 |
+| GitHub Copilot v2 | 28.6% | 51.6% | 36.8 | 32 / 80 / 30 |
+| CodeRabbit | 27.1% | 46.8% | 34.3 | 29 / 78 / 33 |
 
-![Speed vs quality: Mira on the Pareto frontier](.github/assets/benchmark-by-language.svg)
+The full ranking of all 23 reviewers, per-PR results, settings and commit pins are in [`benchmark-results.json`](.github/assets/benchmark-results.json).
 
-Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.6.
+**Speed:** all 20 reviews completed; median **107 seconds** per PR (70–544 s), 13 of 20 under two minutes, including a 106-file Sentry PR in 114 s. Timing covers Mira's full pipeline on an empty index and excludes snapshot preparation and judging. Competitors publish no timings for this sample, so there is no speed comparison.
 
-| | **Mira** | Cubic-v2 | Greptile | CodeRabbit | GitHub Copilot |
-|---|---:|---:|---:|---:|---:|
-| F1 | **44** | 56 | 35 | 32 | 31 |
-| Precision | **43%** | 50% | 32% | 24% | 24% |
-| Recall | **46%** | 65% | 40% | 50% | 43% |
-| Median time / PR | **~77s** | ~9m | ~5m | ~5m | ~10m |
+**Method.** The sample is entries 1, 2, 4 and 5 of each repository's golden file in the pinned upstream checkout: four PRs each for Python (Sentry), Go (Grafana), TypeScript (Cal.com), Ruby (Discourse) and Java (Keycloak), 62 reference issues in the **core** profile. It was fixed by rule before any review, and it excludes the third entry of each file, the five PRs used during development. Mira reviewed each PR once at its pinned head commit with medium reasoning, a 16,384-token output limit, shipping defaults, and no index, learned rules or history. Matching and deduplication use the upstream benchmark's own prompts with **Claude Sonnet 4.5** as the judge; competitor rows are the upstream's published evaluations of the same PRs under the same judge and were not rerun. Unmatched findings count as false positives even where the reference set omits a valid issue.
 
-> Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.6 as the judge.
+**Caveats.** One attempt per PR: on the five-PR development sample, identical code moved by several F1 points between runs, so the 0.8-point lead over Qodo Extended v2 is not a meaningful gap, and the result is best read as "top tier with the best precision". Reproduce with [`scripts/prepare_benchmark_inputs.py`](scripts/prepare_benchmark_inputs.py) and [`scripts/run_five_pr_benchmark.py`](scripts/run_five_pr_benchmark.py); the chart comes from [`scripts/render_benchmark_charts.py`](scripts/render_benchmark_charts.py).
 
 ## Quick Start
 
