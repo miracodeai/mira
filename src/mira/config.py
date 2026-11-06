@@ -294,6 +294,12 @@ class ReviewConfig(BaseModel):
     # when the budget runs out, so a low cap costs depth, never the review.
     agentic_max_hops: int = Field(default=10, ge=1, le=30)
 
+    # After the reviewer submits, ask it once more — over the same transcript —
+    # for the concrete defects it analysed but withheld as minor or uncertain,
+    # and append them. One extra model call per chunk (prompt-cached by most
+    # providers); recovers findings the model had already established.
+    second_look: bool = True
+
     # Whether the JIT cross-file resolver should attempt Java + Go imports.
     # Resolution for those languages is heuristic (we can't see the build
     # system), and a wrong-file pick pollutes the prompt with off-topic

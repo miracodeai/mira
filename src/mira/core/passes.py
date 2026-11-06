@@ -12,6 +12,7 @@ import json as _json
 import logging
 from collections.abc import Callable
 
+from mira.analysis.severity import mentions_security
 from mira.config import load_config
 from mira.dashboard.models_config import llm_config_for
 from mira.exceptions import ResponseParseError
@@ -27,7 +28,7 @@ from mira.llm.response_parser import (
     parse_llm_response,
 )
 from mira.llm.tool_schemas import SUBMIT_CRITIQUE_TOOL, SUBMIT_REVIEW_TOOL
-from mira.models import KeyIssue, ReviewComment, Severity, WalkthroughResult
+from mira.models import HunkInfo, KeyIssue, ReviewComment, Severity, WalkthroughResult
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,106 @@ def _tools_system_suffix(max_hops: int) -> str:
     )
 
 
+_SECOND_LOOK_PROMPT = (
+    "Second pass before this review is posted. Re-read your own analysis above "
+    "and list every concrete defect you examined but did not file — including "
+    "anything you set aside as minor, not user-facing, speculative, pre-existing "
+    "in spirit, or outside the PR's intent. For each one, if the code you have "
+    "already seen shows a specific mismatch, file it now:\n"
+    "- a check performed on one value while the code below uses a different, "
+    "derived value;\n"
+    "- behaviour present on the removed lines (a guard, a logged field, an error "
+    "wrap, an invalidation) that the added lines no longer perform;\n"
+    "- a caller or implementer that does not match a changed signature;\n"
+    "- a lookup, predicate or fallback that can never match or is dead;\n"
+    "- a value (nil/None/undefined/0/empty) that reaches a use which assumes it "
+    "cannot.\n"
+    "Severity expresses impact and confidence expresses certainty — a real "
+    "defect with small impact is a `suggestion` with honest confidence, not an "
+    "omission. Do not re-submit comments you already filed and do not add "
+    "style or test-coverage remarks. Call `submit_review` with only the "
+    "additional comments (an empty list is a valid answer); the summary may be "
+    "a single sentence."
+)
+
+
+def _comment_count(raw: str) -> int:
+    try:
+        data = loads_lenient(raw) if raw else None
+    except Exception:
+        data = None
+    return len(data.get("comments") or []) if isinstance(data, dict) else 0
+
+
+def _submission_receipt(raw: str) -> str:
+    return f"Recorded {_comment_count(raw)} comment(s). They will be posted after verification."
+
+
+def merge_submissions(first: str, extra: str) -> str:
+    """Append the second-look comments to the first submission's JSON.
+
+    The first submission keeps its summary and key issues; only comments
+    are added. Anything unparseable leaves the first submission untouched.
+    """
+    if not extra:
+        return first
+    try:
+        base = loads_lenient(first) if first else None
+        more = loads_lenient(extra)
+    except Exception:
+        return first
+    if not isinstance(more, dict):
+        return first
+    added = [c for c in (more.get("comments") or []) if isinstance(c, dict)]
+    if not added:
+        return first
+    if not isinstance(base, dict):
+        base = {"comments": [], "summary": str(more.get("summary") or "")}
+    merged = dict(base)
+    merged["comments"] = [*(base.get("comments") or []), *added]
+    return _json.dumps(merged)
+
+
+async def _second_look(llm: LLMProviderProtocol, convo: list[dict]) -> str:
+    """Ask the model, over its own transcript, for the defects it withheld.
+
+    Models routinely identify a concrete defect during investigation and
+    then decline to file it as minor or uncertain; the transcript still
+    holds that analysis, so one more turn over it is far cheaper than a
+    second review and recovers exactly those findings.
+    """
+    try:
+        raw = await llm.complete_with_tools(
+            messages=[*convo, {"role": "user", "content": _SECOND_LOOK_PROMPT}],
+            tools=[SUBMIT_REVIEW_TOOL],
+        )
+    except Exception as exc:
+        logger.warning("Second-look pass failed: %s", exc)
+        return ""
+    return raw or ""
+
+
+async def _finish_submission(
+    llm: LLMProviderProtocol,
+    convo: list[dict],
+    raw: str,
+    executor: object,
+    second_look: bool,
+) -> str:
+    """Optionally run the second look over the transcript and merge its comments."""
+    if not raw or not second_look:
+        return raw
+    extra = await _second_look(llm, convo)
+    merged = merge_submissions(raw, extra)
+    added = _comment_count(merged) - _comment_count(raw) if merged is not raw else 0
+    log = getattr(executor, "call_log", None)
+    if isinstance(log, list):
+        log.append({"tool": "second_look", "arg": f"+{added}"})
+    if added:
+        logger.info("Second look added %d comment(s)", added)
+    return merged
+
+
 async def _force_submit(llm: LLMProviderProtocol, convo: list[dict], why: str) -> str:
     """Ask for the structured submission over the full investigation transcript.
 
@@ -112,6 +213,7 @@ async def agentic_review_loop(
     messages: list[dict],
     executor: object,
     max_hops: int = DEFAULT_AGENTIC_MAX_HOPS,
+    second_look: bool = False,
 ) -> str:
     """Run an agentic tool-use loop until the LLM submits a review.
 
@@ -125,6 +227,10 @@ async def agentic_review_loop(
     rather than re-reviewing the bare diff from scratch. Only when the
     provider fails outright does it return "" so the caller can fall back to
     a single forced-tool call.
+
+    With ``second_look`` the submission is followed by one more turn over
+    the same transcript asking for the concrete defects the model analysed
+    but withheld; its comments are appended to the submission.
     """
     from mira.llm.agentic_tools import AGENTIC_TOOLS
 
@@ -142,7 +248,12 @@ async def agentic_review_loop(
             logger.warning("Agentic hop %d failed: %s", hop + 1, exc)
             # Evidence already gathered is worth a submission; an untouched
             # conversation is better served by the caller's single-shot path.
-            return await _force_submit(llm, convo, "hop failed") if investigated else ""
+            if not investigated:
+                return ""
+            raw = await _force_submit(llm, convo, "hop failed")
+            if raw:
+                convo.append({"role": "assistant", "content": "Submitted review:\n" + raw})
+            return await _finish_submission(llm, convo, raw, executor, second_look)
 
         tool_calls = msg.get("tool_calls") or []
         content = msg.get("content") or ""
@@ -162,7 +273,10 @@ async def agentic_review_loop(
                     if msg.get(key):
                         prose[key] = msg[key]
                 convo.append(prose)
-            return await _force_submit(llm, convo, "no tool call")
+            raw = await _force_submit(llm, convo, "no tool call")
+            if raw:
+                convo.append({"role": "assistant", "content": "Submitted review:\n" + raw})
+            return await _finish_submission(llm, convo, raw, executor, second_look)
 
         assistant_message = {
             "role": "assistant",
@@ -182,7 +296,17 @@ async def agentic_review_loop(
             fn = call.get("function") or {}
             name = fn.get("name") or ""
             if name == "submit_review":
-                return fn.get("arguments") or ""
+                raw = fn.get("arguments") or ""
+                if not second_look:
+                    return raw
+                convo.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id") or "",
+                        "content": _submission_receipt(raw),
+                    }
+                )
+                return await _finish_submission(llm, convo, raw, executor, second_look)
 
             raw_args = fn.get("arguments") or "{}"
             try:
@@ -201,7 +325,10 @@ async def agentic_review_loop(
             )
 
     logger.info("Agentic loop hit %d-hop cap without submit_review; forcing submit", max_hops)
-    return await _force_submit(llm, convo, "hop cap")
+    raw = await _force_submit(llm, convo, "hop cap")
+    if raw:
+        convo.append({"role": "assistant", "content": "Submitted review:\n" + raw})
+    return await _finish_submission(llm, convo, raw, executor, second_look)
 
 
 def _indexing_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
@@ -359,12 +486,25 @@ async def _security_scan_once(
         return []
 
     for c in comments:
-        if not c.category or c.category != "security":
+        # The security reviewer reads every file closely and routinely notices
+        # a plain defect on the way (a nil dereference, a dead fallback). Those
+        # keep the category it chose and ride the same noise filter and
+        # critique as main-pass findings. Everything else — including a
+        # vulnerability the model filed under `bug` by mistake — is security.
+        if c.category not in _SECURITY_HANDOFF_CATEGORIES or mentions_security(
+            f"{c.title} {c.body}"
+        ):
             c.category = "security"
         c.source_pass = "security"
     if comments:
         logger.info("Security pass produced %d candidate comment(s)", len(comments))
     return comments
+
+
+# Non-security categories the security pass may hand off instead of dropping.
+_SECURITY_HANDOFF_CATEGORIES = frozenset(
+    {"bug", "error-handling", "race-condition", "resource-leak", "performance", "configuration"}
+)
 
 
 async def dependency_review_pass(
@@ -437,26 +577,58 @@ async def dependency_review_pass(
     return comments
 
 
-_MAX_HUNK_EVIDENCE_CHARS = 1200
+_MAX_HUNK_EVIDENCE_CHARS = 2400
+# Diff lines shown on each side of a comment's cited lines in the critic's evidence.
+_EVIDENCE_CONTEXT_LINES = 20
 # Confidence floor for keeping a warning-or-worse finding the critic graded
 # "plausible" (consistent with the code, not contradicted, but not proven).
 _PLAUSIBLE_MIN_CONF = 0.75
 
 
 def _hunk_evidence(comment: ReviewComment, diff_files: list | None) -> str:
-    """The diff hunk(s) covering a comment's lines — the critic's real evidence."""
+    """The diff lines around a comment's cited lines — the critic's real evidence.
+
+    A window centred on the comment, not the head of the hunk: a new file
+    arrives as one hunk, and a critic shown only its first screenful grades
+    a finding about line 60 as "plausible, code not shown".
+    """
     if not diff_files:
         return ""
     file = next((f for f in diff_files if f.path == comment.path), None)
     if file is None:
         return ""
     end = comment.end_line or comment.line
-    parts = []
     for h in file.hunks:
         h_end = h.target_start + max(h.target_length, 1) - 1
         if comment.line <= h_end and h.target_start <= end:
-            parts.append(h.content)
-    text = "\n".join(parts)
+            return _evidence_window(h, comment.line, end)
+    return ""
+
+
+def _evidence_window(hunk: HunkInfo, start: int, end: int) -> str:
+    lines = hunk.content.splitlines()
+    # New-file line number of each raw diff line; headers and removed lines
+    # have none but stay in the window so the critic sees what was replaced.
+    numbers: list[int | None] = []
+    n = hunk.target_start
+    for line in lines:
+        if line.startswith(("@@", "-")):
+            numbers.append(None)
+        else:
+            numbers.append(n)
+            n += 1
+    cited = [i for i, num in enumerate(numbers) if num is not None and start <= num <= end]
+    if cited:
+        lo = max(0, cited[0] - _EVIDENCE_CONTEXT_LINES)
+        hi = min(len(lines), cited[-1] + 1 + _EVIDENCE_CONTEXT_LINES)
+        selected = lines[lo:hi]
+        if lo > 0:
+            selected = [f"… [{lo} earlier line(s) of this hunk omitted]", *selected]
+        if hi < len(lines):
+            selected = [*selected, f"… [{len(lines) - hi} later line(s) of this hunk omitted]"]
+        text = "\n".join(selected)
+    else:
+        text = hunk.content
     if len(text) > _MAX_HUNK_EVIDENCE_CHARS:
         text = text[:_MAX_HUNK_EVIDENCE_CHARS] + "…"
     return text
@@ -529,7 +701,7 @@ async def self_critique(
         )
         hunk = _hunk_evidence(c, diff_files)
         if hunk:
-            entry += f"    Diff hunk:\n{hunk}\n"
+            entry += f"    Diff (window around the cited lines):\n{hunk}\n"
         draft_lines.append(entry)
 
     rules_block = ""

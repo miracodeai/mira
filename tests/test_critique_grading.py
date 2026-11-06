@@ -76,13 +76,40 @@ class TestHunkEvidence:
         assert _hunk_evidence(c, []) == ""
 
     def test_long_hunks_truncated(self):
+        from mira.core.passes import _MAX_HUNK_EVIDENCE_CHARS
+
         f = FileDiff(
             path="app.py",
             change_type=FileChangeType.MODIFIED,
             hunks=[HunkInfo(1, 5, 1, 50, "x" * 5000)],
         )
         out = _hunk_evidence(_comment(line=10), [f])
-        assert len(out) < 1300
+        assert len(out) <= _MAX_HUNK_EVIDENCE_CHARS + 1
+
+    def test_window_is_centred_on_the_cited_line_not_the_hunk_head(self):
+        """A new file is one hunk; the critic must see the cited region, not
+        the first screenful, or it grades a real finding as 'code not shown'."""
+        body = "\n".join(f"+line {i}" for i in range(1, 121))
+        f = FileDiff(
+            path="app.py",
+            change_type=FileChangeType.ADDED,
+            hunks=[HunkInfo(0, 0, 1, 120, "@@ -0,0 +1,120 @@\n" + body)],
+        )
+        out = _hunk_evidence(_comment(line=80), [f])
+        assert "+line 80" in out
+        assert "+line 60" in out and "+line 100" in out
+        assert "+line 1\n" not in out and "+line 120" not in out
+        assert "earlier line(s)" in out and "later line(s)" in out
+
+    def test_removed_lines_stay_inside_the_window(self):
+        content = "@@ -1,4 +1,4 @@\n a\n-old guard\n+new code\n b"
+        f = FileDiff(
+            path="app.py",
+            change_type=FileChangeType.MODIFIED,
+            hunks=[HunkInfo(1, 4, 1, 4, content)],
+        )
+        out = _hunk_evidence(_comment(line=2), [f])
+        assert "-old guard" in out and "+new code" in out
 
 
 class TestEvidenceGradedCritique:

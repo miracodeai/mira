@@ -1540,6 +1540,7 @@ class ReviewEngine:
                             messages,
                             executor,
                             max_hops=self.config.review.agentic_max_hops,
+                            second_look=self.config.review.second_look,
                         )
                         audit.append({"stage": "agentic", "chunk": idx, "calls": executor.call_log})
                     if not raw_response:

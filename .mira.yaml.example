@@ -113,6 +113,10 @@ review:
   # forced over the full investigation transcript when the budget runs out,
   # so a lower value trades depth for speed, never the review itself. 1-30.
   agentic_max_hops: 10
+  # After the reviewer submits, ask it once more over the same transcript for
+  # the concrete defects it analysed but withheld as minor or uncertain, and
+  # append them. One extra (prompt-cached) model call per chunk.
+  second_look: true
   # Generate a PR walkthrough comment (top-level summary)
   walkthrough: true
   # Include a Mermaid sequence diagram in the walkthrough
