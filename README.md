@@ -59,35 +59,57 @@ If your engineering team needs answers like *"which of our repos are exposed to 
 
 ## Benchmark
 
-On a **20-PR held-out sample** of the public [Martian Code Review Bench](https://github.com/withmartian/code-review-benchmark/tree/e616e849755441da38f18bf3adba2c9583b03803/offline), Mira running an inexpensive model (**DeepSeek v4.1 flash**) ranks **first on F1 of 23 published reviewers**, with the highest precision of any tool above 50% recall. Run on 6 November 2026.
+On the **full 50-PR offline set** of the public [Martian Code Review Bench](https://github.com/withmartian/code-review-benchmark/tree/e616e849755441da38f18bf3adba2c9583b03803/offline), Mira running an inexpensive model (**DeepSeek v4.1 flash**) ranks **first on F1 of 23 published reviewers** and posts the fewest unmatched comments of any tool above 50% recall. Run on 6 November 2026.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/benchmark-f1-dark.svg">
-  <img alt="F1 per code reviewer on 20 held-out pull requests; Mira ranks first" src=".github/assets/benchmark-f1-light.svg" width="760">
+  <img alt="F1 per code reviewer on all 50 pull requests; Mira ranks first" src=".github/assets/benchmark-f1-light.svg" width="760">
 </picture>
 
 | Reviewer | Precision | Recall | F1 | TP / FP / FN |
 |---|---:|---:|---:|---|
-| **Mira · DeepSeek v4.1 flash** | **68.1%** | 51.6% | **58.7** | 32 / 15 / 30 |
-| Qodo Extended v2 | 63.5% | 53.2% | 57.9 | 33 / 19 / 29 |
-| Cubic v2 | 47.9% | 56.5% | 51.9 | 35 / 38 / 27 |
-| Devin | 66.7% | 38.7% | 49.0 | 24 / 12 / 38 |
-| Qodo v2 | 45.1% | 51.6% | 48.1 | 32 / 39 / 30 |
-| Cursor Bugbot | 58.1% | 40.3% | 47.6 | 25 / 18 / 37 |
-| GitLab Duo | 47.5% | 46.8% | 47.2 | 29 / 32 / 33 |
-| Augment | 49.1% | 45.2% | 47.1 | 28 / 29 / 34 |
-| Greptile v4.1 | 43.1% | 45.2% | 44.1 | 28 / 37 / 34 |
-| Claude Code | 37.5% | 38.7% | 38.1 | 24 / 40 / 38 |
-| GitHub Copilot v2 | 28.6% | 51.6% | 36.8 | 32 / 80 / 30 |
-| CodeRabbit | 27.1% | 46.8% | 34.3 | 29 / 78 / 33 |
+| **Mira · DeepSeek v4.1 flash** | **75.0%** | 55.1% | **63.5** | 87 / 29 / 71 |
+| Cubic v2 | 56.5% | 60.8% | 58.5 | 96 / 74 / 62 |
+| Qodo Extended v2 | 56.2% | 57.0% | 56.6 | 90 / 70 / 68 |
+| Augment | 52.4% | 61.4% | 56.6 | 97 / 88 / 61 |
+| Devin | 67.3% | 41.8% | 51.6 | 66 / 32 / 92 |
+| Qodo v2 | 47.1% | 56.3% | 51.3 | 89 / 100 / 69 |
+| Cursor Bugbot | 54.3% | 44.3% | 48.8 | 70 / 59 / 88 |
+| GitLab Duo | 47.5% | 48.1% | 47.8 | 76 / 84 / 82 |
+| Greptile v4.1 | 46.9% | 48.1% | 47.5 | 76 / 86 / 82 |
+| GitHub Copilot v2 | 34.3% | 62.0% | 44.1 | 98 / 188 / 60 |
+| CodeRabbit | 33.8% | 58.2% | 42.8 | 92 / 180 / 66 |
+| Claude Code | 36.5% | 41.1% | 38.7 | 65 / 113 / 93 |
 
-The full ranking of all 23 reviewers, per-PR results, settings and commit pins are in [`benchmark-results.json`](.github/assets/benchmark-results.json).
+The full ranking of all 23 reviewers, per-PR results, head commits and settings are in [`benchmark-results.json`](.github/assets/benchmark-results.json).
 
-**Speed:** all 20 reviews completed; median **107 seconds** per PR (70–544 s), 13 of 20 under two minutes, including a 106-file Sentry PR in 114 s. Timing covers Mira's full pipeline on an empty index and excludes snapshot preparation and judging. Competitors publish no timings for this sample, so there is no speed comparison.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/benchmark-pr-dark.svg">
+  <img alt="Precision against recall for every reviewer; Mira has the highest precision of any tool above 50% recall" src=".github/assets/benchmark-pr-light.svg" width="760">
+</picture>
 
-**Method.** The sample is entries 1, 2, 4 and 5 of each repository's golden file in the pinned upstream checkout: four PRs each for Python (Sentry), Go (Grafana), TypeScript (Cal.com), Ruby (Discourse) and Java (Keycloak), 62 reference issues in the **core** profile. It was fixed by rule before any review, and it excludes the third entry of each file, the five PRs used during development. Mira reviewed each PR once at its pinned head commit with medium reasoning, a 16,384-token output limit, shipping defaults, and no index, learned rules or history. Matching and deduplication use the upstream benchmark's own prompts with **Claude Sonnet 4.5** as the judge; competitor rows are the upstream's published evaluations of the same PRs under the same judge and were not rerun. Unmatched findings count as false positives even where the reference set omits a valid issue.
+Mira sits furthest up on the precision axis at a recall most tools don't reach: the tools that find a few more bugs (Cubic, Augment, Copilot, CodeRabbit) post two to six times as many comments that match nothing in the reference set.
 
-**Caveats.** One attempt per PR: on the five-PR development sample, identical code moved by several F1 points between runs, so the 0.8-point lead over Qodo Extended v2 is not a meaningful gap, and the result is best read as "top tier with the best precision". Reproduce with [`scripts/prepare_benchmark_inputs.py`](scripts/prepare_benchmark_inputs.py) and [`scripts/run_five_pr_benchmark.py`](scripts/run_five_pr_benchmark.py); the chart comes from [`scripts/render_benchmark_charts.py`](scripts/render_benchmark_charts.py).
+**By language.** Ten PRs per language. Mira leads in Ruby and TypeScript; Cubic v2 leads in Go and Python and Qodo Extended v2 in Java.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/benchmark-language-dark.svg">
+  <img alt="Mira F1 per language against the best other reviewer on the same PRs" src=".github/assets/benchmark-language-light.svg" width="760">
+</picture>
+
+| Language | Mira P / R / F1 | Best other reviewer |
+|---|---|---|
+| Go · Grafana | 83.3% / 60.0% / 69.8 | Cubic v2 · 75.9 |
+| Ruby · Discourse | 78.6% / 57.9% / **66.7** | Augment · 54.5 |
+| TypeScript · Cal.com | 71.0% / 59.5% / **64.7** | Qodo v2 · 62.7 |
+| Java · Keycloak | 65.0% / 52.0% / 57.8 | Qodo Extended v2 · 61.2 |
+| Python · Sentry | 78.9% / 45.5% / 57.7 | Cubic v2 · 68.6 |
+
+**Speed:** all 50 reviews completed, none timed out; median **106 seconds** per PR, 31 of 50 under two minutes. The two slowest (796 s and 544 s) were single slow provider responses on 400k-token investigation transcripts, not pipeline stalls. Timing covers Mira's full pipeline on an empty index and excludes snapshot preparation and judging. Competitors publish no timings for this set, so there is no speed comparison.
+
+**Method.** All 50 PRs of the pinned upstream set: ten each for Python (Sentry), Go (Grafana), TypeScript (Cal.com), Ruby (Discourse) and Java (Keycloak), 158 reference issues in the **core** profile. The set was reviewed in three runs over disjoint selections fixed by rule in advance (20 held-out PRs, the 5 development PRs, the remaining 25), one attempt per PR, each at its pinned head commit with medium reasoning, a 16,384-token output limit, shipping defaults, and no index, learned rules or history; no review or judge call was repeated. Matching and deduplication use the upstream benchmark's own prompts with **Claude Sonnet 4.5** as the judge; competitor rows are the upstream's published evaluations of the same PRs under the same judge and were not rerun. Unmatched findings count as false positives even where the reference set omits a valid issue.
+
+**Caveats.** Five of the 50 PRs (the third entry of each repository's golden file) were used while tuning the review pipeline; excluding them, Mira scores 75.0% precision, 55.3% recall and F1 63.7 on the other 45, so they do not carry the result. One attempt per PR: on the five-PR development sample, identical code moved by several F1 points between runs, so the ordering among the top four tools is within noise, while the precision gap is not. Reproduce with [`scripts/prepare_benchmark_inputs.py`](scripts/prepare_benchmark_inputs.py), [`scripts/run_five_pr_benchmark.py`](scripts/run_five_pr_benchmark.py) and [`scripts/combine_benchmark_runs.py`](scripts/combine_benchmark_runs.py); the charts come from [`scripts/render_benchmark_charts.py`](scripts/render_benchmark_charts.py).
 
 ## Quick Start
 

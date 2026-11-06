@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="328" viewBox="0 0 760 328" role="img" aria-label="Mira F1 per language against the best other reviewer">
+<rect width="760" height="328" fill="#0d1117"/>
+<text x="190.0" y="26.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="start">F1 by language</text>
+<text x="190.0" y="46.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" fill="#8b949e" text-anchor="start">Bar: Mira · marker: best other reviewer on the same PRs · 10 PRs per language</text>
+<line x1="190.0" y1="58" x2="190.0" y2="284" stroke="#30363d" stroke-width="1"/>
+<text x="190.0" y="302.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="middle">0</text>
+<line x1="303.3" y1="58" x2="303.3" y2="284" stroke="#30363d" stroke-width="1"/>
+<text x="303.3" y="302.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="middle">20</text>
+<line x1="416.7" y1="58" x2="416.7" y2="284" stroke="#30363d" stroke-width="1"/>
+<text x="416.7" y="302.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="middle">40</text>
+<line x1="530.0" y1="58" x2="530.0" y2="284" stroke="#30363d" stroke-width="1"/>
+<text x="530.0" y="302.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="middle">60</text>
+<line x1="643.3" y1="58" x2="643.3" y2="284" stroke="#30363d" stroke-width="1"/>
+<text x="643.3" y="302.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="middle">80</text>
+<path d="M190.0,70.0 h391.3 a4,4 0 0 1 4,4 v8 a4,4 0 0 1 -4,4 h-391.3 z" fill="#3fb950"/>
+<text x="180.0" y="82.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#e6edf3" text-anchor="end">Go · Grafana</text>
+<text x="591.3" y="82.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#8b949e" text-anchor="start">69.8</text>
+<circle cx="619.9" cy="95.0" r="4" fill="#6e7681" stroke="#0d1117" stroke-width="2"/>
+<text x="627.9" y="99.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="start">Cubic v2 75.9</text>
+<path d="M190.0,114.0 h373.8 a4,4 0 0 1 4,4 v8 a4,4 0 0 1 -4,4 h-373.8 z" fill="#3fb950"/>
+<text x="180.0" y="126.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#e6edf3" text-anchor="end">Ruby · Discourse</text>
+<text x="573.8" y="126.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#8b949e" text-anchor="start">66.7</text>
+<circle cx="499.1" cy="139.0" r="4" fill="#6e7681" stroke="#0d1117" stroke-width="2"/>
+<text x="507.1" y="143.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="start">Augment 54.5</text>
+<path d="M190.0,158.0 h362.7 a4,4 0 0 1 4,4 v8 a4,4 0 0 1 -4,4 h-362.7 z" fill="#3fb950"/>
+<text x="180.0" y="170.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#e6edf3" text-anchor="end">TypeScript · Cal.com</text>
+<text x="562.7" y="170.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#8b949e" text-anchor="start">64.7</text>
+<circle cx="545.0" cy="183.0" r="4" fill="#6e7681" stroke="#0d1117" stroke-width="2"/>
+<text x="553.0" y="187.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="start">Qodo v2 62.7</text>
+<path d="M190.0,202.0 h323.4 a4,4 0 0 1 4,4 v8 a4,4 0 0 1 -4,4 h-323.4 z" fill="#3fb950"/>
+<text x="180.0" y="214.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#e6edf3" text-anchor="end">Java · Keycloak</text>
+<text x="523.4" y="214.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#8b949e" text-anchor="start">57.8</text>
+<circle cx="536.9" cy="227.0" r="4" fill="#6e7681" stroke="#0d1117" stroke-width="2"/>
+<text x="544.9" y="231.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="start">Qodo Extended v2 61.2</text>
+<path d="M190.0,246.0 h322.9 a4,4 0 0 1 4,4 v8 a4,4 0 0 1 -4,4 h-322.9 z" fill="#3fb950"/>
+<text x="180.0" y="258.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#e6edf3" text-anchor="end">Python · Sentry</text>
+<text x="522.9" y="258.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#8b949e" text-anchor="start">57.7</text>
+<circle cx="578.6" cy="271.0" r="4" fill="#6e7681" stroke="#0d1117" stroke-width="2"/>
+<text x="586.6" y="275.0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="400" fill="#8b949e" text-anchor="start">Cubic v2 68.6</text>
+</svg>
