@@ -92,11 +92,6 @@ Mira sits furthest up on the precision axis at a recall most tools don't reach: 
 
 **By language.** Ten PRs per language. Mira leads in Ruby and TypeScript; Cubic v2 leads in Go and Python and Qodo Extended v2 in Java.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/benchmark-language-dark.svg">
-  <img alt="Mira F1 per language against the best other reviewer on the same PRs" src=".github/assets/benchmark-language-light.svg" width="760">
-</picture>
-
 | Language | Mira P / R / F1 | Best other reviewer |
 |---|---|---|
 | Go · Grafana | 83.3% / 60.0% / 69.8 | Cubic v2 · 75.9 |

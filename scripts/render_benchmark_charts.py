@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Render the README benchmark charts from .github/assets/benchmark-results.json.
 
-Three charts, each in a light and a dark variant (README picks one with a
+Two charts, each in a light and a dark variant (README picks one with a
 <picture> element), pure standard library:
 
-  benchmark-f1-{light,dark}.svg         ranked F1 per reviewer, Mira highlighted
-  benchmark-pr-{light,dark}.svg         precision vs recall, every reviewer, F1 iso-lines
-  benchmark-language-{light,dark}.svg   Mira F1 per language vs the best other tool
+  benchmark-f1-{light,dark}.svg   ranked F1 per reviewer, Mira highlighted
+  benchmark-pr-{light,dark}.svg   precision vs recall, every reviewer, F1 iso-lines
 
   python scripts/render_benchmark_charts.py
 """
@@ -209,63 +208,6 @@ def render_pr(results: dict, theme: str) -> str:
     return "\n".join(out) + "\n"
 
 
-# ─── Chart 3: per language ───────────────────────────────────────────
-
-
-def render_language(results: dict, theme: str) -> str:
-    t = THEMES[theme]
-    langs = results[
-        "by_language"
-    ]  # {language: {"prs", "mira": {...}, "best_other": {"name", "f1"}}}
-    order = sorted(langs, key=lambda k: -langs[k]["mira"]["f1"])
-    left, right, top, bottom, row, bar, x_max = 190, 60, 64, 44, 44, 16, 90.0
-    height = top + row * len(order) + bottom
-    plot_w = WIDTH - left - right
-    x = lambda v: left + plot_w * v / x_max  # noqa: E731
-    out = _frame(height, t, "Mira F1 per language against the best other reviewer")
-    out.append(_text(left, 26, "F1 by language", t["text"], 15, "600"))
-    out.append(
-        _text(
-            left,
-            46,
-            "Bar: Mira · marker: best other reviewer on the same PRs · 10 PRs per language",
-            t["muted"],
-        )
-    )
-    axis_y = top + row * len(order)
-    for v in (0, 20, 40, 60, 80):
-        out.append(
-            f'<line x1="{x(v):.1f}" y1="{top - 6}" x2="{x(v):.1f}" y2="{axis_y}" '
-            f'stroke="{t["grid"]}" stroke-width="1"/>'
-        )
-        out.append(_text(x(v), axis_y + 18, str(v), t["muted"], 11, anchor="middle"))
-    for i, lang in enumerate(order):
-        d = langs[lang]
-        y0 = top + row * i + 6
-        f1 = 100 * d["mira"]["f1"]
-        out.append(_bar(left, y0, max(0.0, x(f1) - left), bar, t["mira"]))
-        out.append(
-            _text(
-                left - 10,
-                y0 + bar / 2 + 4,
-                d["label"],
-                t["text"],
-                12,
-                "600",
-                "end",
-            )
-        )
-        out.append(_text(x(f1) + 6, y0 + bar / 2 + 4, f"{f1:.1f}", t["muted"], 11, "600"))
-        bf = 100 * d["best_other"]["f1"]
-        by = y0 + bar + 9
-        out.append(
-            f'<circle cx="{x(bf):.1f}" cy="{by:.1f}" r="4" fill="{t["other_dot"]}" stroke="{t["surface"]}" stroke-width="2"/>'
-        )
-        out.append(_text(x(bf) + 8, by + 4, f"{d['best_other']['name']} {bf:.1f}", t["muted"], 11))
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
-
-
 def main() -> None:
     results = json.loads(RESULTS.read_text())
     results.setdefault("model_label", "DeepSeek v4.1 flash")
@@ -274,8 +216,6 @@ def main() -> None:
         "Same PRs and judge for every reviewer; competitor reviews as published · Nov 2026",
     )
     charts = {"f1": render_f1, "pr": render_pr}
-    if results.get("by_language"):
-        charts["language"] = render_language
     for theme in THEMES:
         for name, fn in charts.items():
             target = ASSETS / f"benchmark-{name}-{theme}.svg"
