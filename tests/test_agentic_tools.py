@@ -188,7 +188,9 @@ class TestAgenticReasoningReplay:
             llm, [{"role": "user", "content": "review"}], _Executor()
         )
 
-        assert result == '{"comments": []}'
+        assert result.raw_arguments == '{"comments": []}'
+        assert result.hops == 2
+        assert result.conversation[0]["content"] == "review"
         second_turn = llm.calls[1]
         assistant = second_turn[1]
         assert assistant["reasoning_content"] == "I need the file."
