@@ -90,16 +90,6 @@ The full ranking of all 23 reviewers, per-PR results, head commits and settings 
 
 Mira sits furthest up on the precision axis at a recall most tools don't reach: the tools that find a few more bugs (Cubic, Augment, Copilot, CodeRabbit) post two to six times as many comments that match nothing in the reference set.
 
-**By language.** Ten PRs per language. Mira leads in Ruby and TypeScript; Cubic v2 leads in Go and Python and Qodo Extended v2 in Java.
-
-| Language | Mira P / R / F1 | Best other reviewer |
-|---|---|---|
-| Go · Grafana | 83.3% / 60.0% / 69.8 | Cubic v2 · 75.9 |
-| Ruby · Discourse | 78.6% / 57.9% / **66.7** | Augment · 54.5 |
-| TypeScript · Cal.com | 71.0% / 59.5% / **64.7** | Qodo v2 · 62.7 |
-| Java · Keycloak | 65.0% / 52.0% / 57.8 | Qodo Extended v2 · 61.2 |
-| Python · Sentry | 78.9% / 45.5% / 57.7 | Cubic v2 · 68.6 |
-
 **Speed:** all 50 reviews completed, none timed out; median **106 seconds** per PR, 31 of 50 under two minutes. The two slowest (796 s and 544 s) were single slow provider responses on 400k-token investigation transcripts, not pipeline stalls. Timing covers Mira's full pipeline on an empty index and excludes snapshot preparation and judging. Competitors publish no timings for this set, so there is no speed comparison.
 
 **Method.** All 50 PRs of the pinned upstream set: ten each for Python (Sentry), Go (Grafana), TypeScript (Cal.com), Ruby (Discourse) and Java (Keycloak), 158 reference issues in the **core** profile. The set was reviewed in three runs over disjoint selections fixed by rule in advance (20 held-out PRs, the 5 development PRs, the remaining 25), one attempt per PR, each at its pinned head commit with medium reasoning, a 16,384-token output limit, shipping defaults, and no index, learned rules or history; no review or judge call was repeated. Matching and deduplication use the upstream benchmark's own prompts with **Claude Sonnet 4.5** as the judge; competitor rows are the upstream's published evaluations of the same PRs under the same judge and were not rerun. Unmatched findings count as false positives even where the reference set omits a valid issue.
