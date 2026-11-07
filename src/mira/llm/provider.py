@@ -19,6 +19,7 @@ from mira.llm.base import (
     OpenAICompatibleProvider,
     _strip_model_prefix,
 )
+from mira.llm.prompt_cache import apply_cache_control, caching_enabled
 from mira.llm.utils import _ensure_json_hint
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,11 @@ class LLMProvider(OpenAICompatibleProvider):
 
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
+
+    def _apply_prompt_caching(self, body: dict, *, conversation: bool = False) -> None:
+        """Add Anthropic cache breakpoints when this endpoint and model support them."""
+        if caching_enabled(self.config, self.profile, body["model"]):
+            apply_cache_control(body, conversation=conversation)
 
     async def _call_llm(
         self,
@@ -66,6 +72,7 @@ class LLMProvider(OpenAICompatibleProvider):
             # Copied container — caller-owned ``messages`` stay untouched.
             body["messages"] = _ensure_json_hint(messages)
         self._apply_reasoning(body)
+        self._apply_prompt_caching(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
@@ -134,6 +141,7 @@ class LLMProvider(OpenAICompatibleProvider):
             self._max_tokens_field(): self.config.max_tokens,
         }
         self._apply_reasoning(body)
+        self._apply_prompt_caching(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             started = time.monotonic()
@@ -261,6 +269,7 @@ class LLMProvider(OpenAICompatibleProvider):
             self._max_tokens_field(): self.config.max_tokens,
         }
         self._apply_reasoning(body)
+        self._apply_prompt_caching(body, conversation=True)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
