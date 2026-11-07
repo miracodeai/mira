@@ -373,3 +373,76 @@ class TestCategoryConfidenceThresholds:
         )
         comments = [_make_comment(category="bug", confidence=0.6, line=1)]
         assert filter_noise(comments, config) == []
+
+
+def _bodied(line: int, title: str, body: str, confidence: float = 0.8, category: str = "bug"):
+    c = _make_comment(line=line, title=title, category=category, confidence=confidence)
+    c.body = body
+    return c
+
+
+class TestNearLineDedup:
+    def test_same_bug_on_adjacent_lines_with_unrelated_titles_is_one_finding(self):
+        """Security pass and main pass anchor the same bug on adjacent lines of
+        one statement; the bodies describe the same code, so keep one."""
+        comments = [
+            _bodied(
+                254,
+                "Fallback find on externalCalendarId can never match",
+                "When externalCalendarId is falsy the fallback runs "
+                "event.destinationCalendar?.find((cal) => cal.externalId === externalCalendarId), "
+                "comparing each calendar's externalId to the falsy value, so selectedCalendar is undefined.",
+            ),
+            _bodied(
+                256,
+                "Dead fallback: find predicate compares externalId to itself",
+                "The fallback branch event.destinationCalendar?.find((cal) => cal.externalId === "
+                "externalCalendarId) only runs when externalCalendarId is falsy, so the predicate "
+                "can never match and selectedCalendar becomes undefined.",
+                confidence=0.85,
+            ),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
+        assert len(result) == 1
+        assert result[0].line == 256
+
+    def test_distinct_bugs_two_lines_apart_both_survive(self):
+        """Two golden Discourse issues sit on neighbouring lines: a predicate
+        with side effects and a case-sensitive lookup. Different text, keep both."""
+        comments = [
+            _bodied(
+                12,
+                "Blocked-email lookup is case-sensitive",
+                "BlockedEmail.where(email: email) compares the raw string, so User@Example.com "
+                "bypasses a block on user@example.com; normalise with downcase on both sides.",
+            ),
+            _bodied(
+                13,
+                "should_block? predicate mutates and saves on every call",
+                "The predicate increments match_count and calls save, so a read-only check "
+                "performs a write and races under concurrent validation requests.",
+            ),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
+        assert len(result) == 2
+
+    def test_short_generic_bodies_never_trigger_near_line_merge(self):
+        comments = [_make_comment(line=i, title=f"Bug {i}") for i in range(4)]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
+        assert len(result) == 4
+
+    def test_near_lines_with_different_categories_both_survive(self):
+        comments = [
+            _make_comment(line=118, title="Null deref on empty array", category="bug"),
+            _make_comment(line=119, title="Redundant optional chaining", category="clarity"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
+        assert len(result) == 2
+
+    def test_same_category_far_apart_both_survive(self):
+        comments = [
+            _make_comment(line=10, title="Null deref on empty array", category="bug"),
+            _make_comment(line=40, title="Inverted billing flag", category="bug"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.0))
+        assert len(result) == 2

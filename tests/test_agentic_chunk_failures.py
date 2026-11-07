@@ -113,7 +113,7 @@ class TestAgenticLoopCap:
         executor = _RecordingExecutor()
 
         result = await agentic_review_loop(
-            llm, [{"role": "user", "content": "review src/a.py"}], executor
+            llm, [{"role": "user", "content": "review src/a.py"}], executor, max_hops=6
         )
 
         assert isinstance(result, AgenticLoopResult)
@@ -177,7 +177,7 @@ class TestAgenticLoopCap:
         )
 
         result = await agentic_review_loop(
-            llm, [{"role": "user", "content": "review"}], _RecordingExecutor()
+            llm, [{"role": "user", "content": "review"}], _RecordingExecutor(), max_hops=6
         )
 
         assert result.raw_arguments == ""
@@ -293,6 +293,9 @@ def _engine(
 ) -> ReviewEngine:
     cfg = config or MiraConfig()
     cfg.review.agentic_tools = True
+    # The fake provider scripts six tool hops before it would submit; the
+    # failure paths under test only trigger when the cap forces a submission.
+    cfg.review.agentic_max_hops = 6
     if config is None:
         cfg.review.walkthrough = False
         cfg.review.security_pass = False

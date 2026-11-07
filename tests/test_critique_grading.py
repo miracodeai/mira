@@ -41,6 +41,9 @@ class TestKeepRule:
     def test_plausible_kept_only_when_severe_and_confident(self):
         assert _critique_keep({"evidence": "plausible"}, _comment(Severity.WARNING, confidence=0.8))
         assert _critique_keep({"evidence": "plausible"}, _comment(Severity.BLOCKER, 0.95))
+        # 0.75 sits above the 0.7 posting floor: a warning the reviewer rated
+        # there and the critic could not contradict is posted.
+        assert _critique_keep({"evidence": "plausible"}, _comment(Severity.WARNING, 0.75))
         assert not _critique_keep({"evidence": "plausible"}, _comment(Severity.WARNING, 0.7))
         assert not _critique_keep({"evidence": "plausible"}, _comment(Severity.SUGGESTION, 0.95))
 
@@ -73,13 +76,40 @@ class TestHunkEvidence:
         assert _hunk_evidence(c, []) == ""
 
     def test_long_hunks_truncated(self):
+        from mira.core.passes import _MAX_HUNK_EVIDENCE_CHARS
+
         f = FileDiff(
             path="app.py",
             change_type=FileChangeType.MODIFIED,
             hunks=[HunkInfo(1, 5, 1, 50, "x" * 5000)],
         )
         out = _hunk_evidence(_comment(line=10), [f])
-        assert len(out) < 1300
+        assert len(out) <= _MAX_HUNK_EVIDENCE_CHARS + 1
+
+    def test_window_is_centred_on_the_cited_line_not_the_hunk_head(self):
+        """A new file is one hunk; the critic must see the cited region, not
+        the first screenful, or it grades a real finding as 'code not shown'."""
+        body = "\n".join(f"+line {i}" for i in range(1, 121))
+        f = FileDiff(
+            path="app.py",
+            change_type=FileChangeType.ADDED,
+            hunks=[HunkInfo(0, 0, 1, 120, "@@ -0,0 +1,120 @@\n" + body)],
+        )
+        out = _hunk_evidence(_comment(line=80), [f])
+        assert "+line 80" in out
+        assert "+line 60" in out and "+line 100" in out
+        assert "+line 1\n" not in out and "+line 120" not in out
+        assert "earlier line(s)" in out and "later line(s)" in out
+
+    def test_removed_lines_stay_inside_the_window(self):
+        content = "@@ -1,4 +1,4 @@\n a\n-old guard\n+new code\n b"
+        f = FileDiff(
+            path="app.py",
+            change_type=FileChangeType.MODIFIED,
+            hunks=[HunkInfo(1, 4, 1, 4, content)],
+        )
+        out = _hunk_evidence(_comment(line=2), [f])
+        assert "-old guard" in out and "+new code" in out
 
 
 class TestEvidenceGradedCritique:
@@ -247,3 +277,28 @@ class TestEvidenceGradedCritique:
 
         assert kept == []
         assert audit[0]["reason"].startswith("no-verdict:")
+
+
+class TestEvidenceWindowEdges:
+    def test_range_spanning_two_hunks_keeps_both(self):
+        f = FileDiff(
+            path="app.py",
+            change_type=FileChangeType.MODIFIED,
+            hunks=[
+                HunkInfo(1, 3, 1, 3, "@@ -1,3 +1,3 @@\n+one\n+two\n+three"),
+                HunkInfo(20, 3, 20, 3, "@@ -20,3 +20,3 @@\n+twenty\n+twenty-one\n+twenty-two"),
+            ],
+        )
+        c = _comment(line=2)
+        c.end_line = 21
+        out = _hunk_evidence(c, [f])
+        assert "+two" in out and "+twenty-one" in out
+
+    def test_no_newline_marker_does_not_shift_numbering(self):
+        body = "\n".join(f"+line {i}" for i in range(1, 60))
+        content = "@@ -0,0 +1,59 @@\n" + body + "\n\\ No newline at end of file"
+        f = FileDiff(
+            path="app.py", change_type=FileChangeType.ADDED, hunks=[HunkInfo(0, 0, 1, 59, content)]
+        )
+        out = _hunk_evidence(_comment(line=59), [f])
+        assert "+line 59" in out

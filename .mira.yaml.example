@@ -108,6 +108,16 @@ review:
   # inline). With it shown and nothing posted, the verdict reads
   # "No confirmed issues".
   show_unverified_findings: false
+  # Investigation turns the reviewer gets per chunk with its read_file /
+  # grep_repo tools before it is asked to submit. The submission is always
+  # forced over the full investigation transcript when the budget runs out,
+  # so a lower value trades depth for speed, never the review itself. 1-30.
+  agentic_max_hops: 10
+  # After the reviewer submits, ask it once more over the same transcript for
+  # the concrete defects it analysed but withheld as minor or uncertain, and
+  # append them. One extra (prompt-cached) model call per chunk: more recall,
+  # a few more unverified comments, ~25 s slower. Off by default.
+  second_look: false
   # Generate a PR walkthrough comment (top-level summary)
   walkthrough: true
   # Include a Mermaid sequence diagram in the walkthrough

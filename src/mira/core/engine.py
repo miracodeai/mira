@@ -1664,8 +1664,15 @@ class ReviewEngine:
                         executor = AgenticToolExecutor(
                             source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
                             repo_tree=list(self._agentic_repo_tree),
+                            changed_paths=[f.path for f in filtered],
                         )
-                        loop_result = await agentic_review_loop(self.llm, messages, executor)
+                        loop_result = await agentic_review_loop(
+                            self.llm,
+                            messages,
+                            executor,
+                            max_hops=self.config.review.agentic_max_hops,
+                            second_look=self.config.review.second_look,
+                        )
                         if isinstance(loop_result, str):
                             raw_response = loop_result
                         else:
@@ -1832,6 +1839,7 @@ class ReviewEngine:
                 return AgenticToolExecutor(
                     source_fetcher=self._agentic_source_fetcher,
                     repo_tree=list(self._agentic_repo_tree),
+                    changed_paths=[f.path for f in filtered],
                 )
 
         security_task = _asyncio.create_task(
@@ -1842,6 +1850,7 @@ class ReviewEngine:
                 pr_title,
                 security_llm=self.security_llm,
                 agentic_executor_factory=_security_executor_factory,
+                max_hops=self.config.review.agentic_max_hops,
             )
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])

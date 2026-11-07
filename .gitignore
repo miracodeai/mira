@@ -64,3 +64,20 @@ ui/mira/.vite/
 
 # Claude Code workspace artifacts
 .claude/
+
+# Local review experiments and captured third-party PR data (benchmark
+# diagnostics, replay fixtures). Produced by local runs, never released.
+tests/benchmarks/reports/
+tests/fixtures/review_identity/
+tests/fixtures/review_reservation/
+tests/fixtures/review_verification/
+tests/test_eval_gate.py
+tests/test_identity_regressions.py
+tests/test_reservation_control.py
+scripts/eval_gate.py
+scripts/eval_identity.py
+scripts/eval_verification.py
+scripts/evaluate_snapshots.py
+scripts/replay_review.py
+scripts/replay_verification.py
+scripts/score_snapshots.py

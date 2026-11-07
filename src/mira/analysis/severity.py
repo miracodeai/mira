@@ -100,3 +100,18 @@ def _is_style_only(text: str) -> bool:
     return any(kw in text for kw in _STYLE_KEYWORDS) and not any(
         kw in text for kw in ["bug", "error", "crash", "security", "vulnerability"]
     )
+
+
+def mentions_security(text: str) -> bool:
+    """Whether free text describes a security issue (injection, XSS, secrets...).
+
+    Used by the security pass to re-label a finding the model filed under
+    `bug` by mistake, while letting genuinely non-security defects it
+    noticed keep their own category.
+    """
+    lowered = text.lower()
+    return (
+        any(kw in lowered for kw in _EXPLOITABLE_KEYWORDS)
+        or any(p.search(lowered) for p in _EXPLOITABLE_WORD_PATTERNS)
+        or any(kw in lowered for kw in _SECURITY_SMELL_KEYWORDS)
+    )
