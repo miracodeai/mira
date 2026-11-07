@@ -6,8 +6,10 @@ judge so arms (for example `main` and a branch) are compared on identical
 inputs under one judge cache. Reviews never see golden answers; scoring
 happens afterwards.
 
-    # this checkout only
-    uv run python scripts/run_benchmark_sample.py --name nov06 --arm candidate=.
+    # this checkout only (paths may also come from MIRA_BENCHMARK_INPUTS,
+    # MIRA_BENCHMARK_CHECKOUT and MIRA_BENCHMARK_DEPS)
+    uv run python scripts/run_benchmark_sample.py --name nov06 --arm candidate=. \
+        --inputs /path/to/inputs --benchmark /path/to/code-review-benchmark
 
     # this checkout against a main worktree, both models, one key prompt
     uv run python scripts/run_benchmark_sample.py --name nov06 \
@@ -16,9 +18,9 @@ happens afterwards.
     # re-score an existing run directory
     uv run python scripts/run_benchmark_sample.py --name nov06 --score-only
 
-Requires the local benchmark inputs prepared by earlier runs (pinned PR
-snapshots, the upstream benchmark checkout and its dependencies — see the
-`--inputs`, `--benchmark` and `--dependency-path` defaults) plus the tracked
+Requires an inputs directory from `scripts/prepare_benchmark_inputs.py`, the
+upstream benchmark checkout at the pinned commit and (for scoring) its
+Python dependencies on a path, plus the tracked
 `scripts/replay_snapshot_review.py` / `scripts/score_snapshot_runs.py`
 harness. The OpenRouter credential is read from `OPENROUTER_API_KEY` or
 prompted for (hidden); it reaches subprocesses through the environment only.
@@ -44,11 +46,10 @@ MODELS = {
     "deepseek": "deepseek/deepseek-v4.1-flash-1017",
     "glm": "z-ai/glm-5.3-flash",
 }
-DEFAULT_INPUTS = Path("/tmp/mira-readme-benchmark-20261105/inputs")
-DEFAULT_BENCHMARK = Path(
-    "/tmp/mira-readme-benchmark-20261105/code-review-benchmark-e616e849755441da38f18bf3adba2c9583b03803"
-)
-DEFAULT_DEPS = Path("/tmp/mira-readme-benchmark-20261105/deps")
+# Locations are machine-specific, so they come from flags or these variables.
+ENV_INPUTS = "MIRA_BENCHMARK_INPUTS"  # directory from prepare_benchmark_inputs.py
+ENV_BENCHMARK = "MIRA_BENCHMARK_CHECKOUT"  # pinned upstream code-review-benchmark checkout
+ENV_DEPS = "MIRA_BENCHMARK_DEPS"  # optional: the upstream's Python dependencies
 
 
 def _freeze_source(source_root: Path, target: Path) -> dict[str, str]:
@@ -239,9 +240,24 @@ def main() -> int:
     parser.add_argument(
         "--output", type=Path, default=None, help="default: tests/benchmarks/runs/five-pr-<name>"
     )
-    parser.add_argument("--inputs", type=Path, default=DEFAULT_INPUTS)
-    parser.add_argument("--benchmark", type=Path, default=DEFAULT_BENCHMARK)
-    parser.add_argument("--dependency-path", type=Path, default=DEFAULT_DEPS)
+    parser.add_argument(
+        "--inputs",
+        type=Path,
+        default=os.environ.get(ENV_INPUTS),
+        help=f"prepared inputs directory (default: ${ENV_INPUTS})",
+    )
+    parser.add_argument(
+        "--benchmark",
+        type=Path,
+        default=os.environ.get(ENV_BENCHMARK),
+        help=f"pinned upstream checkout (default: ${ENV_BENCHMARK})",
+    )
+    parser.add_argument(
+        "--dependency-path",
+        type=Path,
+        default=os.environ.get(ENV_DEPS),
+        help=f"upstream dependencies for scoring (default: ${ENV_DEPS}, optional)",
+    )
     parser.add_argument("--reasoning-effort", default="medium")
     parser.add_argument("--max-tokens", type=int, default=16384)
     parser.add_argument("--timeout", type=int, default=420, help="seconds per review")
@@ -257,6 +273,10 @@ def main() -> int:
     unknown = [a for a in aliases if a not in MODELS]
     if unknown:
         parser.error(f"unknown model alias(es): {unknown}")
+    if args.inputs is None:
+        parser.error(f"--inputs is required (or set {ENV_INPUTS})")
+    if args.benchmark is None and not args.no_score:
+        parser.error(f"--benchmark is required for scoring (or set {ENV_BENCHMARK})")
     out_root = args.output or (REPO / "tests" / "benchmarks" / "runs" / f"five-pr-{args.name}")
 
     env = dict(os.environ, PYTHONHASHSEED="0")
@@ -265,14 +285,16 @@ def main() -> int:
     if not env["OPENROUTER_API_KEY"]:
         parser.error("an OpenRouter key is required")
 
-    for required in (
+    required_paths = [
         args.inputs / "selection.json",
-        args.benchmark / "offline",
         REPO / "scripts" / "replay_snapshot_review.py",
         REPO / "scripts" / "score_snapshot_runs.py",
-    ):
-        if not required.exists():
-            parser.error(f"missing {required}")
+    ]
+    if args.benchmark is not None:
+        required_paths.append(args.benchmark / "offline")
+    for path in required_paths:
+        if not path.exists():
+            parser.error(f"missing {path}")
     selection = json.loads((args.inputs / "selection.json").read_text())
 
     statuses: list[dict] = []
