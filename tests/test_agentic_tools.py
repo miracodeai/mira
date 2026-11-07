@@ -188,7 +188,9 @@ class TestAgenticReasoningReplay:
             llm, [{"role": "user", "content": "review"}], _Executor()
         )
 
-        assert result == '{"comments": []}'
+        assert result.raw_arguments == '{"comments": []}'
+        assert result.hops == 2
+        assert result.conversation[0]["content"] == "review"
         second_turn = llm.calls[1]
         assistant = second_turn[1]
         assert assistant["reasoning_content"] == "I need the file."
@@ -320,8 +322,10 @@ class _SubmitCapableLLM:
             raise RuntimeError("provider down")
         return self._hops.pop(0)
 
-    async def complete_with_tools(self, messages, tools, temperature=None):
-        self.forced_calls.append({"messages": [dict(m) for m in messages], "tools": tools})
+    async def complete_with_tools(self, messages, tools, temperature=None, force_tool=None):
+        self.forced_calls.append(
+            {"messages": [dict(m) for m in messages], "tools": tools, "force_tool": force_tool}
+        )
         return self._forced
 
 
@@ -361,11 +365,12 @@ class TestForcedSubmission:
             ex,
             max_hops=3,
         )
-        assert out == '{"comments": [{"forced": true}]}'
+        assert out.raw_arguments == '{"comments": [{"forced": true}]}'
+        assert out.hit_hop_cap is True and out.hops == 3
         assert llm.agentic_calls == 3
         assert ex.calls == ["read_file"] * 3
         forced = llm.forced_calls[0]
-        assert [t["function"]["name"] for t in forced["tools"]] == ["submit_review"]
+        assert forced["force_tool"] == "submit_review"
         roles = [m["role"] for m in forced["messages"]]
         assert roles.count("tool") == 3
         assert roles[-1] == "user" and "submit_review" in forced["messages"][-1]["content"]
@@ -382,7 +387,7 @@ class TestForcedSubmission:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], _RecordingExecutor()
         )
-        assert out == '{"comments": [{"forced": true}]}'
+        assert out.raw_arguments == '{"comments": [{"forced": true}]}'
         msgs = llm.forced_calls[0]["messages"]
         kept = [
             m
@@ -408,7 +413,8 @@ class TestForcedSubmission:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], _RecordingExecutor()
         )
-        assert out == '{"comments": []}'
+        assert out.raw_arguments == '{"comments": []}'
+        assert out.error is None
         assert llm.forced_calls == []
 
     @pytest.mark.asyncio
@@ -417,27 +423,30 @@ class TestForcedSubmission:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], _RecordingExecutor()
         )
-        assert out == '{"comments": [{"forced": true}]}'
+        assert out.raw_arguments == '{"comments": [{"forced": true}]}'
+        assert out.error is None
         assert len(llm.forced_calls) == 1
 
     @pytest.mark.asyncio
     async def test_provider_failure_before_any_tool_result_bails(self):
-        """Nothing gathered yet → "" so the caller's single-shot path runs."""
+        """Nothing gathered yet → no submission and an error, so the caller falls back."""
         llm = _SubmitCapableLLM([])
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], _RecordingExecutor()
         )
-        assert out == ""
+        assert out.raw_arguments == ""
+        assert out.error and "provider down" in out.error
         assert llm.forced_calls == []
 
     @pytest.mark.asyncio
     async def test_forced_submit_failure_returns_empty(self):
         class _Broken(_SubmitCapableLLM):
-            async def complete_with_tools(self, messages, tools, temperature=None):
+            async def complete_with_tools(self, messages, tools, temperature=None, force_tool=None):
                 raise RuntimeError("rejected")
 
         llm = _Broken([_tool_hop()], forced="")
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], _RecordingExecutor(), max_hops=1
         )
-        assert out == ""
+        assert out.raw_arguments == ""
+        assert out.error and "rejected" in out.error

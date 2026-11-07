@@ -90,7 +90,7 @@ class _LLM:
             raise RuntimeError("provider down")
         return self._hops.pop(0)
 
-    async def complete_with_tools(self, messages, tools, temperature=None):
+    async def complete_with_tools(self, messages, tools, temperature=None, force_tool=None):
         self.tool_calls.append([dict(m) for m in messages])
         last = messages[-1]
         if last.get("role") == "user" and last["content"] == _SECOND_LOOK_PROMPT:
@@ -114,7 +114,7 @@ class TestSecondLookInLoop:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], ex, second_look=True
         )
-        merged = json.loads(out)
+        merged = json.loads(out.raw_arguments)
         assert [c["title"] for c in merged["comments"]] == ["first", "withheld"]
         # One extra call, over the full transcript: the tool result, the
         # submitting assistant turn (with its reasoning), a receipt, the prompt.
@@ -131,7 +131,7 @@ class TestSecondLookInLoop:
     async def test_disabled_second_look_returns_submission_unchanged(self):
         llm = _LLM([_submit_hop()])
         out = await agentic_review_loop(llm, [{"role": "user", "content": "diff"}], _Executor())
-        assert out == FIRST
+        assert out.raw_arguments == FIRST
         assert llm.tool_calls == []
 
     @pytest.mark.asyncio
@@ -141,7 +141,7 @@ class TestSecondLookInLoop:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], ex, max_hops=2, second_look=True
         )
-        merged = json.loads(out)
+        merged = json.loads(out.raw_arguments)
         assert [c["title"] for c in merged["comments"]] == ["first", "withheld"]
         assert len(llm.tool_calls) == 2  # forced submit, then the second look
         second = llm.tool_calls[1]
@@ -151,7 +151,7 @@ class TestSecondLookInLoop:
     @pytest.mark.asyncio
     async def test_second_look_failure_keeps_first_submission(self):
         class _Broken(_LLM):
-            async def complete_with_tools(self, messages, tools, temperature=None):
+            async def complete_with_tools(self, messages, tools, temperature=None, force_tool=None):
                 raise RuntimeError("rate limited")
 
         llm = _Broken([_submit_hop()])
@@ -159,7 +159,7 @@ class TestSecondLookInLoop:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], ex, second_look=True
         )
-        assert out == FIRST
+        assert out.raw_arguments == FIRST
         assert ex.call_log[-1] == {"tool": "second_look", "arg": "+0"}
 
     @pytest.mark.asyncio
@@ -168,7 +168,7 @@ class TestSecondLookInLoop:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], _Executor(), second_look=True
         )
-        assert out == FIRST
+        assert out.raw_arguments == FIRST
 
 
 def _diff_file(path: str = "a.py") -> FileDiff:
@@ -214,11 +214,12 @@ class TestSecurityHandoff:
         )
         llm = MagicMock()
         llm.complete_with_tools = AsyncMock(return_value=raw)
-        out = await _security_scan_once(llm, llm, [_diff_file()], "title")
-        by_title = {c.title: c for c in out}
+        outcome = await _security_scan_once(llm, llm, [_diff_file()], "title")
+        assert outcome.failure is None
+        by_title = {c.title: c for c in outcome.comments}
         assert by_title["nil request dereferenced"].category == "bug"
         assert by_title["origin check by substring"].category == "security"
-        assert all(c.source_pass == "security" for c in out)
+        assert all(c.source_pass == "security" for c in outcome.comments)
 
 
 class TestSiblingToolCalls:
@@ -248,7 +249,10 @@ class TestSiblingToolCalls:
         out = await agentic_review_loop(
             llm, [{"role": "user", "content": "diff"}], ex, second_look=True
         )
-        assert [c["title"] for c in json.loads(out)["comments"]] == ["first", "withheld"]
+        assert [c["title"] for c in json.loads(out.raw_arguments)["comments"]] == [
+            "first",
+            "withheld",
+        ]
         msgs = llm.tool_calls[0]
         tool_ids = [m["tool_call_id"] for m in msgs if m["role"] == "tool"]
         assert tool_ids == ["g1", "s1"]
