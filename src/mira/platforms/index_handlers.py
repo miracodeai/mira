@@ -6,8 +6,8 @@ import logging
 from typing import Any
 
 from mira.config import load_config
-from mira.index.indexer import index_diff, index_repo
-from mira.index.store import IndexStore
+from mira.index.indexer import IndexingRecoveryPending, index_diff, index_repo
+from mira.index.store import IndexingSuperseded, IndexStore
 from mira.llm import create_llm
 
 logger = logging.getLogger(__name__)
@@ -41,57 +41,65 @@ async def run_incremental_index(
     from mira.dashboard.models_config import llm_config_for
 
     llm = create_llm(llm_config_for("indexing", config.llm))
-    store = IndexStore.open(owner, repo, platform=platform)
+    store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
 
-    total_affected = len(changed_paths) + len(removed_paths)
-    if total_affected > _INCREMENTAL_FILE_CAP:
-        logger.info(
-            "Push to %s/%s touched %d files (cap=%d), running full re-index",
-            owner,
-            repo,
-            total_affected,
-            _INCREMENTAL_FILE_CAP,
-        )
-        count = await index_repo(
-            owner=owner,
-            repo=repo,
-            config=config,
-            store=store,
-            llm=llm,
-            branch=default_branch,
-            fetcher=fetcher,
-        )
-    else:
-        count = await index_diff(
-            owner=owner,
-            repo=repo,
-            config=config,
-            store=store,
-            llm=llm,
-            changed_paths=changed_paths,
-            removed_paths=removed_paths,
-            branch=default_branch,
-            fetcher=fetcher,
-        )
-
-    # ``count`` is the number of files re-indexed *this run*, not the total
-    # in the store. For incremental runs that's a small subset (e.g. 3 of 120),
-    # so reading the store's actual path count keeps the repos-list file count
-    # in sync with the detail page.
-    total_files = len(store.all_paths())
-    store.close()
-
-    if count > 0:
-        try:
-            app_db.set_repo_status(
+    try:
+        run = store.claim_index_run()
+        total_affected = len(changed_paths) + len(removed_paths)
+        if total_affected > _INCREMENTAL_FILE_CAP:
+            logger.info(
+                "Push to %s/%s touched %d files (cap=%d), running full re-index",
                 owner,
                 repo,
-                "ready",
-                files_indexed=total_files,
-                bump_last_indexed=True,
+                total_affected,
+                _INCREMENTAL_FILE_CAP,
+            )
+            count = await index_repo(
+                owner=owner,
+                repo=repo,
+                config=config,
+                store=store,
+                llm=llm,
+                branch=default_branch,
+                fetcher=fetcher,
+                run=run,
                 platform=platform,
             )
+        else:
+            count = await index_diff(
+                owner=owner,
+                repo=repo,
+                config=config,
+                store=store,
+                llm=llm,
+                changed_paths=changed_paths,
+                removed_paths=removed_paths,
+                branch=default_branch,
+                fetcher=fetcher,
+                run=run,
+                platform=platform,
+            )
+
+        # A push can supersede a completed manual run before that run gets
+        # to publish ready. Refresh status even when the push indexes no files.
+        try:
+            with store.index_write(run):
+                app_db.set_repo_status(
+                    owner,
+                    repo,
+                    "ready",
+                    files_indexed=len(store.all_paths()),
+                    bump_last_indexed=count > 0 or run.needs_reconciliation,
+                    platform=platform,
+                )
+        except IndexingSuperseded:
+            raise
         except Exception as exc:
             logger.warning("Failed to update repo status after push: %s", exc)
-
-    logger.info("Incremental index for %s/%s: %d files", owner, repo, count)
+        logger.info("Incremental index for %s/%s: %d files", owner, repo, count)
+    except IndexingSuperseded:
+        logger.info("Indexing superseded for %s/%s", owner, repo)
+    except IndexingRecoveryPending as exc:
+        logger.warning("Index recovery still pending for %s/%s: %s", owner, repo, exc)
+    finally:
+        store.close()

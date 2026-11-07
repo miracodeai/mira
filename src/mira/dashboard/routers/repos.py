@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import nullcontext
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, Request
@@ -31,7 +32,7 @@ from mira.dashboard.api import (
     logger,
     router,
 )
-from mira.index.store import IndexStore
+from mira.index.store import IndexingSuperseded, IndexStore
 
 
 @router.get("/api/repos", response_model=list[RepoListItem])
@@ -452,22 +453,16 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
     from mira.llm import create_llm
 
     async def _do_index() -> None:
-        count = 0
         store = None
+        run = None
+        job = tracker.start(full_name)
         try:
             from mira.dashboard.models_config import llm_config_for
 
-            tracker.start(full_name)
             config = load_config()
-            # Use the configured indexing model — without this swap we'd
-            # silently fall back to the review model, which is slower and
-            # more expensive per token.
             llm = create_llm(llm_config_for("indexing", config.llm))
-            store = IndexStore.open(owner, repo, platform=platform)
-            if full:
-                # Wipe existing index
-                for path in list(store.all_paths()):
-                    store.remove_paths([path])
+            store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
+            run = store.claim_index_run()
             count = await index_repo(
                 owner=owner,
                 repo=repo,
@@ -476,40 +471,48 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
                 store=store,
                 llm=llm,
                 full=full,
-                cancel_check=lambda: tracker.is_cancel_requested(full_name),
-            )
-            # Real indexing run finished — bump last_indexed_at so the
-            # dashboard's "Indexed N ago" reflects this completion.
-            # `count` is files re-indexed *this run* (not the store total), so
-            # read the store for the true total to keep the repos list in sync.
-            total_files = len(store.all_paths())
-            _api._app_db.set_repo_status(
-                owner,
-                repo,
-                "ready",
-                files_indexed=total_files,
-                bump_last_indexed=True,
+                reset=full,
+                cancel_check=lambda: job.cancel_requested,
+                run=run,
                 platform=platform,
             )
-            tracker.complete(full_name, count)
+            with store.index_write(run):
+                _api._app_db.set_repo_status(
+                    owner,
+                    repo,
+                    "ready",
+                    files_indexed=len(store.all_paths()),
+                    bump_last_indexed=True,
+                    platform=platform,
+                )
+                tracker.complete(full_name, count, expected=job)
             logger.info(
                 "Index %s for %s: %d files", "rebuild" if full else "update", full_name, count
             )
             from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
 
             await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
-        except IndexingCancelled as cancelled:
-            tracker.cancel(full_name, cancelled.files_indexed)
-            logger.info(
-                "Indexing cancelled for %s after %d files", full_name, cancelled.files_indexed
-            )
-        except EmptyRepoError as empty:
-            _api._app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
-            tracker.complete(full_name, 0)
-            logger.info("Index skipped for %s — empty repository", full_name)
+        except IndexingSuperseded:
+            tracker.discard(job)
+            logger.info("Indexing superseded for %s", full_name)
         except Exception as exc:
-            tracker.fail(full_name, str(exc))
-            logger.exception("Indexing failed for %s", full_name)
+            try:
+                with store.index_write(run) if store is not None and run else nullcontext():
+                    if isinstance(exc, IndexingCancelled):
+                        tracker.cancel(full_name, exc.files_indexed, expected=job)
+                        logger.info(
+                            "Indexing cancelled for %s after %d files", full_name, exc.files_indexed
+                        )
+                    elif isinstance(exc, EmptyRepoError):
+                        _api._app_db.set_repo_status(
+                            owner, repo, "empty", error=str(exc), platform=platform
+                        )
+                        tracker.complete(full_name, 0, expected=job)
+                    else:
+                        tracker.fail(full_name, str(exc), expected=job)
+                        logger.exception("Indexing failed for %s", full_name)
+            except IndexingSuperseded:
+                tracker.discard(job)
         finally:
             if store is not None:
                 store.close()

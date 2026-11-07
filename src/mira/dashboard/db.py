@@ -659,6 +659,13 @@ class AppDatabase:
     def _pg_cursor(self) -> Iterator[Any]:
         """Yield a Postgres cursor that reconnects once on stale-connection errors."""
         from mira.db.postgres import ReconnectingCursor, connect, reconnect
+        from mira.index.pg_store import index_write_connection
+
+        scoped = index_write_connection(self._url)
+        if scoped is not None:
+            with scoped.cursor() as cur:
+                yield cur
+            return
 
         def refresh() -> Any:
             with self._pg_lock:
