@@ -47,24 +47,6 @@ def expand_context(files: list[FileDiff], context_lines: int = 3) -> list[FileDi
     return result
 
 
-def extract_hunk_lines(file_diff: FileDiff) -> str:
-    """Return the raw content of all hunks for a file as a single string.
-
-    Used for validating that LLM-quoted ``existing_code`` actually appears in the diff.
-    Strips diff markers (+/-/space prefix) so clean code from the LLM can match.
-    """
-    lines: list[str] = []
-    for hunk in file_diff.hunks:
-        for line in hunk.content.splitlines():
-            if line.startswith("@@"):
-                continue
-            if line and line[0] in ("+", "-", " "):
-                lines.append(line[1:])
-            else:
-                lines.append(line)
-    return "\n".join(lines)
-
-
 def build_file_context_string(file_diff: FileDiff) -> str:
     """Format a file diff as a markdown string for the LLM prompt."""
     parts: list[str] = []

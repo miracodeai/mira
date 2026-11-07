@@ -79,3 +79,36 @@ class TestFileFilter:
     def test_empty_input(self):
         result = filter_files([], FilterConfig())
         assert result == []
+
+
+class TestGitlinkFilter:
+    def test_excludes_submodule_pointer(self):
+        """A `mode 160000` gitlink carries no source — nothing to review."""
+        hunk = HunkInfo(
+            0, 0, 1, 1, "@@ -0,0 +1 @@\n+Subproject commit a5d290951def84afdcc4c88d2f1f20023fc36e2a"
+        )
+        files = [
+            _make_file(
+                "vendor-repo", FileChangeType.ADDED, hunks=[hunk], added_lines=1, deleted_lines=0
+            ),
+            _make_file("src/app.py"),
+        ]
+        result = filter_files(files, FilterConfig())
+        assert [f.path for f in result] == ["src/app.py"]
+
+    def test_submodule_bump_is_excluded(self):
+        hunk = HunkInfo(
+            1,
+            1,
+            1,
+            1,
+            "@@ -1 +1 @@\n-Subproject commit 1111111111111111111111111111111111111111"
+            "\n+Subproject commit 2222222222222222222222222222222222222222",
+        )
+        files = [_make_file("deps/lib", hunks=[hunk], added_lines=1, deleted_lines=1)]
+        assert filter_files(files, FilterConfig()) == []
+
+    def test_real_file_mentioning_subproject_is_kept(self):
+        hunk = HunkInfo(1, 2, 1, 2, "@@ -1,2 +1,2 @@\n+# Subproject commit notes\n+x = 1")
+        files = [_make_file("notes.py", hunks=[hunk])]
+        assert len(filter_files(files, FilterConfig())) == 1

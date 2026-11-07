@@ -14,7 +14,7 @@ from typing import ClassVar
 
 import httpx
 
-from mira.exceptions import LLMError
+from mira.exceptions import LLMError, NonRetriableLLMError, StructuredOutputError
 from mira.llm.base import (
     OpenAICompatibleProvider,
     _strip_model_prefix,
@@ -84,7 +84,29 @@ class LLMProvider(OpenAICompatibleProvider):
             data = resp.json()
 
         self._account_usage(data)
-        return data["choices"][0]["message"].get("content") or ""
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message.get("content") or ""
+        if not content.strip():
+            refusal = message.get("refusal")
+            if (isinstance(refusal, str) and refusal) or choice.get(
+                "finish_reason"
+            ) == "content_filter":
+                raise NonRetriableLLMError("completion_blocked", protocol="chat")
+            finish_reason = choice.get("finish_reason")
+            if finish_reason not in (
+                "stop",
+                "length",
+                "tool_calls",
+                "function_call",
+                "content_filter",
+            ):
+                finish_reason = "other"
+            raise LLMError(
+                "empty_response",
+                detail=f"protocol=chat status={resp.status_code} finish_reason={finish_reason} content_len={len(content)}",
+            )
+        return content
 
     async def _call_llm_with_tools(
         self,
@@ -92,18 +114,21 @@ class LLMProvider(OpenAICompatibleProvider):
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
         """Make an LLM call with tool/function calling and retries.
 
         The LLM returns structured data by 'calling' a tool. We extract the
-        tool arguments as the JSON response.
+        tool arguments as the JSON response. ``force_tool`` forces a named
+        tool and rejects prose with ``StructuredOutputError``.
         """
         api_model = _strip_model_prefix(model, self.config.base_url)
         if not tools:
             raise LLMError("no_tools")
+        forced_tool_name = force_tool or tools[0]["function"]["name"]
         forced_choice: dict | str = {
             "type": "function",
-            "function": {"name": tools[0]["function"]["name"]},
+            "function": {"name": forced_tool_name},
         }
         body: dict = {
             "model": api_model,
@@ -176,9 +201,26 @@ class LLMProvider(OpenAICompatibleProvider):
 
         choice = data["choices"][0]
         message = choice["message"]
-        tool_calls = message.get("tool_calls")
+        tool_calls = message.get("tool_calls") or []
 
-        if tool_calls and len(tool_calls) > 0:
+        if force_tool:
+            matching = [
+                call
+                for call in tool_calls
+                if (call.get("function") or {}).get("name") == force_tool
+            ]
+            if matching:
+                return (matching[0].get("function") or {}).get("arguments") or ""
+            content = message.get("content") or ""
+            excerpt = " ".join(content.split())[:300]
+            raise StructuredOutputError(
+                "structured_output",
+                model=api_model,
+                tool=force_tool,
+                excerpt=excerpt or "(empty response)",
+            )
+
+        if tool_calls:
             return tool_calls[0]["function"]["arguments"]
 
         # Fallback: if the model returned content instead of a tool call,
@@ -239,4 +281,8 @@ class LLMProvider(OpenAICompatibleProvider):
             data = resp.json()
 
         self._account_usage(data)
-        return data["choices"][0]["message"]
+        choice = data["choices"][0]
+        message = dict(choice["message"])
+        if choice.get("finish_reason"):
+            message["finish_reason"] = choice["finish_reason"]
+        return message

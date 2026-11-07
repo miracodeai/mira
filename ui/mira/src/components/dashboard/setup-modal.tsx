@@ -118,6 +118,8 @@ export function SetupModal({
       "To change which repos Mira can access, update your Forgejo access token scopes.",
     gitlab:
       "To change which repos Mira can access, update your GitLab access token scopes.",
+    bitbucket:
+      "To change which repos Mira can access, update your Bitbucket access token's workspace, project or repository.",
   } as const
   const platform = repos[0]?.platform ?? "github"
   const helpText =

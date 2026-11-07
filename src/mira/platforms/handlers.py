@@ -83,7 +83,7 @@ def _help_message(bot_name: str) -> str:
         f"| Command | What it does |\n"
         f"|---|---|\n"
         f"| `@{bot_name} review` | Re-run the full review on this PR. Useful after force-pushes or when you want a fresh pass. |\n"
-        f"| `@{bot_name} review-rest` | Review files that were skipped on the first pass because the PR was too large. Aliases: `rest`, `continue`. |\n"
+        f"| `@{bot_name} review-rest` | Review files that were skipped or not reviewed because a chunk failed. Aliases: `rest`, `continue`. |\n"
         f"| `@{bot_name} pause` | Pause Mira on this PR. No more reviews until you resume. Adds a `mira-paused` label. |\n"
         f"| `@{bot_name} resume` | Resume Mira on a paused PR and re-review the latest diff. |\n"
         f"| `@{bot_name} help` | Show this message. Aliases: `?`, `commands`. |\n"
@@ -194,7 +194,7 @@ async def run_pr_command(
     bot_name: str,
     platform: str = "github",
     pr_title: str = "",
-    user_id: int | None = None,
+    user_id: int | str | None = None,
 ) -> None:
     """Platform-neutral handler for an @-mention command on a PR/MR.
 
@@ -318,7 +318,7 @@ async def run_thread_reply(
     actor: str = "",
     bot_name: str = "miracodeai",
     platform: str = "github",
-    user_id: int | None = None,
+    user_id: int | str | None = None,
 ) -> None:
     """Platform-neutral free-form thread reply with intent classification.
 

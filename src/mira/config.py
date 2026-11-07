@@ -291,6 +291,21 @@ class ReviewConfig(BaseModel):
     # thorough).
     agentic_tools: bool = True
 
+    # Investigation turns the reviewer gets per chunk before it is asked to
+    # submit. Each turn is one model call that may issue several tool calls.
+    # The submission is always forced over the full investigation transcript
+    # when the budget runs out, so a low cap costs depth, never the review.
+    agentic_max_hops: int = Field(default=10, ge=1, le=30)
+
+    # After the reviewer submits, ask it once more — over the same transcript —
+    # for the concrete defects it analysed but withheld as minor or uncertain,
+    # and append them. One extra model call per chunk (prompt-cached by most
+    # providers). On the five-PR sample it raised recall (50% → 56-59% pooled
+    # over two flash models) at a precision cost that left F1 flat, and added
+    # ~25 s per DeepSeek review, so it is the opt-in "thorough" setting, like
+    # ensemble_runs, rather than the default.
+    second_look: bool = False
+
     # Whether the JIT cross-file resolver should attempt Java + Go imports.
     # Resolution for those languages is heuristic (we can't see the build
     # system), and a wrong-file pick pollutes the prompt with off-topic

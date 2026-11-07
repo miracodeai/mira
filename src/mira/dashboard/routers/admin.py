@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from mira.dashboard import api as _api
 from mira.dashboard.api import (
     _ALLOWED_OVERRIDE_SECTIONS,
+    BitbucketRepoRegister,
     ForgejoRepoRegister,
     GitLabRepoRegister,
     GlobalSettingsResponse,
@@ -147,6 +148,38 @@ async def register_forgejo_repo(body: ForgejoRepoRegister, request: Request) -> 
     """
     _require_admin(request)
     return await _register_and_index_repo("forgejo", "MIRA_FORGEJO_TOKEN", body)
+
+
+@router.post("/api/bitbucket/sync")
+async def sync_bitbucket_repos(request: Request) -> dict:
+    """Discover every Bitbucket repo the configured credential can access (all
+    of ``MIRA_BITBUCKET_WORKSPACE`` when set) and register them (status
+    pending), so they appear ready-to-index without waiting for a webhook.
+    Idempotent."""
+    _require_admin(request)
+    from mira.platforms.bitbucket.auth import BitbucketTokenAuth
+    from mira.platforms.bitbucket.webhook import backfill_bitbucket_repos
+
+    return await _sync_platform_repos(
+        "bitbucket",
+        "MIRA_BITBUCKET_TOKEN",
+        BitbucketTokenAuth,
+        backfill_bitbucket_repos,
+        "https://api.bitbucket.org/2.0",
+        "MIRA_BITBUCKET_API_URL",
+    )
+
+
+@router.post("/api/bitbucket/repos")
+async def register_bitbucket_repo(body: BitbucketRepoRegister, request: Request) -> dict:
+    """Register a Bitbucket repo and index it in the background.
+
+    The credential comes from MIRA_BITBUCKET_TOKEN; add a repository (or
+    workspace) webhook pointing at ``/bitbucket/webhook`` to get auto-review
+    on new PRs.
+    """
+    _require_admin(request)
+    return await _register_and_index_repo("bitbucket", "MIRA_BITBUCKET_TOKEN", body)
 
 
 @router.get("/api/settings/models", response_model=ModelsResponse)
