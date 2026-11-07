@@ -1,7 +1,7 @@
 """Score completed snapshot runs with a pinned upstream Martian checkout.
 
 Tracked copy of the local scoring harness so the five-PR benchmark is
-reproducible from the repository (see ``scripts/run_five_pr_benchmark.py``).
+reproducible from the repository (see ``scripts/run_benchmark_sample.py``).
 
 Requires the upstream benchmark's Python dependencies. Golden answers are used
 only here, after reviews finish. Every judge response is cached for auditing and

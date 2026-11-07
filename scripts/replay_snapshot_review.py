@@ -7,7 +7,7 @@ Every model call is traced to ``call-NNN.json`` next to ``result.json`` so a
 review can be audited offline (which tools were called, what was submitted,
 what each pipeline stage dropped).
 
-Driven by ``scripts/run_five_pr_benchmark.py``; usable on its own:
+Driven by ``scripts/run_benchmark_sample.py``; usable on its own:
 
     python scripts/replay_snapshot_review.py --output /tmp/run/case-r1 \
         --model deepseek/deepseek-v4.1-flash-1017 --reasoning-effort medium \

@@ -219,3 +219,36 @@ class TestSecurityHandoff:
         assert by_title["nil request dereferenced"].category == "bug"
         assert by_title["origin check by substring"].category == "security"
         assert all(c.source_pass == "security" for c in out)
+
+
+class TestSiblingToolCalls:
+    @pytest.mark.asyncio
+    async def test_sibling_calls_after_submit_are_answered_before_second_look(self):
+        """A message carrying [submit_review, grep_repo] must leave no dangling
+        tool call: the grep gets its tool result, then the receipt, then the
+        second look runs over a well-formed transcript."""
+        hop = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "s1",
+                    "type": "function",
+                    "function": {"name": "submit_review", "arguments": FIRST},
+                },
+                {
+                    "id": "g1",
+                    "type": "function",
+                    "function": {"name": "grep_repo", "arguments": '{"pattern": "x"}'},
+                },
+            ],
+        }
+        llm = _LLM([hop])
+        ex = _Executor()
+        out = await agentic_review_loop(
+            llm, [{"role": "user", "content": "diff"}], ex, second_look=True
+        )
+        assert [c["title"] for c in json.loads(out)["comments"]] == ["first", "withheld"]
+        msgs = llm.tool_calls[0]
+        tool_ids = [m["tool_call_id"] for m in msgs if m["role"] == "tool"]
+        assert tool_ids == ["g1", "s1"]

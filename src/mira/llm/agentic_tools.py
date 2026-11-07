@@ -190,17 +190,12 @@ def _dir_segments(path: str) -> list[str]:
     return path.split("/")[:-1]
 
 
-def rank_for_grep(candidates: list[str], changed_paths: list[str], pattern: str) -> list[str]:
-    """Order repo paths so the files most likely to hold the match are scanned first.
+def base_scores(candidates: list[str], changed_paths: list[str]) -> dict[str, int]:
+    """Pattern-independent part of the grep ranking, computed once per review.
 
-    Scores (higher first): a filename containing an identifier from the
-    pattern, directory proximity to the PR's changed files, matching file
-    extension, and a small penalty for test paths. Ties keep path order so
-    results are deterministic.
+    Directory proximity to the PR's changed files, matching file extension,
+    and a small penalty for test paths.
     """
-    tokens = {
-        t.lower() for t in _IDENT_RE.findall(pattern or "") if t.lower() not in _RANK_STOPWORDS
-    }
     changed_dirs = [_dir_segments(p) for p in changed_paths]
     changed_exts = {_ext(p) for p in changed_paths} - {""}
 
@@ -218,20 +213,44 @@ def rank_for_grep(candidates: list[str], changed_paths: list[str], pattern: str)
             best = max(best, n)
         return best
 
+    scores: dict[str, int] = {}
+    for path in candidates:
+        s = min(_proximity(path), 4)
+        if _ext(path) in changed_exts:
+            s += 1
+        if any(h in path.lower() for h in _TEST_HINTS):
+            s -= 1
+        scores[path] = s
+    return scores
+
+
+def rank_for_grep(
+    candidates: list[str],
+    changed_paths: list[str],
+    pattern: str,
+    base: dict[str, int] | None = None,
+) -> list[str]:
+    """Order repo paths so the files most likely to hold the match are scanned first.
+
+    Scores (higher first): a filename containing an identifier from the
+    pattern, then the pattern-independent ``base_scores`` (directory
+    proximity, extension, test penalty). Ties keep path order so results are
+    deterministic.
+    """
+    tokens = {
+        t.lower() for t in _IDENT_RE.findall(pattern or "") if t.lower() not in _RANK_STOPWORDS
+    }
+    if base is None:
+        base = base_scores(candidates, changed_paths)
+
     def _score(path: str) -> int:
-        low = path.lower()
-        base = low.rsplit("/", 1)[-1]
-        s = 0
+        s = base.get(path, 0)
         if tokens:
-            if any(t in base for t in tokens):
+            low = path.lower()
+            if any(t in low.rsplit("/", 1)[-1] for t in tokens):
                 s += 6
             elif any(t in low for t in tokens):
                 s += 2
-        s += min(_proximity(path), 4)
-        if _ext(path) in changed_exts:
-            s += 1
-        if any(h in low for h in _TEST_HINTS):
-            s -= 1
         return s
 
     return sorted(candidates, key=lambda p: (-_score(p), p))
@@ -254,6 +273,9 @@ class AgenticToolExecutor:
     bytes_used: int = 0
     _content_cache: dict[str, str | None] = field(default_factory=dict)
     call_log: list[dict] = field(default_factory=list)
+    # Skip-filtered tree and its pattern-independent ranking, built on first grep.
+    _scannable: list[str] | None = field(default=None, repr=False)
+    _base_scores: dict[str, int] | None = field(default=None, repr=False)
 
     async def execute(self, name: str, args: dict) -> str:
         """Dispatch a tool call. Returns the tool result as a string.
@@ -384,12 +406,21 @@ class AgenticToolExecutor:
 
         # Skip giant binaries / lockfiles / vendored dirs we'd never want to read,
         # then scan the most relevant files first (see `rank_for_grep`).
-        scannable = [
-            p
-            for p in candidates
-            if not p.endswith(_SKIP_EXTS) and not any(d in p for d in _SKIP_DIRS)
+        if self._scannable is None or self._base_scores is None:
+            self._scannable = [
+                p
+                for p in self.repo_tree
+                if not p.endswith(_SKIP_EXTS) and not any(d in p for d in _SKIP_DIRS)
+            ]
+            self._base_scores = base_scores(self._scannable, self.changed_paths)
+        scannable = (
+            [p for p in self._scannable if fnmatch.fnmatch(p, path_glob)]
+            if path_glob
+            else self._scannable
+        )
+        to_scan = rank_for_grep(scannable, self.changed_paths, pattern, self._base_scores)[
+            :_MAX_FILES_TO_SCAN
         ]
-        to_scan = rank_for_grep(scannable, self.changed_paths, pattern)[:_MAX_FILES_TO_SCAN]
 
         sem = asyncio.Semaphore(_GREP_FETCH_CONCURRENCY)
 

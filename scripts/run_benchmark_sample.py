@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run the five-PR Martian development sample through one or more source trees.
+"""Run a fixed Martian benchmark selection through one or more source trees.
 
 One attempt per PR per model per arm, scored together with the pinned upstream
 judge so arms (for example `main` and a branch) are compared on identical
@@ -7,14 +7,14 @@ inputs under one judge cache. Reviews never see golden answers; scoring
 happens afterwards.
 
     # this checkout only
-    uv run python scripts/run_five_pr_benchmark.py --name nov06 --arm candidate=.
+    uv run python scripts/run_benchmark_sample.py --name nov06 --arm candidate=.
 
     # this checkout against a main worktree, both models, one key prompt
-    uv run python scripts/run_five_pr_benchmark.py --name nov06 \
+    uv run python scripts/run_benchmark_sample.py --name nov06 \
         --arm main=/path/to/main-worktree --arm candidate=.
 
     # re-score an existing run directory
-    uv run python scripts/run_five_pr_benchmark.py --name nov06 --score-only
+    uv run python scripts/run_benchmark_sample.py --name nov06 --score-only
 
 Requires the local benchmark inputs prepared by earlier runs (pinned PR
 snapshots, the upstream benchmark checkout and its dependencies — see the

@@ -277,3 +277,28 @@ class TestEvidenceGradedCritique:
 
         assert kept == []
         assert audit[0]["reason"].startswith("no-verdict:")
+
+
+class TestEvidenceWindowEdges:
+    def test_range_spanning_two_hunks_keeps_both(self):
+        f = FileDiff(
+            path="app.py",
+            change_type=FileChangeType.MODIFIED,
+            hunks=[
+                HunkInfo(1, 3, 1, 3, "@@ -1,3 +1,3 @@\n+one\n+two\n+three"),
+                HunkInfo(20, 3, 20, 3, "@@ -20,3 +20,3 @@\n+twenty\n+twenty-one\n+twenty-two"),
+            ],
+        )
+        c = _comment(line=2)
+        c.end_line = 21
+        out = _hunk_evidence(c, [f])
+        assert "+two" in out and "+twenty-one" in out
+
+    def test_no_newline_marker_does_not_shift_numbering(self):
+        body = "\n".join(f"+line {i}" for i in range(1, 60))
+        content = "@@ -0,0 +1,59 @@\n" + body + "\n\\ No newline at end of file"
+        f = FileDiff(
+            path="app.py", change_type=FileChangeType.ADDED, hunks=[HunkInfo(0, 0, 1, 59, content)]
+        )
+        out = _hunk_evidence(_comment(line=59), [f])
+        assert "+line 59" in out

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Combine scored benchmark runs over disjoint PR selections into one score.
 
-Each run directory comes from ``run_five_pr_benchmark.py`` and already holds
+Each run directory comes from ``run_benchmark_sample.py`` and already holds
 ``scores/scores.json`` (the upstream judge's verdicts for Mira and every
 published tool on that run's PRs) and ``manifest.json`` (the selection).
 This merges their evaluations, re-scores every tool with the upstream

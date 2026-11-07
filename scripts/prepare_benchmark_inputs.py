@@ -6,7 +6,7 @@ checkout (so the selection is fixed by rule, never by result), then fetches
 for each PR its mirror metadata, unified diff and source tarball at the
 head commit from GitHub, and extracts the tarball into a snapshot directory
 the replay harness can serve files from. Writes ``selection.json`` in the
-shape ``run_five_pr_benchmark.py`` and ``score_snapshot_runs.py`` expect.
+shape ``run_benchmark_sample.py`` and ``score_snapshot_runs.py`` expect.
 
     uv run python scripts/prepare_benchmark_inputs.py \
         --benchmark /tmp/code-review-benchmark-<sha> \

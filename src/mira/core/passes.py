@@ -143,6 +143,10 @@ def merge_submissions(first: str, extra: str) -> str:
     if not added:
         return first
     if not isinstance(base, dict):
+        if first:
+            # Leave an unparseable first submission for the downstream repair
+            # instead of replacing it with the second look alone.
+            return first
         base = {"comments": [], "summary": str(more.get("summary") or "")}
     merged = dict(base)
     merged["comments"] = [*(base.get("comments") or []), *added]
@@ -208,6 +212,20 @@ async def _force_submit(llm: LLMProviderProtocol, convo: list[dict], why: str) -
     return raw or ""
 
 
+async def _force_and_finish(
+    llm: LLMProviderProtocol,
+    convo: list[dict],
+    why: str,
+    executor: object,
+    second_look: bool,
+) -> str:
+    """Force the submission, record it in the transcript, then run the second look."""
+    raw = await _force_submit(llm, convo, why)
+    if raw:
+        convo.append({"role": "assistant", "content": "Submitted review:\n" + raw})
+    return await _finish_submission(llm, convo, raw, executor, second_look)
+
+
 async def agentic_review_loop(
     llm: LLMProviderProtocol,
     messages: list[dict],
@@ -250,10 +268,7 @@ async def agentic_review_loop(
             # conversation is better served by the caller's single-shot path.
             if not investigated:
                 return ""
-            raw = await _force_submit(llm, convo, "hop failed")
-            if raw:
-                convo.append({"role": "assistant", "content": "Submitted review:\n" + raw})
-            return await _finish_submission(llm, convo, raw, executor, second_look)
+            return await _force_and_finish(llm, convo, "hop failed", executor, second_look)
 
         tool_calls = msg.get("tool_calls") or []
         content = msg.get("content") or ""
@@ -273,10 +288,7 @@ async def agentic_review_loop(
                     if msg.get(key):
                         prose[key] = msg[key]
                 convo.append(prose)
-            raw = await _force_submit(llm, convo, "no tool call")
-            if raw:
-                convo.append({"role": "assistant", "content": "Submitted review:\n" + raw})
-            return await _finish_submission(llm, convo, raw, executor, second_look)
+            return await _force_and_finish(llm, convo, "no tool call", executor, second_look)
 
         assistant_message = {
             "role": "assistant",
@@ -292,21 +304,16 @@ async def agentic_review_loop(
                 assistant_message[key] = value
         convo.append(assistant_message)
 
+        # Sibling tool calls in the same message are all answered before the
+        # submission is handled, so the transcript never carries a dangling
+        # tool call (providers reject the next request otherwise).
+        submitted: tuple[str, str] | None = None
         for call in tool_calls:
             fn = call.get("function") or {}
             name = fn.get("name") or ""
             if name == "submit_review":
-                raw = fn.get("arguments") or ""
-                if not second_look:
-                    return raw
-                convo.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.get("id") or "",
-                        "content": _submission_receipt(raw),
-                    }
-                )
-                return await _finish_submission(llm, convo, raw, executor, second_look)
+                submitted = (fn.get("arguments") or "", call.get("id") or "")
+                continue
 
             raw_args = fn.get("arguments") or "{}"
             try:
@@ -324,11 +331,17 @@ async def agentic_review_loop(
                 }
             )
 
+        if submitted is not None:
+            raw, call_id = submitted
+            if not second_look:
+                return raw
+            convo.append(
+                {"role": "tool", "tool_call_id": call_id, "content": _submission_receipt(raw)}
+            )
+            return await _finish_submission(llm, convo, raw, executor, second_look)
+
     logger.info("Agentic loop hit %d-hop cap without submit_review; forcing submit", max_hops)
-    raw = await _force_submit(llm, convo, "hop cap")
-    if raw:
-        convo.append({"role": "assistant", "content": "Submitted review:\n" + raw})
-    return await _finish_submission(llm, convo, raw, executor, second_look)
+    return await _force_and_finish(llm, convo, "hop cap", executor, second_look)
 
 
 def _indexing_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
@@ -598,11 +611,15 @@ def _hunk_evidence(comment: ReviewComment, diff_files: list | None) -> str:
     if file is None:
         return ""
     end = comment.end_line or comment.line
-    for h in file.hunks:
-        h_end = h.target_start + max(h.target_length, 1) - 1
-        if comment.line <= h_end and h.target_start <= end:
-            return _evidence_window(h, comment.line, end)
-    return ""
+    windows = [
+        _evidence_window(h, comment.line, end)
+        for h in file.hunks
+        if comment.line <= h.target_start + max(h.target_length, 1) - 1 and h.target_start <= end
+    ]
+    text = "\n".join(windows)
+    if len(text) > _MAX_HUNK_EVIDENCE_CHARS:
+        text = text[:_MAX_HUNK_EVIDENCE_CHARS] + "…"
+    return text
 
 
 def _evidence_window(hunk: HunkInfo, start: int, end: int) -> str:
@@ -612,7 +629,7 @@ def _evidence_window(hunk: HunkInfo, start: int, end: int) -> str:
     numbers: list[int | None] = []
     n = hunk.target_start
     for line in lines:
-        if line.startswith(("@@", "-")):
+        if line.startswith(("@@", "-", "\\")):
             numbers.append(None)
         else:
             numbers.append(n)
@@ -626,12 +643,8 @@ def _evidence_window(hunk: HunkInfo, start: int, end: int) -> str:
             selected = [f"… [{lo} earlier line(s) of this hunk omitted]", *selected]
         if hi < len(lines):
             selected = [*selected, f"… [{len(lines) - hi} later line(s) of this hunk omitted]"]
-        text = "\n".join(selected)
-    else:
-        text = hunk.content
-    if len(text) > _MAX_HUNK_EVIDENCE_CHARS:
-        text = text[:_MAX_HUNK_EVIDENCE_CHARS] + "…"
-    return text
+        return "\n".join(selected)
+    return hunk.content
 
 
 def _critique_keep(verdict: dict, comment: ReviewComment) -> bool:

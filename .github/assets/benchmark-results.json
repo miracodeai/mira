@@ -2047,5 +2047,5 @@
   ],
   "chart_subtitle": "Same PRs and judge for every reviewer; competitor reviews as published \u00b7 Nov 2026",
   "method": "Pinned local source snapshots at each PR's head commit; Mira reviewed each PR once through its full pipeline with no index, learned rules or history. Matching and deduplication use the upstream benchmark's prompts with Claude Sonnet 4.5; competitor rows are the upstream's published evaluations of the same PRs under the same judge and were not rerun. Unmatched findings count as false positives even where the reference set may omit a valid issue. Competitors publish no timings.",
-  "reproduce": "scripts/prepare_benchmark_inputs.py (--entries 1,2,4,5 / 3 / 6,7,8,9,10); scripts/run_five_pr_benchmark.py --inputs <inputs> --models deepseek --timeout 900; scripts/combine_benchmark_runs.py; scripts/render_benchmark_charts.py"
+  "reproduce": "scripts/prepare_benchmark_inputs.py (--entries 1,2,4,5 / 3 / 6,7,8,9,10); scripts/run_benchmark_sample.py --inputs <inputs> --models deepseek --timeout 900; scripts/combine_benchmark_runs.py; scripts/render_benchmark_charts.py"
 }
