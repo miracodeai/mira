@@ -4,7 +4,7 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] — 2026-11-07
 
 ### Added
 
@@ -33,6 +33,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **A walkthrough that fails to post no longer leaves the PR on "Reviewing this PR…".** When the final walkthrough comment is rejected (for example, by an encoding error), the placeholder is replaced with a note that the review finished and any findings are posted as review comments.
 - **Walkthroughs on PRs with skipped files post again.** The "📋 Reviewed N of M files" heading was written as the escapes `\ud83d\udccb`, which Python keeps as two lone UTF-16 surrogates rather than one emoji. Encoding the walkthrough then failed with "surrogates not allowed", so on any PR large enough for files to be skipped the walkthrough was never posted (GitLab, Forgejo and Bitbucket send UTF-8 JSON bodies).
+- **A review whose chunks failed no longer reports a clean result.** When a chunk's structured `submit_review` call fails for good, the walkthrough summary opens with a "Review incomplete: N of M chunks failed" notice (a dedicated "Review failed" notice when every chunk failed), the CLI text output says so instead of "No issues found", and the failed files are recorded so `review-rest` retries them. Security-pass failures surface as a separate security-incomplete notice; dependency-scan failures are logged and audited only.
+- **Empty model replies are retried instead of being parsed as a review.** A Chat Completions or Responses reply with missing, null or whitespace-only text is now a retryable `empty_response` error that uses the existing attempt limits and fallback model; an explicit refusal or content filter stops immediately with `completion_blocked`.
+- **`review.walkthrough_sequence_diagram: false` suppresses diagrams the model supplies anyway.** The setting only removed the instruction from the prompt; a diagram the model returned regardless is now dropped before the walkthrough is rendered or posted, on the first attempt and on the retry.
+- **A failed OSV batch no longer clears vulnerability alerts.** A timeout or HTTP error from OSV was treated as a clean result, deleting stored alerts for every package in the batch. Packages with no result now keep their alerts, successful results from other batches still apply, and the poller warns that the scan was incomplete instead of logging a clean run.
+- **Unchanged dependencies keep their vulnerability history.** Pruning compared OSV ecosystem labels such as `PyPI` against the persisted internal kinds such as `pip`, so every non-npm alert was removed and recreated on each scan, resetting `first_seen_at`.
+- **Dashboard package search applies its limit to unique packages.** The cap was applied to raw manifest rows before grouping, so duplicate rows from several manifests could fill the limit and hide a matching lockfile version.
+- **Org-wide SQLite readers no longer recreate deleted databases.** Package, vulnerability and learned-rule listings open repository databases read-only, so a store removed between discovery and connection is skipped instead of being recreated as an empty file.
+- **Resuming a review on Forgejo keeps the PR's other labels.** The pause label was removed through the label-collection endpoint, which deletes every label on the issue, and its 204 response was then rejected as an error. The single-label endpoint is used now.
+- **Self-hosted Forgejo with only `MIRA_FORGEJO_API_URL` set works for incremental reviews.** The web base URL used for compare requests is inferred from the API URL, subpaths included, instead of defaulting to Codeberg, which also sent the Forgejo token there. An explicit `MIRA_FORGEJO_BASE_URL` still wins; an API URL whose path does not end in `/api/v1` fails at startup with a `ConfigError`.
+- **`review.failed` webhook payloads include the PR `number`** on GitHub and Bitbucket, matching `review.completed`, `review.high_severity` and the Settings "Send test" sample; the built-in chat message shows `#<number>` on failures too.
 
 ## [0.10.1] — 2026-10-28
 
@@ -401,6 +411,7 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.11.0]: https://github.com/miracodeai/mira/releases/tag/v0.11.0
 [0.10.1]: https://github.com/miracodeai/mira/releases/tag/v0.10.1
 [0.10.0]: https://github.com/miracodeai/mira/releases/tag/v0.10.0
 [0.9.1]: https://github.com/miracodeai/mira/releases/tag/v0.9.1
