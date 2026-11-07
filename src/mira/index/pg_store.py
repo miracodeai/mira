@@ -23,11 +23,13 @@ from mira.index.store import (
     FileSummary,
     IndexStore,
     LearnedRuleRow,
+    ManifestPackageMigrationError,
     ReplyRow,
     ReviewCommentRow,
     ReviewContext,
     ReviewEvent,
     SymbolInfo,
+    _manifest_packages_for_write,
 )
 from mira.models import PRFingerprint
 
@@ -216,7 +218,7 @@ CREATE TABLE IF NOT EXISTS package_manifests (
     file_path TEXT NOT NULL DEFAULT '',
     is_dev INTEGER NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-    UNIQUE(owner, repo, name, kind, file_path)
+    scan_eligible INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_pkg_manifest_name
@@ -261,6 +263,56 @@ def _drop_pg_conn() -> None:
             _pg_conn = None
 
 
+def _legacy_manifest_constraint(cur: Any) -> str | None:
+    cur.execute(
+        "SELECT i.indisprimary, c.conname, ARRAY(SELECT a.attname "
+        "FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, position) "
+        "LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum "
+        "ORDER BY k.position) "
+        "FROM pg_index i LEFT JOIN pg_constraint c ON c.conindid=i.indexrelid "
+        "AND c.conrelid=i.indrelid AND c.contype='u' "
+        "WHERE i.indrelid='package_manifests'::regclass AND i.indisunique"
+    )
+    legacy = None
+    for primary, constraint, columns in cur.fetchall():
+        if primary and tuple(columns) == ("id",):
+            continue
+        if (
+            legacy is not None
+            or constraint is None
+            or tuple(columns) != ("owner", "repo", "name", "kind", "file_path")
+        ):
+            raise ManifestPackageMigrationError("Unsupported package manifest uniqueness")
+        legacy = constraint
+    return legacy
+
+
+def _migrate_manifest_package_version_identity(url: str) -> None:
+    try:
+        from psycopg import sql
+
+        from mira.db.postgres import connect
+
+        # Schema upgrades must not open a transaction on the shared writer connection.
+        with connect(url) as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("LOCK TABLE package_manifests IN ACCESS EXCLUSIVE MODE")
+            legacy = _legacy_manifest_constraint(cur)
+            if legacy is None:
+                return
+            cur.execute(
+                "ALTER TABLE package_manifests ADD COLUMN scan_eligible INTEGER NOT NULL DEFAULT 1"
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE package_manifests DROP CONSTRAINT {}").format(
+                    sql.Identifier(legacy)
+                )
+            )
+    except ManifestPackageMigrationError:
+        raise
+    except Exception as exc:
+        raise ManifestPackageMigrationError(f"Package manifest migration failed: {exc}") from exc
+
+
 def _get_conn(url: str) -> Any:
     """Get the shared Postgres connection, initializing schema on first use."""
     global _pg_conn, _schema_initialized
@@ -293,6 +345,18 @@ def _get_conn(url: str) -> Any:
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS created_by "
                     "TEXT NOT NULL DEFAULT ''"
                 )
+                try:
+                    needs_migration = _legacy_manifest_constraint(cur) is not None
+                    if not needs_migration:
+                        cur.execute("SELECT scan_eligible FROM package_manifests LIMIT 0")
+                except ManifestPackageMigrationError:
+                    raise
+                except Exception as exc:
+                    raise ManifestPackageMigrationError(
+                        f"Package manifest identity validation failed: {exc}"
+                    ) from exc
+            if needs_migration:
+                _migrate_manifest_package_version_identity(url)
             _schema_initialized = True
         return _pg_conn
 
@@ -412,7 +476,7 @@ def list_packages_org_wide(url: str) -> list[dict]:
     file_path lets the poller prefer lockfile rows over manifest rows."""
     with _pg_cursor(url) as cur:
         cur.execute(
-            "SELECT DISTINCT owner, repo, kind, name, version, file_path "
+            "SELECT DISTINCT owner, repo, kind, name, version, file_path, scan_eligible "
             "FROM package_manifests "
             "WHERE kind IN ('npm', 'pip', 'go', 'rust', 'composer') AND version <> ''"
         )
@@ -427,6 +491,7 @@ def list_packages_org_wide(url: str) -> list[dict]:
             "name": r[3],
             "version": r[4],
             "file_path": r[5],
+            "scan_eligible": bool(r[6]),
         }
         for r in rows
     ]
@@ -1686,45 +1751,49 @@ class PgIndexStore(_StoreSharedMixin):
         file_path: str,
         packages: list[dict],
     ) -> int:
-        from mira.index.store import PackageManifestRow  # noqa: F401
+        from mira.db.postgres import connect
 
         now = time.time()
-        with self._cursor() as cur:
+        rows = [
+            (
+                self._owner,
+                self._repo,
+                p["name"],
+                p["kind"],
+                p["version"],
+                file_path,
+                int(bool(p.get("is_dev"))),
+                now,
+                int(p.get("scan_eligible", True)),
+            )
+            for p in _manifest_packages_for_write(file_path, packages)
+        ]
+        # Raw version strings can exceed a PostgreSQL B-tree index key. Dedupe
+        # exact identities in memory and serialize replacements of the same
+        # file. The hash is only a lock key: collisions serialize two files.
+        lock_key = json.dumps(["package_manifests", self._owner, self._repo, file_path])
+        with connect(self._url) as conn, conn.transaction(), conn.cursor() as cur:
+            # A waiter must see the previous writer's commit after it gets the lock.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
             cur.execute(
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",
                 (self._owner, self._repo, file_path),
             )
-            if packages:
-                rows = [
-                    (
-                        self._owner,
-                        self._repo,
-                        p["name"],
-                        p["kind"],
-                        p["version"],
-                        p["file_path"],
-                        1 if p.get("is_dev") else 0,
-                        now,
-                    )
-                    for p in packages
-                ]
+            if rows:
                 cur.executemany(
                     "INSERT INTO package_manifests "
-                    "(owner, repo, name, kind, version, file_path, is_dev, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (owner, repo, name, kind, file_path) DO UPDATE SET "
-                    "version=EXCLUDED.version, is_dev=EXCLUDED.is_dev, "
-                    "updated_at=EXCLUDED.updated_at",
+                    "(owner, repo, name, kind, version, file_path, is_dev, updated_at, scan_eligible) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     rows,
                 )
-        self._commit()
         return len(packages)
 
     def list_manifest_packages(self):  # type: ignore[no-untyped-def]
         from mira.index.store import PackageManifestRow
 
         rows = self._fetchall(
-            "SELECT id, name, kind, version, file_path, is_dev, updated_at "
+            "SELECT id, name, kind, version, file_path, is_dev, updated_at, scan_eligible "
             "FROM package_manifests WHERE owner=%s AND repo=%s "
             "ORDER BY LOWER(name)",
             (self._owner, self._repo),
@@ -1738,6 +1807,7 @@ class PgIndexStore(_StoreSharedMixin):
                 file_path=r[4],
                 is_dev=bool(r[5]),
                 updated_at=r[6],
+                scan_eligible=bool(r[7]),
             )
             for r in rows
         ]
