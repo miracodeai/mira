@@ -120,11 +120,13 @@ def _retriable(exception: BaseException) -> bool:
     )
 
 
-# Output budget for the one retry after a response was cut off at ``max_tokens``.
-# Matches the budget the published benchmark ran with; most current models
-# accept it, and a model that does not fails the retry the same way the
-# truncated first answer would have failed downstream.
+# Output budget for the one retry after a response was cut off at ``max_tokens``
+# when the configured budget was lower than this (the default is this value,
+# which the published benchmark ran with).
 BUDGET_RETRY_TOKENS = 16384
+# Budget an endpoint is retried at after rejecting the configured one; every
+# model Mira has been run on accepts it.
+BUDGET_FLOOR_TOKENS = 4096
 
 
 def _exception_excerpt(error: BaseException, limit: int = 300) -> str:
@@ -159,6 +161,8 @@ class OpenAICompatibleProvider:
         self.total_cache_write_tokens = 0
         self._no_forced_tool_choice: set[str] = set()
         self._no_reasoning: set[str] = set()
+        # Per-model output budget after an endpoint rejected the configured one.
+        self._budget_caps: dict[str, int] = {}
 
         # Apply retry decorator imperatively so it reads config values
         # (max_retries, retry_min_wait, retry_max_wait) at instance time.
@@ -212,7 +216,8 @@ class OpenAICompatibleProvider:
             return None
         field = self._max_tokens_field()
         current = int(body.get(field) or self.config.max_tokens)
-        if current >= BUDGET_RETRY_TOKENS:
+        target = min(BUDGET_RETRY_TOKENS, self._budget_caps.get(str(body.get("model")), 10**9))
+        if current >= target:
             return None
         usage = data.get("usage") or {}
         details = usage.get("completion_tokens_details") or {}
@@ -226,8 +231,45 @@ class OpenAICompatibleProvider:
             BUDGET_RETRY_TOKENS,
         )
         retry = dict(body)
-        retry[field] = BUDGET_RETRY_TOKENS
+        retry[field] = target
         return retry
+
+    def _cap_output_budget(self, body: dict) -> None:
+        """Lower the request's output budget to what this model accepted before."""
+        cap = self._budget_caps.get(str(body.get("model")))
+        if cap is None:
+            return
+        field = self._max_tokens_field()
+        if int(body.get(field) or 0) > cap:
+            body[field] = cap
+
+    def _lower_rejected_budget(self, body: dict, error_text: str) -> bool:
+        """After a 400 about the output budget, lower it in place and remember.
+
+        Endpoints word it differently ("max_tokens is too large", "maximum
+        context length", "output tokens"), so match loosely but only when the
+        request actually carried more than the floor. Returns True when the
+        body was changed and the request should be sent again.
+        """
+        text = error_text.lower()
+        if not any(
+            marker in text
+            for marker in ("max_tokens", "max_completion_tokens", "context length", "output tokens")
+        ):
+            return False
+        field = self._max_tokens_field()
+        current = int(body.get(field) or 0)
+        if current <= BUDGET_FLOOR_TOKENS:
+            return False
+        logger.warning(
+            "Endpoint rejected an output budget of %d for %s; retrying at %d and keeping it there",
+            current,
+            body.get("model"),
+            BUDGET_FLOOR_TOKENS,
+        )
+        self._budget_caps[str(body.get("model"))] = BUDGET_FLOOR_TOKENS
+        body[field] = BUDGET_FLOOR_TOKENS
+        return True
 
     @staticmethod
     def _remove_reasoning(body: dict) -> None:

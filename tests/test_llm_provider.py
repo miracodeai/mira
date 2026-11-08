@@ -913,7 +913,9 @@ class TestResponseDiagnostics:
     @pytest.mark.asyncio
     async def test_empty_response_reports_finish_reason_and_usage(self):
         # max_retries=1: no_tool_call is retriable, so keep the test to one call.
-        provider = LLMProvider(LLMConfig(model="m", max_retries=1))
+        # max_tokens=4096: below the retry budget, so the cut-off reply is
+        # retried once with the larger one and the diagnostic is still carried.
+        provider = LLMProvider(LLMConfig(model="m", max_retries=1, max_tokens=4096))
         empty = _mock_httpx_response(
             {
                 "choices": [

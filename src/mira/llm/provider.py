@@ -71,6 +71,7 @@ class LLMProvider(OpenAICompatibleProvider):
             body["response_format"] = {"type": "json_object"}
             # Copied container — caller-owned ``messages`` stay untouched.
             body["messages"] = _ensure_json_hint(messages)
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body)
 
@@ -89,6 +90,8 @@ class LLMProvider(OpenAICompatibleProvider):
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
@@ -160,6 +163,7 @@ class LLMProvider(OpenAICompatibleProvider):
             "temperature": temperature if temperature is not None else self.config.temperature,
             self._max_tokens_field(): self.config.max_tokens,
         }
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body)
 
@@ -207,6 +211,8 @@ class LLMProvider(OpenAICompatibleProvider):
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
@@ -290,6 +296,7 @@ class LLMProvider(OpenAICompatibleProvider):
             "temperature": temperature if temperature is not None else self.config.temperature,
             self._max_tokens_field(): self.config.max_tokens,
         }
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body, conversation=True)
 
@@ -308,6 +315,8 @@ class LLMProvider(OpenAICompatibleProvider):
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
