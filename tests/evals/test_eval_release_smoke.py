@@ -4,9 +4,11 @@ The other evals review twenty-line synthetic diffs with no repository behind
 them, so the agentic tool loop, the hop cap, the forced submission and the
 walkthrough on a real-size PR are never exercised before a release. This
 suite reviews a handful of merged PRs from this repository end to end (dry
-run, nothing is posted) on the configured model and fails the gate when a
-review comes back incomplete: a failed chunk, a failed security pass or a
-missing walkthrough. It is a health check, not a quality score.
+run, nothing is posted) on the configured model, through the same agentic
+path the server runs, and fails the gate when a review comes back
+incomplete: a failed chunk, a failed security pass, a missing walkthrough,
+or a review that never entered the tool loop. It is a health check, not a
+quality score.
 
 Needs an LLM key and a GitHub token (``GITHUB_TOKEN`` or ``MIRA_GIT_TOKEN``).
 ``MIRA_MODEL`` selects the model the same way it does for ``mira review``, so
@@ -61,9 +63,12 @@ def _make_engine() -> ReviewEngine:
     # Pin the filter to defaults so ambient dashboard overrides can't change
     # what the gate sees (see test_eval_llm.py).
     config.filter = FilterConfig()
-    # No index on the CI box: repository context and blast radius would try to
-    # open per-repo stores. The agentic tools fetch straight from GitHub.
-    config.review.code_context = False
+    # Production defaults otherwise. In particular `code_context` stays on:
+    # the agentic reviewer tools are wired up inside that step, so turning it
+    # off silently drops the review to a single forced `submit_review` call,
+    # which is a different (and on thinking models, much weaker) path than
+    # the one the server and the benchmark run. The index store it opens
+    # lives under MIRA_INDEX_DIR, which the test points at a temp directory.
     config.review.blast_radius = False
     return ReviewEngine(
         config=config,
@@ -86,13 +91,16 @@ def _problems(result: ReviewResult) -> list[str]:
         problems.append("walkthrough was not generated")
     if result.reviewed_files == 0:
         problems.append("no files were reviewed")
+    if not any(entry.get("stage") == "agentic" for entry in result.audit):
+        problems.append("agentic review loop did not run (single-shot path was used)")
     return problems
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pr_url", SMOKE_PRS)
-async def test_eval_real_pr_review_completes(pr_url: str) -> None:
+async def test_eval_real_pr_review_completes(pr_url: str, tmp_path, monkeypatch) -> None:
     """One retry absorbs a single bad model response; twice in a row is a red gate."""
+    monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path / "indexes"))
     attempts: list[list[str]] = []
     for _ in range(2):
         result = await _make_engine().review_pr(pr_url)
