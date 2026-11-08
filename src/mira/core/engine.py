@@ -158,10 +158,31 @@ def compose_pr_description(current_body: str, summary_block: str, mode: str) -> 
     return summary_block
 
 
+def _incomplete_reason(failed_chunks: int, total_chunks: int, security_failed: bool) -> str:
+    """Verdict reason for a review that did not finish every pass."""
+    all_failed = failed_chunks > 0 and total_chunks > 0 and failed_chunks >= total_chunks
+    if all_failed:
+        return (
+            "The review could not complete for any part of the diff, so no findings "
+            "were produced. Comment `review-rest` to retry."
+        )
+    if failed_chunks and security_failed:
+        what = f"{failed_chunks} of {total_chunks} review chunks and the security pass failed"
+    elif failed_chunks:
+        what = f"{failed_chunks} of {total_chunks} review chunks failed"
+    else:
+        what = "The security pass did not complete"
+    return f"{what}, so findings may be missing. Comment `review-rest` to retry the failed files."
+
+
 def _clamp_confidence_to_findings(
     walkthrough: WalkthroughResult,
     comments: list[ReviewComment],
     unverified: int = 0,
+    *,
+    failed_chunks: int = 0,
+    total_chunks: int = 0,
+    security_failed: bool = False,
 ) -> None:
     """Tighten the walkthrough confidence score based on actual review findings.
 
@@ -172,6 +193,9 @@ def _clamp_confidence_to_findings(
 
     Rubric (1=major concerns, 5=safe to merge):
       - ≥1 blocker → score ≤ 2
+      - a failed review chunk or security pass (and no blocker) → score ≤ 3,
+        "Review incomplete": findings may be missing, so the verdict must not
+        read as a clean bill of health however little was posted
       - ≥3 warnings (and no blocker) → score ≤ 3
       - no comments posted and score ≥ 3 → recomputed from what posted:
         5/5 "No issues to flag", or 4/5 "No confirmed issues" when
@@ -196,6 +220,10 @@ def _clamp_confidence_to_findings(
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
             "that must be fixed before merge."
         )
+    elif (failed_chunks > 0 or security_failed) and cs.score > 2:
+        cs.score = 3
+        cs.label = "Review incomplete"
+        cs.reason = _incomplete_reason(failed_chunks, total_chunks, security_failed)
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
         cs.label = "Needs review"
@@ -540,7 +568,43 @@ class ReviewEngine:
             "Review finished, but the walkthrough summary could not be "
             "generated. Findings (if any) were posted as PR/file comments.",
         ),
+        "review_failed": (
+            "failure",
+            "Code Review Failed",
+            "The review could not complete for any part of the diff, so no findings "
+            "were posted. Comment `review-rest` to retry.",
+        ),
+        "incomplete": (
+            "neutral",
+            "Code Review Incomplete",
+            "Part of the diff could not be reviewed, so findings may be missing. "
+            "Comment `review-rest` to retry the failed files.",
+        ),
     }
+
+    def _check_status_key(self, result: ReviewResult) -> str:
+        """Pick the check-run conclusion from what the review actually did.
+
+        Failed chunks outrank a missing walkthrough: a review that posted
+        nothing because every chunk failed must not conclude as success,
+        which is what a reader takes "Code Review Complete" to mean.
+        """
+        failed = len(result.failed_chunks)
+        if failed and result.total_chunks and failed >= result.total_chunks:
+            return "review_failed"
+        if failed or result.security_failures:
+            return "incomplete"
+        # Neutral only when a walkthrough was enabled AND generation was
+        # genuinely attempted but produced nothing (e.g. the LLM call failed).
+        # A disabled walkthrough, or a review skipped before any generation
+        # (no files, all files filtered, docs-only, no-new-commit re-reviews),
+        # finishes as success.
+        walkthrough_missing = (
+            self.config.review.walkthrough
+            and result.skipped_reason is None
+            and result.walkthrough is None
+        )
+        return "neutral" if walkthrough_missing else "success"
 
     async def _start_check(self, pr_info: PRInfo) -> int | None:
         """Best-effort: start a check run for the head commit; never fails a review."""
@@ -572,6 +636,13 @@ class ReviewEngine:
             parts.append(
                 f"{len(result.comments)} comment{'s' if len(result.comments) != 1 else ''}{stats}"
             )
+        if result.failed_chunks:
+            parts.append(
+                f"{len(result.failed_chunks)} of {result.total_chunks} "
+                f"chunk{'s' if result.total_chunks != 1 else ''} failed"
+            )
+        if result.security_failures:
+            parts.append("security pass failed")
         return " · ".join(parts)
 
     async def _finish_check(
@@ -715,18 +786,7 @@ class ReviewEngine:
         except BaseException:
             await self._finish_check(pr_info, run_id, "failure", None)
             raise
-        # Neutral only when a walkthrough was enabled AND generation was
-        # genuinely attempted but produced nothing (e.g. the LLM call failed).
-        # A disabled walkthrough, or a review skipped before any generation
-        # (no files, all files filtered, docs-only, no-new-commit re-reviews),
-        # finishes as success.
-        walkthrough_missing = (
-            self.config.review.walkthrough
-            and result.skipped_reason is None
-            and result.walkthrough is None
-        )
-        status_key = "neutral" if walkthrough_missing else "success"
-        await self._finish_check(pr_info, run_id, status_key, result)
+        await self._finish_check(pr_info, run_id, self._check_status_key(result), result)
         return result
 
     async def _review_pr(self, pr_info: PRInfo) -> ReviewResult:
@@ -985,7 +1045,14 @@ class ReviewEngine:
             unverified = (
                 result.unverified_findings if self.config.review.show_unverified_findings else []
             )
-            _clamp_confidence_to_findings(result.walkthrough, result.comments, len(unverified))
+            _clamp_confidence_to_findings(
+                result.walkthrough,
+                result.comments,
+                len(unverified),
+                failed_chunks=len(result.failed_chunks),
+                total_chunks=result.total_chunks,
+                security_failed=bool(result.security_failures),
+            )
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:

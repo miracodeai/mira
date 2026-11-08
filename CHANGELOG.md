@@ -4,6 +4,17 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A failed review no longer reports itself as a success.** When every chunk failed, 0.11.0 still concluded the check run as "Code Review Complete" and rewrote the walkthrough verdict to 5/5 "No issues to flag", because the conclusion only considered a missing walkthrough and the verdict only counted posted comments. The check run now concludes `failure` ("Code Review Failed") when no chunk completed and `neutral` ("Code Review Incomplete") when some chunks or the security pass failed, with the counts in its details; the verdict is capped at 3/5 "Review incomplete" with a reason that says what failed and how to retry. A known blocker still wins, and a score the model already set at 2 or below is left alone.
+
+### Added
+
+- **Release smoke eval on real pull requests.** `tests/evals/test_eval_release_smoke.py` reviews five merged PRs of this repository end to end in dry-run mode (3 to 30 files, so the agentic loop, hop cap and forced submission are exercised) and fails the release gate when a review comes back with a failed chunk, a failed security pass or no walkthrough, allowing one retry per PR. The evals workflow passes `GITHUB_TOKEN` for read access and `MIRA_MODEL` from the `MIRA_EVAL_MODEL` repository variable so the gate runs on the deployed model.
+- The benchmark replay script reports failed chunks, security failures and whether a walkthrough was generated in its per-PR summary.
+
 ## [0.11.0] — 2026-11-07
 
 ### Added
