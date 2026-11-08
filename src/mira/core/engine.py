@@ -1447,7 +1447,13 @@ class ReviewEngine:
                 try:
                     wt_parsed = parse_walkthrough_response(wt_raw)
                 except ResponseParseError as exc:
-                    logger.warning("Invalid walkthrough response; retrying once: %s", exc)
+                    # The bounded excerpt is what makes a "not generated"
+                    # walkthrough diagnosable from the server log alone.
+                    logger.warning(
+                        "Invalid walkthrough response; retrying once: %s (response=%s)",
+                        exc,
+                        _response_excerpt(wt_raw),
+                    )
                     wt_messages = [
                         *wt_messages,
                         {
@@ -1461,7 +1467,15 @@ class ReviewEngine:
                         },
                     ]
                     wt_raw = await self.llm.walkthrough(wt_messages)
-                    wt_parsed = parse_walkthrough_response(wt_raw)
+                    try:
+                        wt_parsed = parse_walkthrough_response(wt_raw)
+                    except ResponseParseError as retry_exc:
+                        logger.warning(
+                            "Walkthrough retry was invalid too: %s (response=%s)",
+                            retry_exc,
+                            _response_excerpt(wt_raw),
+                        )
+                        raise
                 if not self.config.review.walkthrough_sequence_diagram:
                     wt_parsed.sequence_diagram = None
                 return convert_to_walkthrough_result(wt_parsed)
