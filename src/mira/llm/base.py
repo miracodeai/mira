@@ -120,6 +120,13 @@ def _retriable(exception: BaseException) -> bool:
     )
 
 
+# Output budget for the one retry after a response was cut off at ``max_tokens``.
+# Matches the budget the published benchmark ran with; most current models
+# accept it, and a model that does not fails the retry the same way the
+# truncated first answer would have failed downstream.
+BUDGET_RETRY_TOKENS = 16384
+
+
 def _exception_excerpt(error: BaseException, limit: int = 300) -> str:
     """Short, single-line error text safe to put in a diagnostic message."""
     text = " ".join(str(error).split())
@@ -189,6 +196,38 @@ class OpenAICompatibleProvider:
     def _max_tokens_field(self) -> str:
         """Name of the Chat Completions output-token field for this profile."""
         return self.profile.get("max_tokens_field", "max_tokens")
+
+    def _budget_exhausted_retry(self, body: dict, data: dict) -> dict | None:
+        """Return a retry body when the model hit the output budget before finishing.
+
+        Thinking models count their reasoning against ``max_tokens``. With the
+        default 4096, a review-sized prompt can spend the whole budget thinking
+        and return no tool call at all, or a tool call cut off mid-JSON, which
+        the caller then cannot parse. One retry with a larger budget recovers
+        both shapes at the cost of the first call. Returns ``None`` when the
+        response finished normally or the budget was already raised.
+        """
+        choice = (data.get("choices") or [{}])[0]
+        if choice.get("finish_reason") != "length":
+            return None
+        field = self._max_tokens_field()
+        current = int(body.get(field) or self.config.max_tokens)
+        if current >= BUDGET_RETRY_TOKENS:
+            return None
+        usage = data.get("usage") or {}
+        details = usage.get("completion_tokens_details") or {}
+        logger.warning(
+            "Model %s hit its %d-token output budget before finishing "
+            "(completion_tokens=%s, reasoning_tokens=%s); retrying once with %d",
+            body.get("model"),
+            current,
+            usage.get("completion_tokens"),
+            details.get("reasoning_tokens"),
+            BUDGET_RETRY_TOKENS,
+        )
+        retry = dict(body)
+        retry[field] = BUDGET_RETRY_TOKENS
+        return retry
 
     @staticmethod
     def _remove_reasoning(body: dict) -> None:

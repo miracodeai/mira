@@ -934,11 +934,15 @@ class TestResponseDiagnostics:
             patch("mira.llm.provider.httpx.AsyncClient") as cls,
             pytest.raises(LLMError) as excinfo,
         ):
-            cls.return_value = self._client([empty])
+            # A reply cut off at the budget is retried once with a larger one;
+            # the model exhausts that too, and the diagnostic is still carried.
+            client = self._client([empty, empty])
+            cls.return_value = client
             await provider.complete_with_tools(
                 [{"role": "user", "content": "hi"}], tools=[self._TOOL]
             )
 
+        assert client.post.await_count == 2
         message = str(excinfo.value)
         assert "finish_reason=length" in message
         assert "reasoning_len=50" in message

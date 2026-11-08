@@ -82,6 +82,16 @@ class LLMProvider(OpenAICompatibleProvider):
             )
             self._handle_error(resp)
             data = resp.json()
+            # A caller that set its own budget asked for a short answer; only
+            # the config default is raised when the model ran out of room.
+            retry_body = self._budget_exhausted_retry(body, data) if max_tokens is None else None
+            if retry_body is not None:
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
         choice = data["choices"][0]
@@ -196,6 +206,14 @@ class LLMProvider(OpenAICompatibleProvider):
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
+            retry_body = self._budget_exhausted_retry(body, data)
+            if retry_body is not None:
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
 
@@ -279,6 +297,14 @@ class LLMProvider(OpenAICompatibleProvider):
             )
             self._handle_error(resp)
             data = resp.json()
+            retry_body = self._budget_exhausted_retry(body, data)
+            if retry_body is not None:
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
         choice = data["choices"][0]
