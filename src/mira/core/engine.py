@@ -158,6 +158,11 @@ def compose_pr_description(current_body: str, summary_block: str, mode: str) -> 
     return summary_block
 
 
+# Walkthrough submissions per review before giving up: the first call plus
+# two corrective retries.
+_WALKTHROUGH_ATTEMPTS = 3
+
+
 def _incomplete_reason(failed_chunks: int, total_chunks: int, security_failed: bool) -> str:
     """Verdict reason for a review that did not finish every pass."""
     all_failed = failed_chunks > 0 and total_chunks > 0 and failed_chunks >= total_chunks
@@ -1443,39 +1448,41 @@ class ReviewEngine:
                     pr_title=pr_title,
                     pr_description=pr_description,
                 )
-                wt_raw = await self.llm.walkthrough(wt_messages)
-                try:
-                    wt_parsed = parse_walkthrough_response(wt_raw)
-                except ResponseParseError as exc:
-                    # The bounded excerpt is what makes a "not generated"
-                    # walkthrough diagnosable from the server log alone.
-                    logger.warning(
-                        "Invalid walkthrough response; retrying once: %s (response=%s)",
-                        exc,
-                        _response_excerpt(wt_raw),
-                    )
-                    wt_messages = [
-                        *wt_messages,
-                        {
-                            "role": "user",
-                            "content": (
-                                "The previous walkthrough response was invalid. "
-                                "Submit the walkthrough again with a non-empty summary "
-                                "and change_groups using the declared JSON schema. "
-                                "Do not include tool-call XML in any field."
-                            ),
-                        },
-                    ]
+                # Models occasionally submit the tool call without the summary
+                # (Sonnet 5 did so on about one call in six on real PRs), so a
+                # bad submission gets corrective retries that name what was
+                # wrong. The bounded excerpt is what makes a "not generated"
+                # walkthrough diagnosable from the server log alone.
+                attempt = 0
+                while True:
                     wt_raw = await self.llm.walkthrough(wt_messages)
                     try:
                         wt_parsed = parse_walkthrough_response(wt_raw)
-                    except ResponseParseError as retry_exc:
+                        break
+                    except ResponseParseError as exc:
+                        attempt += 1
                         logger.warning(
-                            "Walkthrough retry was invalid too: %s (response=%s)",
-                            retry_exc,
+                            "Invalid walkthrough response (attempt %d of %d): %s (response=%s)",
+                            attempt,
+                            _WALKTHROUGH_ATTEMPTS,
+                            exc,
                             _response_excerpt(wt_raw),
                         )
-                        raise
+                        if attempt >= _WALKTHROUGH_ATTEMPTS:
+                            raise
+                        wt_messages = [
+                            *wt_messages,
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"The previous walkthrough response was invalid: {exc}. "
+                                    "Call `submit_walkthrough` again with every field filled: "
+                                    "a non-empty `summary` (2-4 sentences), `change_groups`, "
+                                    "`confidence_score` and `effort`, using the declared JSON "
+                                    "schema. Do not include tool-call XML in any field."
+                                ),
+                            },
+                        ]
                 if not self.config.review.walkthrough_sequence_diagram:
                     wt_parsed.sequence_diagram = None
                 return convert_to_walkthrough_result(wt_parsed)

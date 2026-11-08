@@ -470,8 +470,27 @@ class TestReviewEngine:
         assert mock_llm.walkthrough.await_count == 2
         retry_messages = mock_llm.walkthrough.call_args.args[0]
         assert retry_messages[-1]["role"] == "user"
-        assert "non-empty summary" in retry_messages[-1]["content"]
+        # The correction names the problem and the mandatory fields.
+        assert "non-empty `summary`" in retry_messages[-1]["content"]
+        assert "`confidence_score`" in retry_messages[-1]["content"]
         assert result.reviewed_files > 0
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_gets_two_corrective_retries(
+        self, mock_llm: LLMProvider, sample_diff_text: str
+    ):
+        """A model that drops the summary twice in a row still gets a third chance."""
+        mock_llm.walkthrough.side_effect = [
+            "{}",
+            '{"change_groups": []}',
+            _WALKTHROUGH_LLM_RESPONSE,
+        ]
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm)
+
+        result = await engine.review_diff(sample_diff_text)
+
+        assert result.walkthrough is not None
+        assert mock_llm.walkthrough.await_count == 3
 
     @pytest.mark.asyncio
     async def test_invalid_walkthrough_finalizes_placeholder_with_notice(
@@ -483,7 +502,8 @@ class TestReviewEngine:
 
         result = await engine.review_pr("https://github.com/owner/repo/pull/42")
 
-        assert mock_llm.walkthrough.await_count == 2
+        # First call plus two corrective retries, then the review goes on without it.
+        assert mock_llm.walkthrough.await_count == 3
         assert result.walkthrough is None
         assert result.reviewed_files > 0
         bodies = [c.args[2] for c in mock_provider.update_comment.call_args_list]
