@@ -246,14 +246,34 @@ class OpenAICompatibleProvider:
 
         Chat and Responses disable thinking differently, so the Responses
         payload is separate. Providers with no documented disable remain a
-        no-op (their default applies).
+        no-op (their default applies). So does a model that already refused
+        reasoning settings on a provider whose effort and off switch are one
+        unified parameter (OpenRouter's ``reasoning``): it takes neither.
         """
+        if body.get("model") in self._no_reasoning and not self.profile.get("reasoning_on_payload"):
+            return
         key = (
             "reasoning_off_payload_responses"
             if protocol == "responses"
             else "reasoning_off_payload"
         )
         body.update(self.profile.get(key, {}))
+
+    def _drop_rejected_reasoning(self, body: dict, api_model: str, protocol: str = "chat") -> None:
+        """Strip the reasoning fields a 400 just refused and remember the model.
+
+        Providers with a separate thinking toggle (DeepSeek's ``thinking``)
+        get the explicit off payload back after the effort field is refused,
+        or default-on thinking would stay in place. Providers whose effort
+        and off switch are one unified parameter (OpenRouter's ``reasoning``)
+        have just said the model takes neither: a model whose reasoning is
+        mandatory refuses the off payload, a model without reasoning refuses
+        the effort, and ``_apply_reasoning_off`` sends both nothing from now on.
+        """
+        logger.info("Model %s rejected reasoning settings; retrying without them", api_model)
+        self._remove_reasoning(body)
+        self._no_reasoning.add(api_model)
+        self._apply_reasoning_off(body, protocol)
 
     def _apply_reasoning(self, body: dict, protocol: str = "chat") -> None:
         """Add the provider's documented reasoning toggle and effort field.

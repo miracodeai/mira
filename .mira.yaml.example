@@ -12,6 +12,13 @@ llm:
   temperature: 0.2
   max_tokens: 4096
 
+  # Thinking mode for the review model: unset (or "off") turns thinking off,
+  # including on models that think by default such as DeepSeek v4.1 flash.
+  # Thinking tokens count against max_tokens, so raise the budget with it.
+  # The published benchmark ran DeepSeek v4.1 flash with these two settings:
+  # review_reasoning_effort: "medium"
+  # max_tokens: 16384
+
   # ── AWS Bedrock configuration (uncomment to use) ──
   # provider: "bedrock"
   # model: "us.anthropic.claude-sonnet-4-6-v1:0"

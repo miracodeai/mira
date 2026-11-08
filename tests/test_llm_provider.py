@@ -303,7 +303,10 @@ class TestComplete:
             assert "temperature" not in body
 
     @pytest.mark.asyncio
-    async def test_reasoning_off_leaves_body_unchanged(self):
+    async def test_reasoning_off_sends_no_effort_and_keeps_temperature(self):
+        # The default endpoint is OpenRouter, where "off" is an explicit
+        # ``reasoning: {"enabled": false}`` because thinking models think by
+        # default there; the effort field itself is never sent.
         for effort in (None, "off"):
             config = LLMConfig(model="test-model", reasoning_effort=effort)
             provider = LLMProvider(config)
@@ -321,7 +324,8 @@ class TestComplete:
 
                 call_kwargs = mock_client.post.call_args
                 body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
-                assert "reasoning" not in body
+                assert "reasoning_effort" not in body
+                assert body["reasoning"] == {"enabled": False}
                 assert "temperature" in body
 
     @pytest.mark.asyncio
