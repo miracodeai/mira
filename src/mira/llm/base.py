@@ -201,37 +201,69 @@ class OpenAICompatibleProvider:
         """Name of the Chat Completions output-token field for this profile."""
         return self.profile.get("max_tokens_field", "max_tokens")
 
+    @staticmethod
+    def _reasoning_requested(body: dict) -> bool:
+        """Whether the request asked the model to think (rather than not, or nothing)."""
+        if body.get("reasoning_effort"):
+            return True
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, dict):
+            return reasoning.get("enabled") is not False
+        thinking = body.get("thinking")
+        return isinstance(thinking, dict) and thinking.get("type") == "enabled"
+
     def _budget_exhausted_retry(self, body: dict, data: dict) -> dict | None:
         """Return a retry body when the model hit the output budget before finishing.
 
-        Thinking models count their reasoning against ``max_tokens``. With the
-        default 4096, a review-sized prompt can spend the whole budget thinking
-        and return no tool call at all, or a tool call cut off mid-JSON, which
-        the caller then cannot parse. One retry with a larger budget recovers
-        both shapes at the cost of the first call. Returns ``None`` when the
-        response finished normally or the budget was already raised.
+        Thinking models count their reasoning against ``max_tokens``, so a
+        reply cut off at the budget comes in two shapes. The answer itself was
+        too long: retry with the larger budget. The model spent the budget
+        thinking and never got to the answer: a larger budget does not help
+        (DeepSeek v4.1 flash spent all of 16k reasoning on two real PRs), so
+        the retry also turns thinking off where the provider has a switch for
+        it, and the same prompt then completes in seconds. Returns ``None``
+        when the response finished normally or nothing could change.
         """
         choice = (data.get("choices") or [{}])[0]
         if choice.get("finish_reason") != "length":
             return None
+        model = str(body.get("model"))
         field = self._max_tokens_field()
         current = int(body.get(field) or self.config.max_tokens)
-        target = min(BUDGET_RETRY_TOKENS, self._budget_caps.get(str(body.get("model")), 10**9))
-        if current >= target:
-            return None
+        target = min(BUDGET_RETRY_TOKENS, self._budget_caps.get(model, 10**9))
         usage = data.get("usage") or {}
         details = usage.get("completion_tokens_details") or {}
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+
+        raise_budget = current < target
+        thinking_ate_it = reasoning_tokens > 0 and reasoning_tokens * 10 >= completion_tokens * 9
+        stop_thinking = (
+            thinking_ate_it
+            and self._reasoning_requested(body)
+            and bool(self.profile.get("reasoning_off_payload"))
+        )
+        if not raise_budget and not stop_thinking:
+            return None
+
+        retry = dict(body)
+        changes: list[str] = []
+        if raise_budget:
+            retry[field] = target
+            changes.append(f"budget {target}")
+        if stop_thinking:
+            self._remove_reasoning(retry)
+            retry.update(self.profile["reasoning_off_payload"])
+            changes.append("thinking off")
         logger.warning(
             "Model %s hit its %d-token output budget before finishing "
-            "(completion_tokens=%s, reasoning_tokens=%s); retrying once with %d",
-            body.get("model"),
+            "(completion_tokens=%s, reasoning_tokens=%s); retrying once with %s",
+            model,
             current,
-            usage.get("completion_tokens"),
-            details.get("reasoning_tokens"),
-            BUDGET_RETRY_TOKENS,
+            completion_tokens,
+            reasoning_tokens,
+            ", ".join(changes),
         )
-        retry = dict(body)
-        retry[field] = target
         return retry
 
     def _cap_output_budget(self, body: dict) -> None:
