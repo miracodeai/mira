@@ -13,36 +13,14 @@ import fnmatch
 import json
 import logging
 
+from mira.config import MiraConfig
+
 logger = logging.getLogger(__name__)
 
 # JSON blob shapes stored in repos.base_branch_policy.
 MODE_INHERIT = "inherit"
 MODE_OVERRIDE = "override"
 MODE_DISABLE = "disable"
-
-
-def _policy_from_json(raw: str | None) -> dict | None:
-    """Parse the per-repo policy column; ``None`` when unset or unreadable.
-
-    An unreadable column (bad JSON, wrong shape) logs and resolves to
-    "unset": the dispatcher then applies the deployment default rather than
-    silently disabling or enabling reviews based on corrupt data.
-    """
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("Unparseable base_branch_policy column; using deployment default")
-        return None
-    if not isinstance(data, dict) or data.get("mode") not in (
-        MODE_INHERIT,
-        MODE_OVERRIDE,
-        MODE_DISABLE,
-    ):
-        logger.warning("Malformed base_branch_policy column; using deployment default")
-        return None
-    return data
 
 
 def validate_patterns(patterns: object) -> list[str]:
@@ -60,10 +38,36 @@ def validate_patterns(patterns: object) -> list[str]:
     return patterns
 
 
-def _configured_patterns(config) -> tuple[list[str], dict[str, list[str]]]:
-    """(default patterns, per-repo overrides) from ``filter`` config."""
-    cfg = config.filter
-    return cfg.allowed_base_branches, getattr(cfg, "allowed_base_branch_overrides", {}) or {}
+def parse_repo_policy(raw: str | None) -> dict | None:
+    """Parse and fully validate the stored per-repo policy; ``None`` when unusable.
+
+    One parser shared by the dispatcher and the dashboard, so a stored blob
+    is judged identically everywhere. Anything unreadable or malformed —
+    bad JSON, an unknown mode, an override with missing/blank patterns —
+    logs and resolves to ``None``: the dispatcher then applies the
+    deployment default rather than crashing on corrupt data.
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("policy must be a JSON object")
+        mode = data.get("mode")
+        if mode not in (MODE_INHERIT, MODE_OVERRIDE, MODE_DISABLE):
+            raise ValueError(f"unknown mode {mode!r}")
+        if mode == MODE_OVERRIDE:
+            data["branches"] = validate_patterns(data.get("branches"))
+        elif data.get("branches"):
+            # Inherit/disable ignore branches entirely; drop stale values
+            # so the stored blob stays canonical.
+            data["branches"] = []
+        return data
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "Malformed base_branch_policy column %r (%s); using deployment default", raw, exc
+        )
+        return None
 
 
 def resolve_patterns(
@@ -84,18 +88,19 @@ def resolve_patterns(
         if mode == MODE_DISABLE:
             return []
         if mode == MODE_OVERRIDE:
-            return validate_patterns(repo_policy.get("branches"))
+            # parse_repo_policy already validated the branches.
+            return repo_policy["branches"]
     folded = {str(k).casefold(): v for k, v in overrides.items()}
     override = folded.get(repo_full.casefold())
     if override is not None:
-        return validate_patterns(override)
+        return override
     return default_patterns or None
 
 
 def base_branch_is_filtered(
     repo_full: str,
     base_branch: str,
-    config,
+    config: MiraConfig,
     repo_policy_raw: str | None = None,
 ) -> bool:
     """True when an automatic review must be skipped for this destination branch.
@@ -106,13 +111,12 @@ def base_branch_is_filtered(
     configured — a missing ref must not bypass the gate — but reviewed when
     no policy exists (nothing to enforce).
     """
-    default_patterns, overrides = _configured_patterns(config)
-    repo_policy = _policy_from_json(repo_policy_raw)
+    cfg = config.filter
     patterns = resolve_patterns(
         repo_full,
-        default_patterns=default_patterns,
-        overrides=overrides,
-        repo_policy=repo_policy,
+        default_patterns=cfg.allowed_base_branches,
+        overrides=cfg.allowed_base_branch_overrides,
+        repo_policy=parse_repo_policy(repo_policy_raw),
     )
     if patterns is None:
         return False
@@ -146,7 +150,7 @@ def base_branch_is_filtered_for_repo(
     owner: str,
     repo: str,
     base_branch: str,
-    config,
+    config: MiraConfig,
     platform: str = "github",
 ) -> bool:
     """Dispatcher-facing gate: config + per-repo dashboard policy."""

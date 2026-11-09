@@ -144,7 +144,7 @@ class RepoDetail(BaseModel):
     external_refs_count: int
     lines_count: int = 0
     last_indexed: str | None = None
-    # Resolved auto-review destination-branch policy for this repo:
+    # Stored auto-review destination-branch policy for this repo:
     # "inherit" (deployment default), "override" (these patterns) or
     # "disable".
     base_branch_policy: RepoBaseBranchPolicy | None = None

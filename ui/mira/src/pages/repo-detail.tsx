@@ -133,30 +133,42 @@ function RepoDetailPageContent({
   const [indexStatus, setIndexStatus] = useState("")
 
   // Auto-review destination-branch policy for this repo.
-  const [policy, setPolicy] = useState<BaseBranchPolicy>({
-    mode: "inherit",
-    branches: [],
-  })
-  const [policyLoaded, setPolicyLoaded] = useState(false)
+  const [policy, setPolicy] = useState<BaseBranchPolicy | null>(null)
+  const [policyLoadError, setPolicyLoadError] = useState(false)
   const [savingPolicy, setSavingPolicy] = useState(false)
   const [policySaved, setPolicySaved] = useState(false)
   const [policyError, setPolicyError] = useState("")
   const [policyBranchesDraft, setPolicyBranchesDraft] = useState("")
 
+  // Keyed by owner/repo: a late response for a previous repo must not
+  // populate the form, and navigating repos resets the draft.
   useEffect(() => {
     if (!owner || !repo) return
+    let cancelled = false
+    setPolicy(null)
+    setPolicyLoadError(false)
+    setPolicyBranchesDraft("")
     api
       .getBranchPolicy(owner, repo)
       .then((p) => {
+        if (cancelled) return
         setPolicy(p)
         setPolicyBranchesDraft(p.branches.join(", "))
-        setPolicyLoaded(true)
       })
-      .catch(() => setPolicyLoaded(true))
+      .catch(() => {
+        if (!cancelled) setPolicyLoadError(true)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [owner, repo])
 
+  const setPolicyMode = (mode: BaseBranchPolicy["mode"]) => {
+    setPolicy((prev) => (prev ? { ...prev, mode } : prev))
+  }
+
   const savePolicy = async () => {
-    if (!owner || !repo) return
+    if (!owner || !repo || !policy) return
     setSavingPolicy(true)
     setPolicyError("")
     try {
@@ -167,9 +179,9 @@ function RepoDetailPageContent({
               .map((b) => b.trim())
               .filter(Boolean)
           : []
-      await api.saveBranchPolicy(owner, repo, policy.mode, branches)
-      setPolicy({ mode: policy.mode, branches })
-      setPolicyBranchesDraft(branches.join(", "))
+      const saved = await api.saveBranchPolicy(owner, repo, policy.mode, branches)
+      setPolicy(saved)
+      setPolicyBranchesDraft(saved.branches.join(", "))
       setPolicySaved(true)
       setTimeout(() => setPolicySaved(false), 2000)
     } catch (err) {
@@ -544,8 +556,15 @@ function RepoDetailPageContent({
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {!policyLoaded ? (
-                <p className="text-sm text-muted-foreground">Loading…</p>
+              {!policy ? (
+                policyLoadError ? (
+                  <p className="text-sm text-destructive">
+                    Could not load the branch policy for this repo. Reload the
+                    page to retry.
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground">Loading…</p>
+                )
               ) : (
                 <>
                   <div className="space-y-2">
@@ -554,15 +573,19 @@ function RepoDetailPageContent({
                         type="radio"
                         name="branch-policy-mode"
                         checked={policy.mode === "inherit"}
-                        onChange={() => setPolicy({ ...policy, mode: "inherit" })}
+                        onChange={() => setPolicyMode("inherit")}
                         className="size-4 accent-primary"
                       />
                       Inherit deployment default
                     </label>
                     <p className="pl-6 text-xs text-muted-foreground">
-                      Use the instance-wide{" "}
+                      Use this repo's{" "}
+                      <code className="text-xs">
+                        filter.allowed_base_branch_overrides
+                      </code>{" "}
+                      entry if one exists, otherwise the instance-wide{" "}
                       <code className="text-xs">filter.allowed_base_branches</code>{" "}
-                      setting. If none is configured, every branch is
+                      setting. If neither is configured, every branch is
                       auto-reviewed.
                     </p>
                   </div>
@@ -572,7 +595,7 @@ function RepoDetailPageContent({
                         type="radio"
                         name="branch-policy-mode"
                         checked={policy.mode === "override"}
-                        onChange={() => setPolicy({ ...policy, mode: "override" })}
+                        onChange={() => setPolicyMode("override")}
                         className="size-4 accent-primary"
                       />
                       Only these destination branches
@@ -601,7 +624,7 @@ function RepoDetailPageContent({
                         type="radio"
                         name="branch-policy-mode"
                         checked={policy.mode === "disable"}
-                        onChange={() => setPolicy({ ...policy, mode: "disable" })}
+                        onChange={() => setPolicyMode("disable")}
                         className="size-4 accent-primary"
                       />
                       Disable automatic reviews
@@ -612,7 +635,11 @@ function RepoDetailPageContent({
                     </p>
                   </div>
                   <div className="flex items-center gap-3 pt-2">
-                    <Button size="sm" onClick={savePolicy} disabled={savingPolicy}>
+                    <Button
+                      size="sm"
+                      onClick={savePolicy}
+                      disabled={savingPolicy || !policy}
+                    >
                       {savingPolicy && (
                         <Loader2 className="mr-2 h-3 w-3 animate-spin" />
                       )}

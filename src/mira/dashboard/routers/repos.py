@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import HTTPException, Request
 from fastapi import Response as FastAPIResponse
@@ -39,28 +40,20 @@ from mira.index.store import IndexStore
 def _parse_base_branch_policy(raw: str) -> RepoBaseBranchPolicy | None:
     """Parse the stored policy blob; ``None`` when unset or malformed.
 
-    Malformed data resolves to "inherit" in the dispatcher (see
-    ``base_branch_policy._policy_from_json``); here it surfaces as unset so
-    the UI shows the deployment default rather than trusting corrupt JSON.
+    Uses the same parser as the dispatcher, so the dashboard and the
+    webhook path judge stored data identically.
     """
-    from mira.platforms.base_branch_policy import validate_patterns
+    from mira.platforms.base_branch_policy import MODE_DISABLE, MODE_OVERRIDE, parse_repo_policy
 
-    if not raw:
-        return RepoBaseBranchPolicy(mode="inherit")
-    try:
-        data = json.loads(raw)
-        mode = data.get("mode")
-        if mode == "inherit":
-            return RepoBaseBranchPolicy(mode="inherit")
-        if mode == "disable":
-            return RepoBaseBranchPolicy(mode="disable")
-        if mode == "override":
-            return RepoBaseBranchPolicy(
-                mode="override", branches=validate_patterns(data.get("branches"))
-            )
-    except (json.JSONDecodeError, ValueError, AttributeError):
-        logger.warning("Malformed base_branch_policy column %r; treating as inherit", raw)
-    return None
+    policy = parse_repo_policy(raw)
+    if policy is None:
+        return None
+    mode: Literal["inherit", "override", "disable"] = policy["mode"]
+    if mode == MODE_OVERRIDE:
+        return RepoBaseBranchPolicy(mode=MODE_OVERRIDE, branches=policy["branches"])
+    if mode == MODE_DISABLE:
+        return RepoBaseBranchPolicy(mode=MODE_DISABLE)
+    return RepoBaseBranchPolicy(mode="inherit")
 
 
 @router.get("/api/repos", response_model=list[RepoListItem])
@@ -632,9 +625,11 @@ def set_branch_policy(
         raise HTTPException(
             status_code=404, detail="Repository not registered with this Mira instance"
         )
-    blob = json.dumps({"mode": body.mode, "branches": body.branches})
+    # Only override uses branches; don't persist stale values for inherit/disable.
+    branches = body.branches if body.mode == "override" else []
+    blob = json.dumps({"mode": body.mode, "branches": branches})
     _api._app_db.set_repo_base_branch_policy(owner, repo, blob, platform=record.platform)
-    return RepoBaseBranchPolicy(mode=body.mode, branches=body.branches)
+    return RepoBaseBranchPolicy(mode=body.mode, branches=branches)
 
 
 # Keep the catch-all detail route last.  For nested GitLab namespaces it can
@@ -642,8 +637,6 @@ def set_branch_policy(
 @router.get("/api/repos/{owner:path}/{repo}", response_model=RepoDetail)
 def get_repo_detail(owner: str, repo: str) -> RepoDetail:
     """Get details for a specific repo."""
-    repo_records = _api._app_db.get_repo_any_platform(owner, repo)
-    repo_record = _pick_platform_record(repo_records) if repo_records else None
     with _open_store(owner, repo) as store:
         paths = sorted(store.all_paths())
         summaries = store.get_summaries(paths)

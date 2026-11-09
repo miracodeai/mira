@@ -165,6 +165,30 @@ class FilterConfig(BaseModel):
     # that repo; [] disables auto-review there.
     allowed_base_branch_overrides: dict[str, list[str]] = Field(default_factory=dict)
 
+    @field_validator("allowed_base_branches")
+    @classmethod
+    def _validate_base_branches(cls, v: list[str]) -> list[str]:
+        from mira.platforms.base_branch_policy import validate_patterns
+
+        return validate_patterns(v)
+
+    @field_validator("allowed_base_branch_overrides")
+    @classmethod
+    def _validate_base_branch_overrides(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        from mira.platforms.base_branch_policy import validate_patterns
+
+        for repo_full, patterns in v.items():
+            if (
+                not isinstance(repo_full, str)
+                or repo_full.strip() != repo_full
+                or "/" not in repo_full
+            ):
+                raise ValueError(
+                    f"allowed_base_branch_overrides keys must be 'owner/repo', got {repo_full!r}"
+                )
+            validate_patterns(patterns)
+        return v
+
 
 class CommandOverrideConfig(BaseModel):
     """Per-command allow/deny override.

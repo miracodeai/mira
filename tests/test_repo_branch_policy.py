@@ -94,10 +94,9 @@ class TestDBColumn:
 
 
 class TestParsePolicy:
-    def test_empty_is_inherit(self):
-        p = _parse_base_branch_policy("")
-        assert p is not None
-        assert p.mode == "inherit"
+    def test_empty_is_unset(self):
+        # Unset column parses to None; the GET endpoint maps that to inherit.
+        assert _parse_base_branch_policy("") is None
 
     def test_override_round_trip(self):
         p = _parse_base_branch_policy('{"mode": "override", "branches": ["main"]}')
@@ -115,6 +114,8 @@ class TestParsePolicy:
         assert _parse_base_branch_policy('{"mode": "unknown"}') is None
         # override with a bad pattern list must not surface as a valid policy
         assert _parse_base_branch_policy('{"mode": "override", "branches": ""}') is None
+        assert _parse_base_branch_policy('{"mode": "override"}') is None
+        assert _parse_base_branch_policy('{"mode": "override", "branches": [""]}') is None
 
 
 class TestEndpoints:
@@ -132,6 +133,16 @@ class TestEndpoints:
         assert saved.mode == "override"
         assert saved.branches == ["main", "dev*"]
         assert get_branch_policy("o", "r").mode == "override"
+
+    def test_put_drops_branches_for_inherit_and_disable(self, db: AppDatabase, monkeypatch):
+        # Stale patterns must not persist for modes that ignore them.
+        db.register_repo("o", "r")
+        monkeypatch.setattr("mira.dashboard.api._app_db", db)
+        body = SimpleNamespace(mode="disable", branches=["stale"])
+        saved = set_branch_policy("o", "r", body, _admin_request())  # noqa: SLF001
+        assert saved.branches == []
+        record = db.get_repo("o", "r")
+        assert json.loads(record.base_branch_policy) == {"mode": "disable", "branches": []}
 
     def test_put_requires_admin(self, db: AppDatabase, monkeypatch):
         db.register_repo("o", "r")

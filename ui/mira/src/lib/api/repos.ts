@@ -1,5 +1,6 @@
 import { deleteJson, fetchJson, postJson, putJson } from "./http"
 import type {
+  BaseBranchPolicy,
   DependencyGraph,
   ExternalRefModel,
   FileModel,
@@ -113,17 +114,17 @@ export const reposApi = {
 
   // Per-repo auto-review destination-branch policy
   getBranchPolicy: (owner: string, repo: string) =>
-    fetchJson<{ mode: "inherit" | "override" | "disable"; branches: string[] }>(
+    fetchJson<BaseBranchPolicy>(
       `/api/repos/${owner}/${repo}/branch-policy`
     ),
 
   saveBranchPolicy: (
     owner: string,
     repo: string,
-    mode: "inherit" | "override" | "disable",
+    mode: BaseBranchPolicy["mode"],
     branches: string[]
   ) =>
-    putJson<{ mode: string; branches: string[] }>(
+    putJson<BaseBranchPolicy>(
       `/api/repos/${owner}/${repo}/branch-policy`,
       { mode, branches }
     ),

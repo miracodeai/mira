@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from mira.config import FilterConfig, MiraConfig
 from mira.platforms.base_branch_policy import (
@@ -12,6 +13,7 @@ from mira.platforms.base_branch_policy import (
     MODE_INHERIT,
     MODE_OVERRIDE,
     base_branch_is_filtered,
+    parse_repo_policy,
     resolve_patterns,
     validate_patterns,
 )
@@ -127,6 +129,56 @@ class TestDashboardPolicy:
         raw = json.dumps({"mode": "yolo"})
         assert base_branch_is_filtered("o/r", "dev", cfg, repo_policy_raw=raw) is False
         assert base_branch_is_filtered("o/r", "main", cfg, repo_policy_raw=raw) is True
+
+    def test_override_with_missing_or_bad_branches_falls_back(self):
+        # Regression: these used to raise ValueError inside the dispatcher.
+        cfg = _cfg(default=["dev*"])
+        bad_overrides = [
+            json.dumps({"mode": "override"}),  # no branches key
+            json.dumps({"mode": "override", "branches": "main"}),  # not a list
+            json.dumps({"mode": "override", "branches": [""]}),  # blank pattern
+            json.dumps({"mode": "override", "branches": ["main", 42]}),  # non-str
+        ]
+        for raw in bad_overrides:
+            # Falls back to the deployment default instead of crashing.
+            assert base_branch_is_filtered("o/r", "dev", cfg, repo_policy_raw=raw) is False
+            assert base_branch_is_filtered("o/r", "main", cfg, repo_policy_raw=raw) is True
+
+    def test_inherit_drops_stale_branches(self):
+        raw = json.dumps({"mode": "inherit", "branches": ["stale"]})
+        parsed = parse_repo_policy(raw)
+        assert parsed == {"mode": "inherit", "branches": []}
+
+
+class TestConfigValidation:
+    """Bad patterns must fail at config load, not at webhook time."""
+
+    def test_rejects_blank_pattern(self):
+        with pytest.raises(ValidationError):
+            MiraConfig(filter=FilterConfig(allowed_base_branches=[""]))
+
+    def test_rejects_string_not_list(self):
+        with pytest.raises(ValidationError):
+            MiraConfig(filter=FilterConfig(allowed_base_branches="main"))
+
+    def test_rejects_non_string_entry(self):
+        with pytest.raises(ValidationError):
+            MiraConfig(filter=FilterConfig(allowed_base_branches=[42]))
+
+    def test_rejects_bad_override_patterns(self):
+        with pytest.raises(ValidationError):
+            MiraConfig(filter=FilterConfig(allowed_base_branch_overrides={"o/r": [""]}))
+
+    def test_rejects_bad_override_key(self):
+        with pytest.raises(ValidationError):
+            MiraConfig(filter=FilterConfig(allowed_base_branch_overrides={"owneronly": ["main"]}))
+
+    def test_empty_lists_are_valid(self):
+        # Empty default = review everything; empty override = disable that repo.
+        cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=[]))
+        assert cfg.filter.allowed_base_branches == []
+        cfg = MiraConfig(filter=FilterConfig(allowed_base_branch_overrides={"o/r": []}))
+        assert cfg.filter.allowed_base_branch_overrides == {"o/r": []}
 
 
 class TestValidatePatterns:

@@ -347,21 +347,14 @@ export function SettingsPage() {
         delete next[fieldKey]
         return next
       })
+      // An empty entry is an explicit "review every branch" ([]), not a
+      // reset: deleting the override would silently restore the mira.yaml
+      // restriction. "Reset to config" below is the explicit reset.
       const parts = v
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean)
-      const effParts = Array.isArray(eff)
-        ? (eff as unknown[]).map(String)
-        : []
-      const matchesEff =
-        parts.length === effParts.length &&
-        parts.every((p, i) => p === effParts[i])
-      setOverride(
-        section,
-        key,
-        v === "" || matchesEff ? null : parts
-      )
+      setOverride(section, key, parts)
     }
 
     return (
@@ -398,6 +391,23 @@ export function SettingsPage() {
           </p>
         ) : (
           <p className="text-xs text-muted-foreground">{description}</p>
+        )}
+        {overridden && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-xs"
+            onClick={() => {
+              setOverride(section, key, null)
+              setDrafts((d) => {
+                const next = { ...d }
+                delete next[fieldKey]
+                return next
+              })
+            }}
+          >
+            Reset to config value
+          </Button>
         )}
       </div>
     )
@@ -573,7 +583,7 @@ export function SettingsPage() {
                   "filter",
                   "allowed_base_branches",
                   "Auto-reviewed destination branches",
-                  "Comma-separated globs of base (target) branches that get automatic reviews — e.g. 'main, dev*, release/*'. Empty reviews every branch. Individual repos can override this on their Review Policy tab."
+                  "Comma-separated globs of base (target) branches that get automatic reviews — e.g. 'main, dev*, release/*'. Empty means every branch is auto-reviewed. Individual repos can replace this on their Review Policy tab."
                 )}
               </div>
             </div>
