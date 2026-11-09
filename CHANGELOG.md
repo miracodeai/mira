@@ -4,6 +4,12 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Dashboard single sign-on with OpenID Connect.** Setting `MIRA_OIDC_ISSUER` and `MIRA_OIDC_CLIENT_ID` adds a "Sign in with <label>" button to the login page that works with any provider publishing discovery metadata (Entra ID, Google, Okta, Keycloak, Forgejo, …). It uses the authorization code flow with PKCE, a single-use state bound to the browser by a cookie, and a nonce; the ID token's signature, issuer, audience and expiry are verified against the provider's JWKS. Public clients (no secret) work, for tenants that block client secrets. `MIRA_OIDC_ALLOWED_DOMAINS` (verified email only) and `MIRA_OIDC_ALLOWED_GROUPS` decide who may sign in, and `MIRA_OIDC_ADMIN_GROUPS` sets the admin flag on every sign-in, so removing someone from the group revokes admin at their next login. The first sign-in creates a Mira user keyed by issuer and subject; such users have no Mira password, and an existing password user with the same name is never taken over (sign-in is refused instead). Password login stays available; `MIRA_PASSWORD_LOGIN=false` leaves single sign-on as the only interactive login. See `.env.example` for every setting.
+
 ## [0.11.0] — 2026-11-07
 
 ### Added

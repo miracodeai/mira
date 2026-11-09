@@ -13,8 +13,9 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from mira.dashboard.auth import AuthMiddleware, create_auth_router
+from mira.dashboard.auth import AuthMiddleware, create_auth_router, password_login_enabled
 from mira.dashboard.db import AppDatabase, RepoRecord
+from mira.dashboard.oidc import OIDCConfigError, OIDCSettings, create_oidc_router
 from mira.index.relationships import RelationshipStore
 from mira.index.store import IndexStore
 
@@ -42,7 +43,19 @@ def register_dashboard(app: FastAPI) -> None:
         allow_headers=["*"],
     )
     app.add_middleware(AuthMiddleware, db=_app_db)
-    app.include_router(create_auth_router(_app_db))
+    oidc_settings = OIDCSettings.from_env()
+    password_login = password_login_enabled()
+    if not password_login and oidc_settings is None:
+        raise OIDCConfigError("MIRA_PASSWORD_LOGIN=false needs single sign-on (MIRA_OIDC_ISSUER)")
+    app.include_router(
+        create_auth_router(
+            _app_db,
+            sso_label=oidc_settings.label if oidc_settings else None,
+            password_login=password_login,
+        )
+    )
+    if oidc_settings:
+        app.include_router(create_oidc_router(_app_db, oidc_settings))
     app.include_router(router)
 
 

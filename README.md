@@ -195,6 +195,8 @@ filter:
 
 → Full schema and every key: [Configuration docs](https://docs.miracode.ai/configuration).
 
+**Dashboard sign-in.** Besides username and password, the dashboard can sign people in through your identity provider with OpenID Connect (Entra ID, Google, Okta, Keycloak, Forgejo, …): set `MIRA_OIDC_ISSUER` and `MIRA_OIDC_CLIENT_ID`, and optionally restrict access and grant admin by group. The settings are listed in [`.env.example`](.env.example).
+
 ## Development
 
 ```bash

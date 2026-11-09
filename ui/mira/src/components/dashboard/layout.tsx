@@ -379,12 +379,14 @@ function UserMenu() {
             {isDark ? <Sun /> : <Moon />}
             {isDark ? "Light mode" : "Dark mode"}
           </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => navigate("/account/password")}
-            className="gap-2 py-1 text-xs [&_svg]:size-3.5"
-          >
-            <KeyRound /> Change password
-          </DropdownMenuItem>
+          {!user.sso && (
+            <DropdownMenuItem
+              onClick={() => navigate("/account/password")}
+              className="gap-2 py-1 text-xs [&_svg]:size-3.5"
+            >
+              <KeyRound /> Change password
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"

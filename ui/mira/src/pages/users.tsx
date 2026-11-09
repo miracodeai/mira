@@ -120,6 +120,14 @@ export function UsersPage() {
                     <div className="flex items-center gap-3">
                       <UserAvatar seed={u.username} className="h-7 w-7" />
                       <span className="font-medium">{u.username}</span>
+                      {u.sso && (
+                        <Badge
+                          variant="secondary"
+                          className="bg-transparent ring-1 ring-border"
+                        >
+                          SSO
+                        </Badge>
+                      )}
                       {u.id === currentUser.id && (
                         <span className="text-xs text-muted-foreground">
                           (you)
@@ -146,18 +154,22 @@ export function UsersPage() {
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            onClick={() => navigate(`/users/${u.id}/password`)}
-                          >
-                            <KeyRound className="h-3.5 w-3.5" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Reset password</TooltipContent>
-                      </Tooltip>
+                      {!u.sso && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={() =>
+                                navigate(`/users/${u.id}/password`)
+                              }
+                            >
+                              <KeyRound className="h-3.5 w-3.5" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Reset password</TooltipContent>
+                        </Tooltip>
+                      )}
                       {u.id !== currentUser.id && (
                         <ConfirmButton
                           variant="ghost"
