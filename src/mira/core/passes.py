@@ -1047,6 +1047,16 @@ async def self_critique(
     verdicts = data.get("verdicts") or []
     if not isinstance(verdicts, list):
         return comments
+    if not verdicts:
+        # A reply with no verdicts at all is a critic that did not do its job
+        # (unparseable arguments, empty reply), not a grade of every draft as
+        # unsupported. Keep the drafts, exactly as a failed critic call does.
+        logger.warning(
+            "Self-critique returned no verdicts for %d draft(s) (response=%s). Keeping all drafts.",
+            len(comments),
+            _response_excerpt(raw),
+        )
+        return comments
 
     keep_indices: set[int] = set()
     verdict_by_idx: dict[int, dict] = {}

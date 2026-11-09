@@ -10,7 +10,15 @@ llm:
   # Fallback model if primary fails
   fallback_model: "openai/gpt-4o-mini"
   temperature: 0.2
-  max_tokens: 4096
+  # Output budget per call. Thinking tokens count against it on most
+  # providers; an endpoint that rejects the budget is retried at 4096.
+  max_tokens: 16384
+
+  # Thinking mode for the review and security passes: "off", "low", "medium",
+  # "high", "xhigh" or "max". Unset means "medium", which the published
+  # benchmark ran with; "off" disables thinking, including on models that
+  # think by default such as DeepSeek v4.1 flash.
+  # review_reasoning_effort: "medium"
 
   # ── AWS Bedrock configuration (uncomment to use) ──
   # provider: "bedrock"

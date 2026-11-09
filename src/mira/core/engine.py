@@ -110,8 +110,14 @@ def _incomplete_summary(
     failures: list[ChunkFailure],
     total_chunks: int,
     original_summary: str,
+    mention: str = "@miracodeai",
 ) -> str:
-    """Prefix the review summary with an explicit incomplete notice."""
+    """Prefix the review summary with an explicit incomplete notice.
+
+    ``mention`` is how the bot is addressed on this platform; commands are
+    only picked up when the comment mentions it, so a bare ``review-rest``
+    would do nothing.
+    """
     if failures and len(failures) >= total_chunks:
         lead = (
             f"Review incomplete: all {total_chunks} chunks failed. "
@@ -122,7 +128,7 @@ def _incomplete_summary(
             f"Review incomplete: {len(failures)} of {total_chunks} chunks failed. "
             "No findings were returned for those files."
         )
-    lead += " Comment `review-rest` to retry the failed files."
+    lead += f" Comment `{mention} review-rest` to retry the failed files."
     original = (original_summary or "").strip()
     if original and "no issues found" not in original.lower():
         return f"{lead}\n\n{original}"
@@ -158,10 +164,57 @@ def compose_pr_description(current_body: str, summary_block: str, mode: str) -> 
     return summary_block
 
 
+# Walkthrough submissions per review before giving up: the first call plus
+# two corrective retries.
+_WALKTHROUGH_ATTEMPTS = 3
+
+
+def _source_ref(pr_info: PRInfo) -> str:
+    """The ref to fetch PR source at: the head commit, falling back to the branch.
+
+    The head branch of a pull request from a fork does not exist in the base
+    repository, and the branch of a merged PR is often deleted, so fetching
+    files or the tree by branch name 404s for both and every `read_file` and
+    `grep_repo` the reviewer makes fails. The head commit is reachable in the
+    base repository for any PR, open or merged.
+    """
+    return pr_info.head_sha or pr_info.head_branch
+
+
+def _incomplete_reason(
+    failed_chunks: int,
+    total_chunks: int,
+    security_failed: bool,
+    mention: str = "@miracodeai",
+) -> str:
+    """Verdict reason for a review that did not finish every pass."""
+    all_failed = failed_chunks > 0 and total_chunks > 0 and failed_chunks >= total_chunks
+    if all_failed:
+        return (
+            "The review could not complete for any part of the diff, so no findings "
+            f"were produced. Comment `{mention} review-rest` to retry."
+        )
+    if failed_chunks and security_failed:
+        what = f"{failed_chunks} of {total_chunks} review chunks and the security pass failed"
+    elif failed_chunks:
+        what = f"{failed_chunks} of {total_chunks} review chunks failed"
+    else:
+        what = "The security pass did not complete"
+    return (
+        f"{what}, so findings may be missing. "
+        f"Comment `{mention} review-rest` to retry the failed files."
+    )
+
+
 def _clamp_confidence_to_findings(
     walkthrough: WalkthroughResult,
     comments: list[ReviewComment],
     unverified: int = 0,
+    *,
+    failed_chunks: int = 0,
+    total_chunks: int = 0,
+    security_failed: bool = False,
+    mention: str = "@miracodeai",
 ) -> None:
     """Tighten the walkthrough confidence score based on actual review findings.
 
@@ -172,6 +225,9 @@ def _clamp_confidence_to_findings(
 
     Rubric (1=major concerns, 5=safe to merge):
       - ≥1 blocker → score ≤ 2
+      - a failed review chunk or security pass (and no blocker) → score ≤ 3,
+        "Review incomplete": findings may be missing, so the verdict must not
+        read as a clean bill of health however little was posted
       - ≥3 warnings (and no blocker) → score ≤ 3
       - no comments posted and score ≥ 3 → recomputed from what posted:
         5/5 "No issues to flag", or 4/5 "No confirmed issues" when
@@ -196,6 +252,10 @@ def _clamp_confidence_to_findings(
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
             "that must be fixed before merge."
         )
+    elif (failed_chunks > 0 or security_failed) and cs.score > 2:
+        cs.score = 3
+        cs.label = "Review incomplete"
+        cs.reason = _incomplete_reason(failed_chunks, total_chunks, security_failed, mention)
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
         cs.label = "Needs review"
@@ -540,7 +600,47 @@ class ReviewEngine:
             "Review finished, but the walkthrough summary could not be "
             "generated. Findings (if any) were posted as PR/file comments.",
         ),
+        "review_failed": (
+            "failure",
+            "Code Review Failed",
+            "The review could not complete for any part of the diff, so no findings "
+            "were posted. Comment `{mention} review-rest` to retry.",
+        ),
+        "incomplete": (
+            "neutral",
+            "Code Review Incomplete",
+            "Part of the diff could not be reviewed, so findings may be missing. "
+            "Comment `{mention} review-rest` to retry the failed files.",
+        ),
     }
+
+    def _mention(self) -> str:
+        """How a comment has to address the bot for a command to be picked up."""
+        return f"@{(self.bot_name or 'miracodeai').removesuffix('[bot]')}"
+
+    def _check_status_key(self, result: ReviewResult) -> str:
+        """Pick the check-run conclusion from what the review actually did.
+
+        Failed chunks outrank a missing walkthrough: a review that posted
+        nothing because every chunk failed must not conclude as success,
+        which is what a reader takes "Code Review Complete" to mean.
+        """
+        failed = len(result.failed_chunks)
+        if failed and result.total_chunks and failed >= result.total_chunks:
+            return "review_failed"
+        if failed or result.security_failures:
+            return "incomplete"
+        # Neutral only when a walkthrough was enabled AND generation was
+        # genuinely attempted but produced nothing (e.g. the LLM call failed).
+        # A disabled walkthrough, or a review skipped before any generation
+        # (no files, all files filtered, docs-only, no-new-commit re-reviews),
+        # finishes as success.
+        walkthrough_missing = (
+            self.config.review.walkthrough
+            and result.skipped_reason is None
+            and result.walkthrough is None
+        )
+        return "neutral" if walkthrough_missing else "success"
 
     async def _start_check(self, pr_info: PRInfo) -> int | None:
         """Best-effort: start a check run for the head commit; never fails a review."""
@@ -572,6 +672,13 @@ class ReviewEngine:
             parts.append(
                 f"{len(result.comments)} comment{'s' if len(result.comments) != 1 else ''}{stats}"
             )
+        if result.failed_chunks:
+            parts.append(
+                f"{len(result.failed_chunks)} of {result.total_chunks} "
+                f"chunk{'s' if result.total_chunks != 1 else ''} failed"
+            )
+        if result.security_failures:
+            parts.append("security pass failed")
         return " · ".join(parts)
 
     async def _finish_check(
@@ -587,7 +694,7 @@ class ReviewEngine:
                 run_id,
                 conclusion,
                 title=title,
-                summary=summary,
+                summary=summary.format(mention=self._mention()),
                 details=self._check_details(result),
             )
         except Exception as exc:
@@ -604,8 +711,7 @@ class ReviewEngine:
             f"**Message:** {message}"
         )
 
-    @staticmethod
-    def _format_chunk_failure_notice(failures: list[ChunkFailure]) -> str:
+    def _format_chunk_failure_notice(self, failures: list[ChunkFailure]) -> str:
         """User-safe notice for a review where every chunk failed."""
         paths = sorted({path for failure in failures for path in failure.paths if path})
         shown = paths[:8]
@@ -620,7 +726,7 @@ class ReviewEngine:
             f"**Failed chunks:** {len(failures)}\n"
             f"**Files:** {path_note or 'all selected files'}\n"
             f"**Reason:** {', '.join(reasons) or 'structured output failed'}\n\n"
-            "Comment `review-rest` to retry the failed files."
+            f"Comment `{self._mention()} review-rest` to retry the failed files."
         )
 
     async def _detect_overlaps_safe(
@@ -715,18 +821,7 @@ class ReviewEngine:
         except BaseException:
             await self._finish_check(pr_info, run_id, "failure", None)
             raise
-        # Neutral only when a walkthrough was enabled AND generation was
-        # genuinely attempted but produced nothing (e.g. the LLM call failed).
-        # A disabled walkthrough, or a review skipped before any generation
-        # (no files, all files filtered, docs-only, no-new-commit re-reviews),
-        # finishes as success.
-        walkthrough_missing = (
-            self.config.review.walkthrough
-            and result.skipped_reason is None
-            and result.walkthrough is None
-        )
-        status_key = "neutral" if walkthrough_missing else "success"
-        await self._finish_check(pr_info, run_id, status_key, result)
+        await self._finish_check(pr_info, run_id, self._check_status_key(result), result)
         return result
 
     async def _review_pr(self, pr_info: PRInfo) -> ReviewResult:
@@ -985,7 +1080,15 @@ class ReviewEngine:
             unverified = (
                 result.unverified_findings if self.config.review.show_unverified_findings else []
             )
-            _clamp_confidence_to_findings(result.walkthrough, result.comments, len(unverified))
+            _clamp_confidence_to_findings(
+                result.walkthrough,
+                result.comments,
+                len(unverified),
+                failed_chunks=len(result.failed_chunks),
+                total_chunks=result.total_chunks,
+                security_failed=bool(result.security_failures),
+                mention=self._mention(),
+            )
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:
@@ -1376,25 +1479,41 @@ class ReviewEngine:
                     pr_title=pr_title,
                     pr_description=pr_description,
                 )
-                wt_raw = await self.llm.walkthrough(wt_messages)
-                try:
-                    wt_parsed = parse_walkthrough_response(wt_raw)
-                except ResponseParseError as exc:
-                    logger.warning("Invalid walkthrough response; retrying once: %s", exc)
-                    wt_messages = [
-                        *wt_messages,
-                        {
-                            "role": "user",
-                            "content": (
-                                "The previous walkthrough response was invalid. "
-                                "Submit the walkthrough again with a non-empty summary "
-                                "and change_groups using the declared JSON schema. "
-                                "Do not include tool-call XML in any field."
-                            ),
-                        },
-                    ]
+                # Models occasionally submit the tool call without the summary
+                # (Sonnet 5 did so on about one call in six on real PRs), so a
+                # bad submission gets corrective retries that name what was
+                # wrong. The bounded excerpt is what makes a "not generated"
+                # walkthrough diagnosable from the server log alone.
+                attempt = 0
+                while True:
                     wt_raw = await self.llm.walkthrough(wt_messages)
-                    wt_parsed = parse_walkthrough_response(wt_raw)
+                    try:
+                        wt_parsed = parse_walkthrough_response(wt_raw)
+                        break
+                    except ResponseParseError as exc:
+                        attempt += 1
+                        logger.warning(
+                            "Invalid walkthrough response (attempt %d of %d): %s (response=%s)",
+                            attempt,
+                            _WALKTHROUGH_ATTEMPTS,
+                            exc,
+                            _response_excerpt(wt_raw),
+                        )
+                        if attempt >= _WALKTHROUGH_ATTEMPTS:
+                            raise
+                        wt_messages = [
+                            *wt_messages,
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"The previous walkthrough response was invalid: {exc}. "
+                                    "Call `submit_walkthrough` again with every field filled: "
+                                    "a non-empty `summary` (2-4 sentences), `change_groups`, "
+                                    "`confidence_score` and `effort`, using the declared JSON "
+                                    "schema. Do not include tool-call XML in any field."
+                                ),
+                            },
+                        ]
                 if not self.config.review.walkthrough_sequence_diagram:
                     wt_parsed.sequence_diagram = None
                 return convert_to_walkthrough_result(wt_parsed)
@@ -1414,7 +1533,7 @@ class ReviewEngine:
                         from mira.index.context import ProviderSourceFetcher
 
                         source_fetcher = ProviderSourceFetcher(
-                            self.provider, pr_info, pr_info.head_branch
+                            self.provider, pr_info, _source_ref(pr_info)
                         )
                     changed_paths = [f.path for f in filtered]
                     ctx = await build_code_context(
@@ -1443,7 +1562,7 @@ class ReviewEngine:
                         if hasattr(self.provider, "get_repo_tree"):
                             try:
                                 tree_paths = set(
-                                    await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
+                                    await self.provider.get_repo_tree(pr_info, _source_ref(pr_info))
                                 )
                             except Exception as exc:
                                 logger.debug("Repo tree fetch failed: %s", exc)
@@ -1882,7 +2001,7 @@ class ReviewEngine:
                     from mira.index.context import ProviderSourceFetcher
 
                     pr_source_fetcher = ProviderSourceFetcher(
-                        self.provider, pr_info, pr_info.head_branch
+                        self.provider, pr_info, _source_ref(pr_info)
                     )
         dependency_task = _asyncio.create_task(
             dependency_review_pass(
@@ -2044,6 +2163,7 @@ class ReviewEngine:
                     chunk_failures,
                     len(chunks),
                     original_summary,
+                    self._mention(),
                 )
             else:
                 # Regenerate from the FINAL filed outputs so summary prose can't

@@ -92,7 +92,7 @@ Mira sits furthest up on the precision axis at a recall most tools don't reach: 
 
 Median review time was **106 seconds** per PR; all 50 reviews completed.
 
-> Methodology: all 50 PRs of the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset, reviewed once each with Mira's shipping defaults and scored with the benchmark's own matching prompts and Claude Sonnet 4.5 as the judge; competitor rows are the benchmark's published results on the same PRs. Settings, per-PR results and commit pins are in [`benchmark-results.json`](.github/assets/benchmark-results.json).
+> Methodology: all 50 PRs of the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset, reviewed once each with Mira's default settings (reasoning effort `medium`, 16k-token output budget) and scored with the benchmark's own matching prompts and Claude Sonnet 4.5 as the judge; competitor rows are the benchmark's published results on the same PRs. Settings, per-PR results and commit pins are in [`benchmark-results.json`](.github/assets/benchmark-results.json).
 
 ## Quick Start
 

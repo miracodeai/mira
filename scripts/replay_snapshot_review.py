@@ -222,6 +222,11 @@ async def main() -> None:
                 "findings": len(result.comments),
                 "reviewed_files": result.reviewed_files,
                 "skipped_paths": result.skipped_paths,
+                "failed_chunks": [
+                    {"reason": f.reason, "paths": f.paths} for f in result.failed_chunks
+                ],
+                "security_failures": [f.reason for f in result.security_failures],
+                "walkthrough": result.walkthrough is not None,
                 "seconds": round(report["duration_seconds"], 1),
                 "comments": [
                     {
