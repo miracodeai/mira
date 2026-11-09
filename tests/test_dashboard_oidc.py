@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import secrets
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -33,7 +34,7 @@ from mira.dashboard.oidc import (
 
 ISSUER = "https://idp.test"
 CLIENT_ID = "mira-dashboard"
-CLIENT_SECRET = "s3cret~value-long-enough-for-an-hs256-key"
+CLIENT_SECRET = secrets.token_urlsafe(32) + "~+/"
 REDIRECT_URL = "http://testserver/api/auth/oidc/callback"
 
 
