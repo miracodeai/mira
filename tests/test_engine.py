@@ -1207,6 +1207,30 @@ class TestCheckRunLifecycle:
         return ReviewEngine(config=config, llm=mock_llm, provider=mock_provider)
 
     @pytest.mark.asyncio
+    async def test_review_pr_fetches_source_at_the_head_commit(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock, tmp_path, monkeypatch
+    ):
+        """A fork's head branch does not exist in the base repository and a
+        merged PR's branch is usually deleted, so the tree and file reads must
+        use the head commit, which is reachable for any PR."""
+        monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path / "indexes"))
+        pr_info = await mock_provider.get_pr_info("https://github.com/test/repo/pull/1")
+        mock_provider.get_pr_info.return_value = replace(pr_info, head_sha="deadbeef")
+        mock_provider.get_all_bot_threads = AsyncMock(return_value=[])
+        mock_provider.get_repo_tree = AsyncMock(return_value=["src/utils.py"])
+        mock_provider.get_file_content = AsyncMock(return_value="")
+
+        config = MiraConfig()
+        config.review.agentic_tools = False
+        engine = ReviewEngine(config=config, llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.get_repo_tree.assert_awaited()
+        assert mock_provider.get_repo_tree.await_args.args[1] == "deadbeef"
+        for call in mock_provider.get_file_content.await_args_list:
+            assert call.args[2] == "deadbeef"
+
+    @pytest.mark.asyncio
     async def test_review_pr_check_run_fails_when_every_chunk_fails(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):

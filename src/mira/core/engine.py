@@ -163,6 +163,18 @@ def compose_pr_description(current_body: str, summary_block: str, mode: str) -> 
 _WALKTHROUGH_ATTEMPTS = 3
 
 
+def _source_ref(pr_info: PRInfo) -> str:
+    """The ref to fetch PR source at: the head commit, falling back to the branch.
+
+    The head branch of a pull request from a fork does not exist in the base
+    repository, and the branch of a merged PR is often deleted, so fetching
+    files or the tree by branch name 404s for both and every `read_file` and
+    `grep_repo` the reviewer makes fails. The head commit is reachable in the
+    base repository for any PR, open or merged.
+    """
+    return pr_info.head_sha or pr_info.head_branch
+
+
 def _incomplete_reason(failed_chunks: int, total_chunks: int, security_failed: bool) -> str:
     """Verdict reason for a review that did not finish every pass."""
     all_failed = failed_chunks > 0 and total_chunks > 0 and failed_chunks >= total_chunks
@@ -1502,7 +1514,7 @@ class ReviewEngine:
                         from mira.index.context import ProviderSourceFetcher
 
                         source_fetcher = ProviderSourceFetcher(
-                            self.provider, pr_info, pr_info.head_branch
+                            self.provider, pr_info, _source_ref(pr_info)
                         )
                     changed_paths = [f.path for f in filtered]
                     ctx = await build_code_context(
@@ -1531,7 +1543,7 @@ class ReviewEngine:
                         if hasattr(self.provider, "get_repo_tree"):
                             try:
                                 tree_paths = set(
-                                    await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
+                                    await self.provider.get_repo_tree(pr_info, _source_ref(pr_info))
                                 )
                             except Exception as exc:
                                 logger.debug("Repo tree fetch failed: %s", exc)
@@ -1970,7 +1982,7 @@ class ReviewEngine:
                     from mira.index.context import ProviderSourceFetcher
 
                     pr_source_fetcher = ProviderSourceFetcher(
-                        self.provider, pr_info, pr_info.head_branch
+                        self.provider, pr_info, _source_ref(pr_info)
                     )
         dependency_task = _asyncio.create_task(
             dependency_review_pass(
