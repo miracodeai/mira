@@ -4,7 +4,11 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.1] — 2026-11-09
+### Added
+
+- **Release smoke eval on real pull requests.** `tests/evals/test_eval_release_smoke.py` reviews five merged PRs of this repository end to end in dry-run mode (3 to 30 files, so the agentic loop, hop cap and forced submission are exercised) and fails the release gate when a review comes back with a failed chunk, a failed security pass or no walkthrough, allowing one retry per PR. The evals workflow passes `GITHUB_TOKEN` for read access and `MIRA_MODEL` from the `MIRA_EVAL_MODEL` repository variable so the gate runs on the deployed model.
+- The benchmark replay script reports failed chunks, security failures and whether a walkthrough was generated in its per-PR summary.
 
 ### Changed
 
@@ -19,11 +23,6 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`reasoning_effort` unset now turns thinking off on OpenRouter, as the setting documents.** Mira sent nothing reasoning-shaped when the effort was unset, so a model that thinks by default (DeepSeek v4.1 flash) reasoned without bound: on two of the five smoke-eval PRs it spent even the 16,384-token retry budget thinking and still returned no tool call. The OpenRouter profile now sends `reasoning: {"enabled": false}` when no effort is configured, matching what the direct DeepSeek profile already did. A model whose reasoning is mandatory (some Claude endpoints) refuses that once with a 400 and is then sent nothing reasoning-shaped, on every request path; a model that refuses the effort field still falls back to the off payload as before. To review with thinking, set `llm.review_reasoning_effort` (the benchmark used `medium` with `llm.max_tokens: 16384`).
 - **A walkthrough submission missing its summary gets two corrective retries, not one.** Probing Claude Sonnet 5 on real PRs showed the model omitting `summary` from the `submit_walkthrough` call on about one submission in six, with nothing in the assistant text to fall back on, so a review that drew two in a row posted "Walkthrough was not generated". The prompt now says the summary is mandatory and lists every field a submission must carry, the correction names what was wrong, a third attempt is made, and each invalid response is logged with a bounded excerpt so the next occurrence is diagnosable from the server log.
 - **A failed review no longer reports itself as a success.** When every chunk failed, 0.11.0 still concluded the check run as "Code Review Complete" and rewrote the walkthrough verdict to 5/5 "No issues to flag", because the conclusion only considered a missing walkthrough and the verdict only counted posted comments. The check run now concludes `failure` ("Code Review Failed") when no chunk completed and `neutral` ("Code Review Incomplete") when some chunks or the security pass failed, with the counts in its details; the verdict is capped at 3/5 "Review incomplete" with a reason that says what failed and how to retry. A known blocker still wins, and a score the model already set at 2 or below is left alone.
-
-### Added
-
-- **Release smoke eval on real pull requests.** `tests/evals/test_eval_release_smoke.py` reviews five merged PRs of this repository end to end in dry-run mode (3 to 30 files, so the agentic loop, hop cap and forced submission are exercised) and fails the release gate when a review comes back with a failed chunk, a failed security pass or no walkthrough, allowing one retry per PR. The evals workflow passes `GITHUB_TOKEN` for read access and `MIRA_MODEL` from the `MIRA_EVAL_MODEL` repository variable so the gate runs on the deployed model.
-- The benchmark replay script reports failed chunks, security failures and whether a walkthrough was generated in its per-PR summary.
 
 ## [0.11.0] — 2026-11-07
 
@@ -432,6 +431,7 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.11.1]: https://github.com/miracodeai/mira/releases/tag/v0.11.1
 [0.11.0]: https://github.com/miracodeai/mira/releases/tag/v0.11.0
 [0.10.1]: https://github.com/miracodeai/mira/releases/tag/v0.10.1
 [0.10.0]: https://github.com/miracodeai/mira/releases/tag/v0.10.0
