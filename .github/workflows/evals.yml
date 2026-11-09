@@ -8,12 +8,18 @@ name: Evals
 # (everything except the noisy `benchmark` scorecard). The release pipeline
 # (release.yml) calls it before building the container, so a red eval blocks
 # the ship. Also dispatchable manually to investigate a suspected regression.
+#
+# It includes the release smoke eval (tests/evals/test_eval_release_smoke.py),
+# which reviews a few merged PRs of this repository end to end in dry-run
+# mode. Set the MIRA_EVAL_MODEL repository variable to the model the
+# deployment uses so the gate exercises that model, not the config default.
 on:
   workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   evals:
@@ -37,4 +43,8 @@ jobs:
       - name: Run eval gate (stable evals, excludes the benchmark scorecard)
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Read-only access to this repository's merged PRs for the smoke eval.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty when the variable is unset, which leaves the config default.
+          MIRA_MODEL: ${{ vars.MIRA_EVAL_MODEL }}
         run: uv run pytest tests/evals/ -v -m "eval and not benchmark"

@@ -314,14 +314,11 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     _api._app_db.set_setting("indexing_model", body.indexing_model.strip())
     _api._app_db.set_setting("review_model", body.review_model.strip())
     _api._app_db.set_setting("security_model", body.security_model.strip())
-    # Clear "off" to "" rather than persisting the literal — "off" is the
-    # default, and a stored value would shadow a mira.yaml
-    # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
-    # reads back as unset so the config fallback chain works.
-    if body.review_thinking_mode and body.review_thinking_mode != "off":
-        _api._app_db.set_setting("review_thinking_mode", body.review_thinking_mode)
-    else:
-        _api._app_db.set_setting("review_thinking_mode", "")
+    # Stored as chosen, "off" included: the form shows the resolved mode, so
+    # whatever comes back is the admin's decision and must win over the
+    # config default ("medium"). "" (not None — the column is NOT NULL) clears
+    # the override so the config fallback chain applies again.
+    _api._app_db.set_setting("review_thinking_mode", body.review_thinking_mode or "")
 
     # Clear "chat" (default) to "" so a stored value never shadows mira.yaml config overrides.
     if body.api_style and body.api_style != "chat":
