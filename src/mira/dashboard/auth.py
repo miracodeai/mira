@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+from collections.abc import Mapping
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -17,9 +19,22 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE = "mira_session"
 
 # Routes that don't require auth
-_PUBLIC_PATHS = {"/api/auth/login", "/docs", "/openapi.json", "/redoc"}
+_PUBLIC_PATHS = {
+    "/api/auth/login",
+    "/api/auth/providers",
+    "/api/auth/oidc/login",
+    "/api/auth/oidc/callback",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+}
 # The badge SVG must be public so GitHub can embed it as an image
 _PUBLIC_SVG = re.compile(r"/api/repos/[^/]+/[^/]+/blast-radius\.svg")
+
+
+def password_login_enabled(env: Mapping[str, str] = os.environ) -> bool:
+    """MIRA_PASSWORD_LOGIN=false leaves single sign-on as the only interactive login."""
+    return env.get("MIRA_PASSWORD_LOGIN", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 
 class LoginRequest(BaseModel):
@@ -33,6 +48,7 @@ class UserResponse(BaseModel):
     is_admin: bool
     theme: str = "dark"
     last_login_at: float = 0
+    sso: bool = False
 
 
 class SetThemeRequest(BaseModel):
@@ -54,11 +70,22 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
-def create_auth_router(db: AppDatabase) -> APIRouter:
+def create_auth_router(
+    db: AppDatabase, sso_label: str | None = None, password_login: bool = True
+) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+    @router.get("/providers")
+    def providers() -> dict:
+        sso = {"label": sso_label, "login_url": "/api/auth/oidc/login"} if sso_label else None
+        return {"password": password_login, "sso": sso}
 
     @router.post("/login")
     def login(body: LoginRequest, request: Request, response: Response) -> dict:
+        if not password_login:
+            return JSONResponse(
+                status_code=403, content={"error": "Password sign-in is off; use single sign-on"}
+            )
         user = db.authenticate(body.username, body.password)
         if not user:
             return JSONResponse(status_code=401, content={"error": "Invalid credentials"})
@@ -103,6 +130,7 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
             "username": user.username,
             "is_admin": user.is_admin,
             "theme": user.theme,
+            "sso": user.auth_provider != "local",
         }
 
     @router.put("/theme")
@@ -122,6 +150,10 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
         user = getattr(request.state, "user", None)
         if not user:
             return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+        if user.auth_provider != "local":
+            return JSONResponse(
+                status_code=400, content={"error": "Single sign-on accounts have no Mira password"}
+            )
         if not body.new_password:
             return JSONResponse(status_code=400, content={"error": "New password cannot be empty"})
         # Re-verify the current password before allowing a change.
@@ -143,6 +175,7 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
                 "username": u.username,
                 "is_admin": u.is_admin,
                 "last_login_at": u.last_login_at,
+                "sso": u.auth_provider != "local",
             }
             for u in db.list_users()
         ]
@@ -175,6 +208,11 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
             return JSONResponse(status_code=403, content={"error": "Admin access required"})
         if not body.new_password:
             return JSONResponse(status_code=400, content={"error": "New password cannot be empty"})
+        target = next((u for u in db.list_users() if u.id == user_id), None)
+        if target is not None and target.auth_provider != "local":
+            return JSONResponse(
+                status_code=400, content={"error": "Single sign-on accounts have no Mira password"}
+            )
         db.update_password(user_id, body.new_password)
         return {"ok": True}
 

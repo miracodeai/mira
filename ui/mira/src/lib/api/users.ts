@@ -9,6 +9,7 @@ export const usersApi = {
         username: string
         is_admin: boolean
         last_login_at: number
+        sso?: boolean
       }[]
     >("/api/auth/users"),
 

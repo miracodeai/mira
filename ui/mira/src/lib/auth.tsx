@@ -7,6 +7,7 @@ export interface AuthUser {
   username: string
   is_admin: boolean
   theme: "dark" | "light"
+  sso?: boolean
 }
 
 interface AuthContextType {

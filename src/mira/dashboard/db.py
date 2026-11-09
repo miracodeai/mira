@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin INTEGER NOT NULL DEFAULT 0,
     theme TEXT NOT NULL DEFAULT 'dark',
     created_at REAL NOT NULL DEFAULT 0,
-    last_login_at REAL NOT NULL DEFAULT 0
+    last_login_at REAL NOT NULL DEFAULT 0,
+    auth_provider TEXT NOT NULL DEFAULT 'local',
+    external_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -38,6 +40,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at REAL NOT NULL DEFAULT 0,
     expires_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS oidc_login_states (
+    state TEXT PRIMARY KEY,
+    nonce TEXT NOT NULL,
+    code_verifier TEXT NOT NULL,
+    next_path TEXT NOT NULL DEFAULT '/',
+    expires_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS repos (
@@ -209,7 +219,9 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     theme TEXT NOT NULL DEFAULT 'dark',
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    last_login_at DOUBLE PRECISION NOT NULL DEFAULT 0
+    last_login_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+    auth_provider TEXT NOT NULL DEFAULT 'local',
+    external_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -217,6 +229,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oidc_login_states (
+    state TEXT PRIMARY KEY,
+    nonce TEXT NOT NULL,
+    code_verifier TEXT NOT NULL,
+    next_path TEXT NOT NULL DEFAULT '/',
+    expires_at DOUBLE PRECISION NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS repos (
@@ -353,6 +373,8 @@ CREATE TABLE IF NOT EXISTS pr_reviewers (
 """
 
 SESSION_DURATION = 86400 * 7  # 7 days
+# Never matches a stored hash, so single-sign-on accounts can't use the password login.
+_NO_PASSWORD = "!"
 
 
 @dataclass
@@ -363,6 +385,7 @@ class User:
     theme: str = "dark"
     created_at: float = 0.0
     last_login_at: float = 0.0
+    auth_provider: str = "local"
 
 
 @dataclass
@@ -523,6 +546,16 @@ class AppDatabase:
             self._sqlite_conn.execute(
                 "ALTER TABLE users ADD COLUMN last_login_at REAL NOT NULL DEFAULT 0"
             )
+        if "auth_provider" not in user_cols:
+            self._sqlite_conn.execute(
+                "ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'local'"
+            )
+        if "external_id" not in user_cols:
+            self._sqlite_conn.execute("ALTER TABLE users ADD COLUMN external_id TEXT")
+        self._sqlite_conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS users_external_id ON users (external_id) "
+            "WHERE external_id IS NOT NULL"
+        )
         cols = {r[1] for r in self._sqlite_conn.execute("PRAGMA table_info(repos)").fetchall()}
         if "last_indexed_at" not in cols:
             self._sqlite_conn.execute(
@@ -600,6 +633,15 @@ class AppDatabase:
                 cur.execute(
                     "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
                     "last_login_at DOUBLE PRECISION NOT NULL DEFAULT 0"
+                )
+                cur.execute(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                    "auth_provider TEXT NOT NULL DEFAULT 'local'"
+                )
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS external_id TEXT")
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS users_external_id ON users (external_id) "
+                    "WHERE external_id IS NOT NULL"
                 )
                 cur.execute(
                     "ALTER TABLE repos ADD COLUMN IF NOT EXISTS last_indexed_at TIMESTAMPTZ"
@@ -809,8 +851,8 @@ class AppDatabase:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
-                "SELECT u.id, u.username, u.is_admin, u.theme, u.created_at FROM sessions s "
-                "JOIN users u ON s.user_id = u.id "
+                "SELECT u.id, u.username, u.is_admin, u.theme, u.created_at, u.auth_provider "
+                "FROM sessions s JOIN users u ON s.user_id = u.id "
                 "WHERE s.token = ? AND s.expires_at > ?",
                 (token, time.time()),
             ).fetchone()
@@ -821,18 +863,25 @@ class AppDatabase:
                     is_admin=bool(row[2]),
                     theme=row[3],
                     created_at=row[4],
+                    auth_provider=row[5],
                 )
             return None
         with self._pg_cursor() as cur:
             cur.execute(
-                "SELECT u.id, u.username, u.is_admin, u.theme FROM sessions s "
+                "SELECT u.id, u.username, u.is_admin, u.theme, u.auth_provider FROM sessions s "
                 "JOIN users u ON s.user_id = u.id "
                 "WHERE s.token = %s AND s.expires_at > NOW()",
                 (token,),
             )
             row = cur.fetchone()
             if row:
-                return User(id=row[0], username=row[1], is_admin=bool(row[2]), theme=row[3])
+                return User(
+                    id=row[0],
+                    username=row[1],
+                    is_admin=bool(row[2]),
+                    theme=row[3],
+                    auth_provider=row[4],
+                )
             return None
 
     def set_user_theme(self, user_id: int, theme: str) -> None:
@@ -878,7 +927,8 @@ class AppDatabase:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             rows = self._sqlite_conn.execute(
-                "SELECT id, username, is_admin, created_at, last_login_at FROM users ORDER BY id"
+                "SELECT id, username, is_admin, created_at, last_login_at, auth_provider "
+                "FROM users ORDER BY id"
             ).fetchall()
             return [
                 User(
@@ -887,13 +937,22 @@ class AppDatabase:
                     is_admin=bool(r[2]),
                     created_at=r[3],
                     last_login_at=r[4],
+                    auth_provider=r[5],
                 )
                 for r in rows
             ]
         with self._pg_cursor() as cur:
-            cur.execute("SELECT id, username, is_admin, last_login_at FROM users ORDER BY id")
+            cur.execute(
+                "SELECT id, username, is_admin, last_login_at, auth_provider FROM users ORDER BY id"
+            )
             return [
-                User(id=r[0], username=r[1], is_admin=bool(r[2]), last_login_at=r[3])
+                User(
+                    id=r[0],
+                    username=r[1],
+                    is_admin=bool(r[2]),
+                    last_login_at=r[3],
+                    auth_provider=r[4],
+                )
                 for r in cur.fetchall()
             ]
 
@@ -914,6 +973,137 @@ class AppDatabase:
         else:
             with self._pg_cursor() as cur:
                 cur.execute("DELETE FROM sessions WHERE token = %s", (token,))
+
+    # ── Single sign-on (OpenID Connect) ──
+
+    def get_user_by_username(self, username: str) -> User | None:
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            row = self._sqlite_conn.execute(
+                "SELECT id, username, is_admin, theme, auth_provider FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "SELECT id, username, is_admin, theme, auth_provider FROM users "
+                    "WHERE username = %s",
+                    (username,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return User(
+            id=row[0], username=row[1], is_admin=bool(row[2]), theme=row[3], auth_provider=row[4]
+        )
+
+    def get_user_by_external_id(self, external_id: str) -> User | None:
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            row = self._sqlite_conn.execute(
+                "SELECT id, username, is_admin, theme, auth_provider FROM users "
+                "WHERE external_id = ?",
+                (external_id,),
+            ).fetchone()
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "SELECT id, username, is_admin, theme, auth_provider FROM users "
+                    "WHERE external_id = %s",
+                    (external_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return User(
+            id=row[0], username=row[1], is_admin=bool(row[2]), theme=row[3], auth_provider=row[4]
+        )
+
+    def create_sso_user(self, username: str, external_id: str, is_admin: bool) -> User:
+        now = time.time()
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(
+                "INSERT INTO users (username, password_hash, is_admin, created_at, "
+                "auth_provider, external_id) VALUES (?, ?, ?, ?, 'oidc', ?)",
+                (username, _NO_PASSWORD, int(is_admin), now, external_id),
+            )
+            self._sqlite_conn.commit()
+            row_id = self._sqlite_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, is_admin, auth_provider, "
+                    "external_id) VALUES (%s, %s, %s, 'oidc', %s) RETURNING id",
+                    (username, _NO_PASSWORD, is_admin, external_id),
+                )
+                row_id = cur.fetchone()[0]
+            self._pg_commit()
+        return User(
+            id=row_id, username=username, is_admin=is_admin, created_at=now, auth_provider="oidc"
+        )
+
+    def update_sso_user(self, user_id: int, username: str, is_admin: bool) -> None:
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(
+                "UPDATE users SET username = ?, is_admin = ? WHERE id = ?",
+                (username, int(is_admin), user_id),
+            )
+            self._sqlite_conn.commit()
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET username = %s, is_admin = %s WHERE id = %s",
+                    (username, is_admin, user_id),
+                )
+            self._pg_commit()
+
+    def save_oidc_state(
+        self, state: str, nonce: str, code_verifier: str, next_path: str, ttl_seconds: float
+    ) -> None:
+        now = time.time()
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute("DELETE FROM oidc_login_states WHERE expires_at < ?", (now,))
+            self._sqlite_conn.execute(
+                "INSERT INTO oidc_login_states (state, nonce, code_verifier, next_path, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (state, nonce, code_verifier, next_path, now + ttl_seconds),
+            )
+            self._sqlite_conn.commit()
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute("DELETE FROM oidc_login_states WHERE expires_at < %s", (now,))
+                cur.execute(
+                    "INSERT INTO oidc_login_states (state, nonce, code_verifier, next_path, "
+                    "expires_at) VALUES (%s, %s, %s, %s, %s)",
+                    (state, nonce, code_verifier, next_path, now + ttl_seconds),
+                )
+            self._pg_commit()
+
+    def pop_oidc_state(self, state: str) -> tuple[str, str, str] | None:
+        """Consume a pending sign-in: (nonce, code_verifier, next_path), or None once used or expired."""
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            row = self._sqlite_conn.execute(
+                "DELETE FROM oidc_login_states WHERE state = ? "
+                "RETURNING nonce, code_verifier, next_path, expires_at",
+                (state,),
+            ).fetchone()
+            self._sqlite_conn.commit()
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "DELETE FROM oidc_login_states WHERE state = %s "
+                    "RETURNING nonce, code_verifier, next_path, expires_at",
+                    (state,),
+                )
+                row = cur.fetchone()
+            self._pg_commit()
+        if not row or row[3] < time.time():
+            return None
+        return row[0], row[1], row[2]
 
     # ── Repos ──
 

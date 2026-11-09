@@ -16,6 +16,14 @@ export function ChangePasswordPage() {
     )
   }
 
+  if (user.sso) {
+    return (
+      <div className="p-6 text-sm text-muted-foreground">
+        You sign in with single sign-on, so there is no Mira password to change.
+      </div>
+    )
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6">
       <button
