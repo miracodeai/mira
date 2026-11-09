@@ -110,8 +110,14 @@ def _incomplete_summary(
     failures: list[ChunkFailure],
     total_chunks: int,
     original_summary: str,
+    mention: str = "@miracodeai",
 ) -> str:
-    """Prefix the review summary with an explicit incomplete notice."""
+    """Prefix the review summary with an explicit incomplete notice.
+
+    ``mention`` is how the bot is addressed on this platform; commands are
+    only picked up when the comment mentions it, so a bare ``review-rest``
+    would do nothing.
+    """
     if failures and len(failures) >= total_chunks:
         lead = (
             f"Review incomplete: all {total_chunks} chunks failed. "
@@ -122,7 +128,7 @@ def _incomplete_summary(
             f"Review incomplete: {len(failures)} of {total_chunks} chunks failed. "
             "No findings were returned for those files."
         )
-    lead += " Comment `review-rest` to retry the failed files."
+    lead += f" Comment `{mention} review-rest` to retry the failed files."
     original = (original_summary or "").strip()
     if original and "no issues found" not in original.lower():
         return f"{lead}\n\n{original}"
@@ -175,13 +181,18 @@ def _source_ref(pr_info: PRInfo) -> str:
     return pr_info.head_sha or pr_info.head_branch
 
 
-def _incomplete_reason(failed_chunks: int, total_chunks: int, security_failed: bool) -> str:
+def _incomplete_reason(
+    failed_chunks: int,
+    total_chunks: int,
+    security_failed: bool,
+    mention: str = "@miracodeai",
+) -> str:
     """Verdict reason for a review that did not finish every pass."""
     all_failed = failed_chunks > 0 and total_chunks > 0 and failed_chunks >= total_chunks
     if all_failed:
         return (
             "The review could not complete for any part of the diff, so no findings "
-            "were produced. Comment `review-rest` to retry."
+            f"were produced. Comment `{mention} review-rest` to retry."
         )
     if failed_chunks and security_failed:
         what = f"{failed_chunks} of {total_chunks} review chunks and the security pass failed"
@@ -189,7 +200,10 @@ def _incomplete_reason(failed_chunks: int, total_chunks: int, security_failed: b
         what = f"{failed_chunks} of {total_chunks} review chunks failed"
     else:
         what = "The security pass did not complete"
-    return f"{what}, so findings may be missing. Comment `review-rest` to retry the failed files."
+    return (
+        f"{what}, so findings may be missing. "
+        f"Comment `{mention} review-rest` to retry the failed files."
+    )
 
 
 def _clamp_confidence_to_findings(
@@ -200,6 +214,7 @@ def _clamp_confidence_to_findings(
     failed_chunks: int = 0,
     total_chunks: int = 0,
     security_failed: bool = False,
+    mention: str = "@miracodeai",
 ) -> None:
     """Tighten the walkthrough confidence score based on actual review findings.
 
@@ -240,7 +255,7 @@ def _clamp_confidence_to_findings(
     elif (failed_chunks > 0 or security_failed) and cs.score > 2:
         cs.score = 3
         cs.label = "Review incomplete"
-        cs.reason = _incomplete_reason(failed_chunks, total_chunks, security_failed)
+        cs.reason = _incomplete_reason(failed_chunks, total_chunks, security_failed, mention)
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
         cs.label = "Needs review"
@@ -589,15 +604,19 @@ class ReviewEngine:
             "failure",
             "Code Review Failed",
             "The review could not complete for any part of the diff, so no findings "
-            "were posted. Comment `review-rest` to retry.",
+            "were posted. Comment `{mention} review-rest` to retry.",
         ),
         "incomplete": (
             "neutral",
             "Code Review Incomplete",
             "Part of the diff could not be reviewed, so findings may be missing. "
-            "Comment `review-rest` to retry the failed files.",
+            "Comment `{mention} review-rest` to retry the failed files.",
         ),
     }
+
+    def _mention(self) -> str:
+        """How a comment has to address the bot for a command to be picked up."""
+        return f"@{(self.bot_name or 'miracodeai').removesuffix('[bot]')}"
 
     def _check_status_key(self, result: ReviewResult) -> str:
         """Pick the check-run conclusion from what the review actually did.
@@ -675,7 +694,7 @@ class ReviewEngine:
                 run_id,
                 conclusion,
                 title=title,
-                summary=summary,
+                summary=summary.format(mention=self._mention()),
                 details=self._check_details(result),
             )
         except Exception as exc:
@@ -692,8 +711,7 @@ class ReviewEngine:
             f"**Message:** {message}"
         )
 
-    @staticmethod
-    def _format_chunk_failure_notice(failures: list[ChunkFailure]) -> str:
+    def _format_chunk_failure_notice(self, failures: list[ChunkFailure]) -> str:
         """User-safe notice for a review where every chunk failed."""
         paths = sorted({path for failure in failures for path in failure.paths if path})
         shown = paths[:8]
@@ -708,7 +726,7 @@ class ReviewEngine:
             f"**Failed chunks:** {len(failures)}\n"
             f"**Files:** {path_note or 'all selected files'}\n"
             f"**Reason:** {', '.join(reasons) or 'structured output failed'}\n\n"
-            "Comment `review-rest` to retry the failed files."
+            f"Comment `{self._mention()} review-rest` to retry the failed files."
         )
 
     async def _detect_overlaps_safe(
@@ -1069,6 +1087,7 @@ class ReviewEngine:
                 failed_chunks=len(result.failed_chunks),
                 total_chunks=result.total_chunks,
                 security_failed=bool(result.security_failures),
+                mention=self._mention(),
             )
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
@@ -2144,6 +2163,7 @@ class ReviewEngine:
                     chunk_failures,
                     len(chunks),
                     original_summary,
+                    self._mention(),
                 )
             else:
                 # Regenerate from the FINAL filed outputs so summary prose can't

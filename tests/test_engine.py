@@ -1286,6 +1286,42 @@ class TestCheckRunLifecycle:
         assert "1 of 2 chunks failed" in finish.kwargs["details"]
 
     @pytest.mark.asyncio
+    async def test_failed_review_tells_the_user_how_to_retry(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """Commands are only picked up when the comment mentions the bot, so
+        every retry hint names it: the check run, the verdict and the notice."""
+        pr_info = await mock_provider.get_pr_info("https://github.com/test/repo/pull/1")
+        mock_provider.get_pr_info.return_value = replace(pr_info, head_sha="deadbeef")
+        mock_provider.get_all_bot_threads = AsyncMock(return_value=[])
+        mock_provider.start_check_run = AsyncMock(return_value=42)
+        mock_provider.find_bot_comment = AsyncMock(side_effect=[None] + [7] * 8)
+        mock_llm.review = AsyncMock(return_value="prose, not a tool call")
+        mock_llm.walkthrough = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "summary": "PR walkthrough summary.",
+                    "change_groups": [],
+                    "confidence_score": {"score": 5, "label": "Safe to merge", "reason": "ok"},
+                }
+            )
+        )
+
+        config = MiraConfig()
+        config.review.agentic_tools = False
+        config.review.code_context = False
+        engine = ReviewEngine(
+            config=config, llm=mock_llm, provider=mock_provider, bot_name="review-bot[bot]"
+        )
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        hint = "`@review-bot review-rest`"
+        assert hint in mock_provider.finish_check_run.await_args.kwargs["summary"]
+        final = mock_provider.update_comment.call_args_list[-1][0][2]
+        assert final.count(hint) >= 2  # the verdict reason and the failure notice
+        assert "Comment `review-rest`" not in final
+
+    @pytest.mark.asyncio
     async def test_review_pr_failed_review_verdict_is_not_clean(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
