@@ -155,6 +155,15 @@ class FilterConfig(BaseModel):
     # stripped by the dispatcher check so that `dependabot` here matches
     # `dependabot[bot]` in a webhook payload.
     blocked_authors: list[str] = Field(default_factory=list)
+    # Auto-review only PRs whose destination (base/target) branch matches one
+    # of these glob patterns — e.g. ["main", "release/*"] reviews PRs into
+    # main and release branches only. Empty (default) = review every branch.
+    # Manual `@bot review` commands are not affected.
+    allowed_base_branches: list[str] = Field(default_factory=list)
+    # Per-repo replacement for allowed_base_branches, keyed "owner/repo"
+    # (case-insensitive). An override replaces the deployment default for
+    # that repo; [] disables auto-review there.
+    allowed_base_branch_overrides: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class CommandOverrideConfig(BaseModel):

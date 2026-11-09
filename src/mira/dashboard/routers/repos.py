@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import UTC, datetime
 
@@ -20,6 +21,7 @@ from mira.dashboard.api import (
     FileModel,
     ImportEdge,
     PackageModel,
+    RepoBaseBranchPolicy,
     RepoDetail,
     RepoListItem,
     ReviewEventModel,
@@ -32,6 +34,33 @@ from mira.dashboard.api import (
     router,
 )
 from mira.index.store import IndexStore
+
+
+def _parse_base_branch_policy(raw: str) -> RepoBaseBranchPolicy | None:
+    """Parse the stored policy blob; ``None`` when unset or malformed.
+
+    Malformed data resolves to "inherit" in the dispatcher (see
+    ``base_branch_policy._policy_from_json``); here it surfaces as unset so
+    the UI shows the deployment default rather than trusting corrupt JSON.
+    """
+    from mira.platforms.base_branch_policy import validate_patterns
+
+    if not raw:
+        return RepoBaseBranchPolicy(mode="inherit")
+    try:
+        data = json.loads(raw)
+        mode = data.get("mode")
+        if mode == "inherit":
+            return RepoBaseBranchPolicy(mode="inherit")
+        if mode == "disable":
+            return RepoBaseBranchPolicy(mode="disable")
+        if mode == "override":
+            return RepoBaseBranchPolicy(
+                mode="override", branches=validate_patterns(data.get("branches"))
+            )
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        logger.warning("Malformed base_branch_policy column %r; treating as inherit", raw)
+    return None
 
 
 @router.get("/api/repos", response_model=list[RepoListItem])
@@ -562,11 +591,59 @@ def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventMode
         ]
 
 
+@router.get("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBaseBranchPolicy)
+def get_branch_policy(owner: str, repo: str) -> RepoBaseBranchPolicy:
+    """The stored per-repo auto-review branch policy (admin UI backing)."""
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    record = _pick_platform_record(records) if records else None
+    return _parse_base_branch_policy(record.base_branch_policy if record else "") or (
+        RepoBaseBranchPolicy(mode="inherit")
+    )
+
+
+@router.put("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBaseBranchPolicy)
+def set_branch_policy(
+    owner: str, repo: str, body: RepoBaseBranchPolicy, request: Request
+) -> RepoBaseBranchPolicy:
+    """Store the per-repo auto-review branch policy.
+
+    ``override`` requires at least one branch pattern (an empty override would
+    silently disable reviews, which is what ``disable`` is for). Takes effect
+    on the next webhook event; no restart needed.
+    """
+    _require_admin(request)
+    from mira.platforms.base_branch_policy import validate_patterns
+
+    if body.mode == "override":
+        # An empty override would silently disable reviews; "disable" is the
+        # explicit, labelled way to do that.
+        if not body.branches:
+            raise HTTPException(
+                status_code=400, detail="An override needs at least one branch pattern"
+            )
+        try:
+            validate_patterns(body.branches)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    record = _pick_platform_record(records) if records else None
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail="Repository not registered with this Mira instance"
+        )
+    blob = json.dumps({"mode": body.mode, "branches": body.branches})
+    _api._app_db.set_repo_base_branch_policy(owner, repo, blob, platform=record.platform)
+    return RepoBaseBranchPolicy(mode=body.mode, branches=body.branches)
+
+
 # Keep the catch-all detail route last.  For nested GitLab namespaces it can
 # otherwise consume more specific paths such as ``.../files`` or ``.../rules``.
 @router.get("/api/repos/{owner:path}/{repo}", response_model=RepoDetail)
 def get_repo_detail(owner: str, repo: str) -> RepoDetail:
     """Get details for a specific repo."""
+    repo_records = _api._app_db.get_repo_any_platform(owner, repo)
+    repo_record = _pick_platform_record(repo_records) if repo_records else None
     with _open_store(owner, repo) as store:
         paths = sorted(store.all_paths())
         summaries = store.get_summaries(paths)
@@ -617,4 +694,7 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
             external_refs_count=total_external_refs,
             lines_count=total_loc,
             last_indexed=last_indexed,
+            base_branch_policy=_parse_base_branch_policy(
+                repo_record.base_branch_policy if repo_record else ""
+            ),
         )

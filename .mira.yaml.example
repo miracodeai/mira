@@ -62,6 +62,19 @@ filter:
   # blocked_authors:
   #   - app/renovate
   #   - app/dependabot
+  # Auto-review only PRs whose destination (base) branch matches one of
+  # these globs — e.g. ["main", "release/*"]. Empty = review every branch.
+  # Individual repos can replace this per repo (see below) or from the
+  # dashboard's per-repo Review Policy tab. Manual @bot commands are not
+  # affected by this list.
+  # allowed_base_branches:
+  #   - main
+  #   - release/*
+  # Per-repo replacement for allowed_base_branches, keyed "owner/repo"
+  # (case-insensitive). An empty list disables auto-review for that repo.
+  # allowed_base_branch_overrides:
+  #   org/website: ["main"]
+  #   org/mobile: ["develop", "release/*"]
   # Skip deleted files
   exclude_deleted: true
   # Maximum number of files to review

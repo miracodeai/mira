@@ -230,6 +230,60 @@ async def test_github_route_404_when_not_configured(client):
 
 
 @pytest.mark.asyncio
+async def test_mr_open_target_branch_filtered(client):
+    payload = _mr_payload(action="open")
+    payload["object_attributes"]["target_branch"] = "develop"
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
+        )
+    assert resp.json()["status"] == "ignored"
+    h.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mr_open_target_branch_allowed(client):
+    payload = _mr_payload(action="open")
+    payload["object_attributes"]["target_branch"] = "main"
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
+        )
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mr_note_mention_ignores_branch_policy(client):
+    # Manual commands are never gated by the branch policy.
+    payload = _note_payload("@mira-bot review")
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_gitlab_note", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_mr_open_blocked_author_filtered(client):
     payload = _mr_payload(action="open")
     payload["user"]["username"] = "dependabot"

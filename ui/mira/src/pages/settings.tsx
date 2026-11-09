@@ -48,12 +48,12 @@ export function SettingsPage() {
   const [modelsSaved, setModelsSaved] = useState(false)
 
   const [effective, setEffective] = useState<{
-    filter?: Record<string, number | boolean | string>
-    review?: Record<string, number | boolean | string>
+    filter?: Record<string, number | boolean | string | string[]>
+    review?: Record<string, number | boolean | string | string[]>
   } | null>(null)
   const [overrides, setOverrides] = useState<{
-    filter: Record<string, number | boolean | string>
-    review: Record<string, number | boolean | string>
+    filter: Record<string, number | boolean | string | string[]>
+    review: Record<string, number | boolean | string | string[]>
   }>({ filter: {}, review: {} })
   const [savingOverrides, setSavingOverrides] = useState(false)
   const [overridesSaved, setOverridesSaved] = useState(false)
@@ -88,8 +88,8 @@ export function SettingsPage() {
     api.getGlobalSettings().then((s) => {
       setEffective(
         (s.effective as {
-          filter?: Record<string, number | boolean | string>
-          review?: Record<string, number | boolean | string>
+          filter?: Record<string, number | boolean | string | string[]>
+          review?: Record<string, number | boolean | string | string[]>
         }) ?? null
       )
       setOverrides({
@@ -124,7 +124,7 @@ export function SettingsPage() {
   const setOverride = (
     section: "filter" | "review",
     key: string,
-    value: number | boolean | string | null
+    value: number | boolean | string | string[] | null
   ) => {
     setOverrides((prev) => {
       const next = { ...prev[section] }
@@ -138,7 +138,7 @@ export function SettingsPage() {
     setSavingOverrides(true)
     setFieldErrors({})
     try {
-      const body: Record<string, Record<string, number | boolean | string>> = {}
+      const body: Record<string, Record<string, number | boolean | string | string[]>> = {}
       if (Object.keys(overrides.filter).length > 0)
         body.filter = overrides.filter
       if (Object.keys(overrides.review).length > 0)
@@ -149,8 +149,8 @@ export function SettingsPage() {
       const fresh = await api.getGlobalSettings()
       setEffective(
         (fresh.effective as {
-          filter?: Record<string, number | boolean | string>
-          review?: Record<string, number | boolean | string>
+          filter?: Record<string, number | boolean | string | string[]>
+          review?: Record<string, number | boolean | string | string[]>
         }) ?? null
       )
     } catch (err) {
@@ -315,6 +315,89 @@ export function SettingsPage() {
           </p>
         ) : (
           <p className="pl-6 text-xs text-muted-foreground">{description}</p>
+        )}
+      </div>
+    )
+  }
+
+  const strListField = (
+    section: "filter" | "review",
+    key: string,
+    label: string,
+    description: string
+  ) => {
+    const fieldKey = `${section}.${key}`
+    const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[key]
+    const override = overrides[section][key]
+    const overridden = override !== undefined
+    const committed = Array.isArray(override)
+      ? override.join(", ")
+      : Array.isArray(eff)
+        ? (eff as unknown[]).map(String).join(", ")
+        : ""
+    const draft = drafts[fieldKey]
+    const display = draft !== undefined ? draft : committed
+    const error = fieldErrors[fieldKey]
+
+    const commit = () => {
+      const v = drafts[fieldKey]
+      if (v === undefined) return
+      setDrafts((d) => {
+        const next = { ...d }
+        delete next[fieldKey]
+        return next
+      })
+      const parts = v
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+      const effParts = Array.isArray(eff)
+        ? (eff as unknown[]).map(String)
+        : []
+      const matchesEff =
+        parts.length === effParts.length &&
+        parts.every((p, i) => p === effParts[i])
+      setOverride(
+        section,
+        key,
+        v === "" || matchesEff ? null : parts
+      )
+    }
+
+    return (
+      <div className="space-y-1">
+        <div className="flex items-baseline gap-3">
+          <label className="text-sm font-medium" htmlFor={fieldKey}>
+            {label}
+          </label>
+          {overridden && (
+            <span className="text-[11px] font-semibold text-primary">
+              Overrides <code className="font-mono">mira.yaml</code>
+            </span>
+          )}
+        </div>
+        <Input
+          id={fieldKey}
+          type="text"
+          className="max-w-md font-mono text-sm"
+          aria-invalid={error ? true : undefined}
+          value={display}
+          onChange={(e) =>
+            setDrafts((d) => ({ ...d, [fieldKey]: e.target.value }))
+          }
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.currentTarget.blur()
+            }
+          }}
+        />
+        {error ? (
+          <p className="text-xs text-destructive">
+            {label} {error}
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">{description}</p>
         )}
       </div>
     )
@@ -485,6 +568,12 @@ export function SettingsPage() {
                   "Cap on files reviewed in a single PR. PRs above this are partially reviewed.",
                   "1",
                   1
+                )}
+                {strListField(
+                  "filter",
+                  "allowed_base_branches",
+                  "Auto-reviewed destination branches",
+                  "Comma-separated globs of base (target) branches that get automatic reviews — e.g. 'main, dev*, release/*'. Empty reviews every branch. Individual repos can override this on their Review Policy tab."
                 )}
               </div>
             </div>

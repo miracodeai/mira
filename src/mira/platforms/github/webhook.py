@@ -19,6 +19,7 @@ from mira.config import load_config
 from mira.index.indexer import _should_index
 from mira.index.store import IndexStore
 from mira.models import PRInfo
+from mira.platforms.base_branch_policy import base_branch_is_filtered_for_repo
 from mira.platforms.command_policy import is_command_allowed
 from mira.platforms.fetch import make_fetcher
 from mira.platforms.github.auth import GitHubAppAuth
@@ -492,10 +493,11 @@ async def dispatch_github_event(
             )
             return "ignored"
 
+        owner = payload.get("repository", {}).get("owner", {}).get("login", "?")
+        repo = payload.get("repository", {}).get("name", "?")
+        number = payload.get("pull_request", {}).get("number", 0)
+
         if author_is_filtered(sender, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
-            owner = payload.get("repository", {}).get("owner", {}).get("login", "?")
-            repo = payload.get("repository", {}).get("name", "?")
-            number = payload.get("pull_request", {}).get("number", 0)
             logger.info(
                 "PR %s/%s#%s skipped — author %s filtered by author filter",
                 owner,
@@ -504,6 +506,21 @@ async def dispatch_github_event(
                 sender,
             )
             return "ignored"
+
+        # Destination-branch gate: a deployment can scope auto-review to
+        # integration branches (or disable it per repo) without affecting
+        # manual @bot commands, lifecycle tracking, or merged-PR learning.
+        base_branch = payload.get("pull_request", {}).get("base", {}).get("ref", "")
+        if base_branch_is_filtered_for_repo(owner, repo, base_branch, cfg, platform="github"):
+            logger.info(
+                "PR %s/%s#%s skipped — destination branch %r not in auto-review policy",
+                owner,
+                repo,
+                number,
+                base_branch,
+            )
+            return "ignored"
+
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         pr_body = payload.get("pull_request", {}).get("body", "") or ""
         if any(re.search(rf"@{re.escape(n)}[ \t]+ignore\b", pr_body, re.IGNORECASE) for n in names):

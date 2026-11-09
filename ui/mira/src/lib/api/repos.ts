@@ -110,4 +110,21 @@ export const reposApi = {
 
   deleteContext: (owner: string, repo: string, id: number) =>
     deleteJson(`/api/repos/${owner}/${repo}/context/${id}`),
+
+  // Per-repo auto-review destination-branch policy
+  getBranchPolicy: (owner: string, repo: string) =>
+    fetchJson<{ mode: "inherit" | "override" | "disable"; branches: string[] }>(
+      `/api/repos/${owner}/${repo}/branch-policy`
+    ),
+
+  saveBranchPolicy: (
+    owner: string,
+    repo: string,
+    mode: "inherit" | "override" | "disable",
+    branches: string[]
+  ) =>
+    putJson<{ mode: string; branches: string[] }>(
+      `/api/repos/${owner}/${repo}/branch-policy`,
+      { mode, branches }
+    ),
 }

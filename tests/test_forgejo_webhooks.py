@@ -91,6 +91,58 @@ async def test_pr_opened_blocked_author_filtered(client):
 
 
 @pytest.mark.asyncio
+async def test_pr_opened_base_branch_filtered(client):
+    """PR targeting a branch outside the auto-review policy is ignored."""
+    with (
+        patch("mira.platforms.forgejo.webhook.handle_forgejo_pr", new=AsyncMock()) as h,
+        patch(
+            "mira.platforms.forgejo.webhook.load_config",
+            return_value=MiraConfig(filter=FilterConfig(allowed_base_branches=["main"])),
+        ),
+    ):
+        payload = _pr_payload("opened", "alice")
+        payload["pull_request"]["base"] = {"ref": "develop"}
+        body = json.dumps(payload).encode()
+        resp = await client.post(
+            "/forgejo/webhook",
+            content=body,
+            headers={
+                "X-Forgejo-Event": "pull_request",
+                "X-Forgejo-Signature": _sign(body),
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"
+    h.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pr_opened_base_branch_allowed(client):
+    """PR targeting a policy-listed branch is reviewed."""
+    with (
+        patch("mira.platforms.forgejo.webhook.handle_forgejo_pr", new=AsyncMock()) as h,
+        patch(
+            "mira.platforms.forgejo.webhook.load_config",
+            return_value=MiraConfig(filter=FilterConfig(allowed_base_branches=["main"])),
+        ),
+    ):
+        payload = _pr_payload("opened", "alice")
+        payload["pull_request"]["base"] = {"ref": "main"}
+        body = json.dumps(payload).encode()
+        resp = await client.post(
+            "/forgejo/webhook",
+            content=body,
+            headers={
+                "X-Forgejo-Event": "pull_request",
+                "X-Forgejo-Signature": _sign(body),
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_pr_opened_allowed_author_not_filtered(client):
     """Non-blocked author passes through the filter."""
     with (

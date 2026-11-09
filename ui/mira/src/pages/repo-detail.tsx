@@ -25,7 +25,7 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
-import { api, type ReviewContextModel } from "@/lib/api"
+import { api, type BaseBranchPolicy, type ReviewContextModel } from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { splitRepoKey } from "@/lib/repo-key"
 
@@ -131,6 +131,53 @@ function RepoDetailPageContent({
 
   const [indexing, setIndexing] = useState(false)
   const [indexStatus, setIndexStatus] = useState("")
+
+  // Auto-review destination-branch policy for this repo.
+  const [policy, setPolicy] = useState<BaseBranchPolicy>({
+    mode: "inherit",
+    branches: [],
+  })
+  const [policyLoaded, setPolicyLoaded] = useState(false)
+  const [savingPolicy, setSavingPolicy] = useState(false)
+  const [policySaved, setPolicySaved] = useState(false)
+  const [policyError, setPolicyError] = useState("")
+  const [policyBranchesDraft, setPolicyBranchesDraft] = useState("")
+
+  useEffect(() => {
+    if (!owner || !repo) return
+    api
+      .getBranchPolicy(owner, repo)
+      .then((p) => {
+        setPolicy(p)
+        setPolicyBranchesDraft(p.branches.join(", "))
+        setPolicyLoaded(true)
+      })
+      .catch(() => setPolicyLoaded(true))
+  }, [owner, repo])
+
+  const savePolicy = async () => {
+    if (!owner || !repo) return
+    setSavingPolicy(true)
+    setPolicyError("")
+    try {
+      const branches =
+        policy.mode === "override"
+          ? policyBranchesDraft
+              .split(",")
+              .map((b) => b.trim())
+              .filter(Boolean)
+          : []
+      await api.saveBranchPolicy(owner, repo, policy.mode, branches)
+      setPolicy({ mode: policy.mode, branches })
+      setPolicyBranchesDraft(branches.join(", "))
+      setPolicySaved(true)
+      setTimeout(() => setPolicySaved(false), 2000)
+    } catch (err) {
+      setPolicyError(err instanceof Error ? err.message : "Failed to save")
+    } finally {
+      setSavingPolicy(false)
+    }
+  }
 
   // Poll indexing status continuously so the UI reflects jobs started from
   // anywhere (this page, the setup modal, a webhook-driven backfill, etc.).
@@ -322,6 +369,7 @@ function RepoDetailPageContent({
         <TabsList>
           <TabsTrigger value="files">Files</TabsTrigger>
           <TabsTrigger value="context">Review Context</TabsTrigger>
+          <TabsTrigger value="policy">Review Policy</TabsTrigger>
           <TabsTrigger value="dependencies">Dependencies</TabsTrigger>
           <TabsTrigger value="blast">Blast Radius</TabsTrigger>
         </TabsList>
@@ -479,6 +527,106 @@ function RepoDetailPageContent({
                   to improve review quality on this repo.
                 </p>
               ) : null}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Review Policy — auto-review destination-branch gate for this repo */}
+        <TabsContent value="policy">
+          <Card>
+            <CardHeader>
+              <CardTitle>Review Policy</CardTitle>
+              <CardDescription>
+                Which pull requests get an automatic review. This only gates
+                automatic reviews — manual{" "}
+                <code className="text-xs">@bot review</code> commands,
+                indexing, and merged-PR learning are unaffected.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {!policyLoaded ? (
+                <p className="text-sm text-muted-foreground">Loading…</p>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="radio"
+                        name="branch-policy-mode"
+                        checked={policy.mode === "inherit"}
+                        onChange={() => setPolicy({ ...policy, mode: "inherit" })}
+                        className="size-4 accent-primary"
+                      />
+                      Inherit deployment default
+                    </label>
+                    <p className="pl-6 text-xs text-muted-foreground">
+                      Use the instance-wide{" "}
+                      <code className="text-xs">filter.allowed_base_branches</code>{" "}
+                      setting. If none is configured, every branch is
+                      auto-reviewed.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="radio"
+                        name="branch-policy-mode"
+                        checked={policy.mode === "override"}
+                        onChange={() => setPolicy({ ...policy, mode: "override" })}
+                        className="size-4 accent-primary"
+                      />
+                      Only these destination branches
+                    </label>
+                    <Input
+                      className="ml-6 max-w-md font-mono text-sm"
+                      placeholder='e.g. main, dev*, release/*'
+                      value={policyBranchesDraft}
+                      onChange={(e) => setPolicyBranchesDraft(e.target.value)}
+                      disabled={policy.mode !== "override"}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") savePolicy()
+                      }}
+                    />
+                    <p className="ml-6 text-xs text-muted-foreground">
+                      Comma-separated shell globs matched against the PR
+                      destination (base) branch, case-sensitive.{" "}
+                      <code className="text-xs">dev*</code> matches{" "}
+                      <code className="text-xs">dev/foo</code> too. An empty
+                      list here is invalid — use the option below to disable.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="radio"
+                        name="branch-policy-mode"
+                        checked={policy.mode === "disable"}
+                        onChange={() => setPolicy({ ...policy, mode: "disable" })}
+                        className="size-4 accent-primary"
+                      />
+                      Disable automatic reviews
+                    </label>
+                    <p className="pl-6 text-xs text-muted-foreground">
+                      No automatic reviews for any branch of this repo.
+                      Manual comments still work.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 pt-2">
+                    <Button size="sm" onClick={savePolicy} disabled={savingPolicy}>
+                      {savingPolicy && (
+                        <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                      )}
+                      Save policy
+                    </Button>
+                    {policySaved && (
+                      <span className="text-xs text-muted-foreground">Saved</span>
+                    )}
+                    {policyError && (
+                      <p className="text-xs text-destructive">{policyError}</p>
+                    )}
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

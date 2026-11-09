@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS repos (
     -- section of a public repo's review. NULL = not yet known (treated as
     -- private until a sync/PR/install event records the real value).
     private INTEGER,
+    -- Per-repo auto-review destination-branch policy, as a JSON blob:
+    -- {"mode": "inherit"} (use the deployment default), {"mode": "override",
+    -- "branches": [...]} (replace it) or {"mode": "disable"} (no auto-review).
+    -- '' = never set, treated as inherit.
+    base_branch_policy TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (platform, owner, repo)
 );
 
@@ -238,6 +243,8 @@ CREATE TABLE IF NOT EXISTS repos (
     -- Repo visibility; keeps private repo names out of a public review.
     -- NULL = not yet known (treated as private until a sync records it).
     private BOOLEAN,
+    -- Per-repo auto-review destination-branch policy; see the SQLite schema.
+    base_branch_policy TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (platform, owner, repo)
 );
 
@@ -418,6 +425,7 @@ class RepoRecord:
     last_indexed_at: float = 0.0  # 0.0 means never
     conventions: str = ""
     private: bool | None = None  # None = visibility not yet known
+    base_branch_policy: str = ""  # '' = inherit the deployment default
 
 
 @dataclass
@@ -537,6 +545,10 @@ class AppDatabase:
             # which the blast-radius filter treats as private until a sync
             # records the real visibility.
             self._sqlite_conn.execute("ALTER TABLE repos ADD COLUMN private INTEGER")
+        if "base_branch_policy" not in cols:
+            self._sqlite_conn.execute(
+                "ALTER TABLE repos ADD COLUMN base_branch_policy TEXT NOT NULL DEFAULT ''"
+            )
         progress_cols = {
             r[1]
             for r in self._sqlite_conn.execute("PRAGMA table_info(pr_review_progress)").fetchall()
@@ -608,6 +620,10 @@ class AppDatabase:
                     "ALTER TABLE repos ADD COLUMN IF NOT EXISTS conventions TEXT NOT NULL DEFAULT ''"
                 )
                 cur.execute("ALTER TABLE repos ADD COLUMN IF NOT EXISTS private BOOLEAN")
+                cur.execute(
+                    "ALTER TABLE repos ADD COLUMN IF NOT EXISTS "
+                    "base_branch_policy TEXT NOT NULL DEFAULT ''"
+                )
                 cur.execute(
                     "ALTER TABLE pr_review_progress ADD COLUMN IF NOT EXISTS "
                     "last_reviewed_sha TEXT NOT NULL DEFAULT ''"
@@ -1125,7 +1141,8 @@ class AppDatabase:
             last_indexed_at=row[10] or 0.0,
             conventions=row[11] or "",
             private=(None if row[12] is None else bool(row[12])),
-            platform=row[13],
+            base_branch_policy=row[13] or "",
+            platform=row[14],
         )
 
     @staticmethod
@@ -1149,7 +1166,8 @@ class AppDatabase:
             last_indexed_at=row[10].timestamp() if row[10] else 0.0,
             conventions=row[11] or "",
             private=(None if row[12] is None else bool(row[12])),
-            platform=row[13],
+            base_branch_policy=row[13] or "",
+            platform=row[14],
         )
 
     def list_repos(self) -> list[RepoRecord]:
@@ -1158,14 +1176,14 @@ class AppDatabase:
             rows = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos ORDER BY owner, repo"
+                "base_branch_policy, platform FROM repos ORDER BY owner, repo"
             ).fetchall()
             return [self._sqlite_row_to_repo(r) for r in rows]
         with self._pg_cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos ORDER BY owner, repo"
+                "base_branch_policy, platform FROM repos ORDER BY owner, repo"
             )
             return [self._pg_row_to_repo(r) for r in cur.fetchall()]
 
@@ -1175,7 +1193,7 @@ class AppDatabase:
             row = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos WHERE platform=? AND owner=? AND repo=?",
+                "base_branch_policy, platform FROM repos WHERE platform=? AND owner=? AND repo=?",
                 (platform, owner, repo),
             ).fetchone()
             if row:
@@ -1185,7 +1203,7 @@ class AppDatabase:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos WHERE platform=%s AND owner=%s AND repo=%s",
+                "base_branch_policy, platform FROM repos WHERE platform=%s AND owner=%s AND repo=%s",
                 (platform, owner, repo),
             )
             row = cur.fetchone()
@@ -1213,7 +1231,7 @@ class AppDatabase:
             rows = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos WHERE owner=? AND repo=?",
+                "base_branch_policy, platform FROM repos WHERE owner=? AND repo=?",
                 (owner, repo),
             ).fetchall()
             return [self._sqlite_row_to_repo(r) for r in rows]
@@ -1221,7 +1239,7 @@ class AppDatabase:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
                 "error, installation_id, created_at, updated_at, last_indexed_at, conventions, private, "
-                "platform FROM repos WHERE owner=%s AND repo=%s",
+                "base_branch_policy, platform FROM repos WHERE owner=%s AND repo=%s",
                 (owner, repo),
             )
             return [self._pg_row_to_repo(r) for r in cur.fetchall()]
@@ -1268,6 +1286,31 @@ class AppDatabase:
             self._pg_commit()
 
     # ── Settings ──
+
+    def set_repo_base_branch_policy(
+        self, owner: str, repo: str, policy_json: str, platform: str = "github"
+    ) -> None:
+        """Store the per-repo auto-review branch policy JSON blob.
+
+        No row is created when the repo isn't registered — the policy is
+        written from the dashboard for an existing repo, and a phantom row
+        would surface in the repos list.
+        """
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(
+                "UPDATE repos SET base_branch_policy=? WHERE platform=? AND owner=? AND repo=?",
+                (policy_json, platform, owner, repo),
+            )
+            self._sqlite_conn.commit()
+        else:
+            with self._pg_cursor() as cur:
+                cur.execute(
+                    "UPDATE repos SET base_branch_policy=%s "
+                    "WHERE platform=%s AND owner=%s AND repo=%s",
+                    (policy_json, platform, owner, repo),
+                )
+                self._pg_commit()
 
     def get_setting(self, key: str) -> str | None:
         if self._backend == "sqlite":
