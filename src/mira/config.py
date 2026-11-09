@@ -178,13 +178,15 @@ class FilterConfig(BaseModel):
         from mira.platforms.base_branch_policy import validate_patterns
 
         for repo_full, patterns in v.items():
-            if (
-                not isinstance(repo_full, str)
-                or repo_full.strip() != repo_full
-                or "/" not in repo_full
-            ):
+            # At least two non-empty segments without inner whitespace —
+            # `owner/repo` or a nested GitLab namespace like
+            # `group/subgroup/repo`. `owner/` or `/repo` can only be a typo,
+            # and would silently leave that repo on the deployment default.
+            parts = repo_full.split("/") if isinstance(repo_full, str) else []
+            if len(parts) < 2 or any(not p or p.strip() != p for p in parts):
                 raise ValueError(
-                    f"allowed_base_branch_overrides keys must be 'owner/repo', got {repo_full!r}"
+                    f"allowed_base_branch_overrides keys must be 'owner/repo' "
+                    f"(or a nested namespace), got {repo_full!r}"
                 )
             validate_patterns(patterns)
         return v

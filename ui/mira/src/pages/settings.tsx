@@ -66,6 +66,9 @@ export function SettingsPage() {
   // render inline under the offending input. `_global` is the catch-all
   // bucket for non-field errors.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  // List fields whose override was deleted locally but not yet saved; see
+  // the resetPending hint in strListField.
+  const [resetFields, setResetFields] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (!currentUser?.is_admin) return
@@ -96,6 +99,7 @@ export function SettingsPage() {
         filter: s.overrides.filter ?? {},
         review: s.overrides.review ?? {},
       })
+      setResetFields(new Set())
     })
   }, [currentUser])
 
@@ -145,6 +149,7 @@ export function SettingsPage() {
         body.review = overrides.review
       await api.saveGlobalSettings(body)
       setOverridesSaved(true)
+      setResetFields(new Set())
       setTimeout(() => setOverridesSaved(false), 2000)
       const fresh = await api.getGlobalSettings()
       setEffective(
@@ -337,6 +342,11 @@ export function SettingsPage() {
         : ""
     const draft = drafts[fieldKey]
     const display = draft !== undefined ? draft : committed
+    // Distinguishes "override deleted locally, not yet saved" from a value
+    // that simply comes from config: only the former needs the pending hint,
+    // because `effective` still contains the persisted override until Save.
+    const resetPending =
+      !draft && !overridden && resetFields.has(fieldKey)
     const error = fieldErrors[fieldKey]
 
     const commit = () => {
@@ -354,6 +364,12 @@ export function SettingsPage() {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean)
+      setResetFields((prev) => {
+        if (!prev.has(fieldKey)) return prev
+        const next = new Set(prev)
+        next.delete(fieldKey)
+        return next
+      })
       setOverride(section, key, parts)
     }
 
@@ -399,6 +415,7 @@ export function SettingsPage() {
             className="h-6 px-2 text-xs"
             onClick={() => {
               setOverride(section, key, null)
+              setResetFields((prev) => new Set(prev).add(fieldKey))
               setDrafts((d) => {
                 const next = { ...d }
                 delete next[fieldKey]
@@ -408,6 +425,11 @@ export function SettingsPage() {
           >
             Reset to config value
           </Button>
+        )}
+        {resetPending && (
+          <p className="text-xs text-muted-foreground">
+            Reset pending — Save overrides to apply the configuration value.
+          </p>
         )}
       </div>
     )

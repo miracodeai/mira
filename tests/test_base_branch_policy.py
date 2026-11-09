@@ -170,8 +170,23 @@ class TestConfigValidation:
             MiraConfig(filter=FilterConfig(allowed_base_branch_overrides={"o/r": [""]}))
 
     def test_rejects_bad_override_key(self):
-        with pytest.raises(ValidationError):
-            MiraConfig(filter=FilterConfig(allowed_base_branch_overrides={"owneronly": ["main"]}))
+        for bad_key in [
+            "owneronly",  # no slash
+            "owner/",  # empty repo segment
+            "/repo",  # empty owner segment
+            "owner//repo",  # empty middle segment
+            "owner/ repo",  # inner whitespace
+            " owner/repo",  # outer whitespace
+        ]:
+            with pytest.raises(ValidationError):
+                MiraConfig(filter=FilterConfig(allowed_base_branch_overrides={bad_key: ["main"]}))
+
+    def test_accepts_nested_namespace_override_key(self):
+        # GitLab namespaces like group/subgroup/repo must keep working.
+        cfg = MiraConfig(
+            filter=FilterConfig(allowed_base_branch_overrides={"group/subgroup/repo": ["main"]})
+        )
+        assert cfg.filter.allowed_base_branch_overrides == {"group/subgroup/repo": ["main"]}
 
     def test_empty_lists_are_valid(self):
         # Empty default = review everything; empty override = disable that repo.

@@ -8,7 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link, useParams } from "react-router"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -139,15 +139,22 @@ function RepoDetailPageContent({
   const [policySaved, setPolicySaved] = useState(false)
   const [policyError, setPolicyError] = useState("")
   const [policyBranchesDraft, setPolicyBranchesDraft] = useState("")
+  // Tracks the repo currently rendered, so async policy callbacks (GET/PUT
+  // responses, timers) can detect that the user has moved to another repo.
+  const currentRepoRef = useRef("")
 
   // Keyed by owner/repo: a late response for a previous repo must not
   // populate the form, and navigating repos resets the draft.
   useEffect(() => {
     if (!owner || !repo) return
     let cancelled = false
+    currentRepoRef.current = `${owner}/${repo}`
     setPolicy(null)
     setPolicyLoadError(false)
     setPolicyBranchesDraft("")
+    setSavingPolicy(false)
+    setPolicySaved(false)
+    setPolicyError("")
     api
       .getBranchPolicy(owner, repo)
       .then((p) => {
@@ -169,6 +176,10 @@ function RepoDetailPageContent({
 
   const savePolicy = async () => {
     if (!owner || !repo || !policy) return
+    // The PUT may resolve after the user has navigated to another repo;
+    // applying a stale response would populate the new repo's form with
+    // the previous repo's policy. The ref tracks the repo currently shown.
+    const savedFor = `${owner}/${repo}`
     setSavingPolicy(true)
     setPolicyError("")
     try {
@@ -180,14 +191,19 @@ function RepoDetailPageContent({
               .filter(Boolean)
           : []
       const saved = await api.saveBranchPolicy(owner, repo, policy.mode, branches)
+      if (currentRepoRef.current !== savedFor) return
       setPolicy(saved)
       setPolicyBranchesDraft(saved.branches.join(", "))
       setPolicySaved(true)
-      setTimeout(() => setPolicySaved(false), 2000)
+      setTimeout(() => {
+        // A late timer must not clear the flag on a different repo's form.
+        if (currentRepoRef.current === savedFor) setPolicySaved(false)
+      }, 2000)
     } catch (err) {
+      if (currentRepoRef.current !== savedFor) return
       setPolicyError(err instanceof Error ? err.message : "Failed to save")
     } finally {
-      setSavingPolicy(false)
+      if (currentRepoRef.current === savedFor) setSavingPolicy(false)
     }
   }
 
