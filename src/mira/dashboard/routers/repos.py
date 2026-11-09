@@ -607,6 +607,7 @@ def set_branch_policy(
     _require_admin(request)
     from mira.platforms.base_branch_policy import validate_patterns
 
+    branches: list[str] = []
     if body.mode == "override":
         # An empty override would silently disable reviews; "disable" is the
         # explicit, labelled way to do that.
@@ -615,7 +616,7 @@ def set_branch_policy(
                 status_code=400, detail="An override needs at least one branch pattern"
             )
         try:
-            validate_patterns(body.branches)
+            branches = validate_patterns(body.branches)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -626,7 +627,6 @@ def set_branch_policy(
             status_code=404, detail="Repository not registered with this Mira instance"
         )
     # Only override uses branches; don't persist stale values for inherit/disable.
-    branches = body.branches if body.mode == "override" else []
     blob = json.dumps({"mode": body.mode, "branches": branches})
     _api._app_db.set_repo_base_branch_policy(owner, repo, blob, platform=record.platform)
     return RepoBaseBranchPolicy(mode=body.mode, branches=branches)

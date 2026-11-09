@@ -43,6 +43,18 @@ class TestUnconfigured:
 
 
 class TestDefaultPatterns:
+    @pytest.mark.parametrize("source", ["global", "repo", "stored"])
+    def test_padded_patterns_are_normalized(self, source):
+        patterns = [" main", "release/*\t "]
+        cfg = _cfg(
+            default=patterns if source == "global" else [],
+            overrides={"o/r": patterns} if source == "repo" else {},
+        )
+        raw = json.dumps({"mode": "override", "branches": patterns}) if source == "stored" else None
+        assert base_branch_is_filtered("o/r", "main", cfg, raw) is False
+        assert base_branch_is_filtered("o/r", "release/1.2", cfg, raw) is False
+        assert base_branch_is_filtered("o/r", "develop", cfg, raw) is True
+
     def test_whitelist_matches(self):
         cfg = _cfg(default=["main", "release/*"])
         assert base_branch_is_filtered("o/r", "main", cfg) is False

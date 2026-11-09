@@ -35,7 +35,7 @@ def validate_patterns(patterns: object) -> list[str]:
         not isinstance(p, str) or not p.strip() for p in patterns
     ):
         raise ValueError("Branch patterns must be a list of non-empty strings")
-    return patterns
+    return [p.strip() for p in patterns]
 
 
 def parse_repo_policy(raw: str | None) -> dict | None:

@@ -119,6 +119,16 @@ class TestParsePolicy:
 
 
 class TestEndpoints:
+    def test_put_persists_normalized_patterns(self, db: AppDatabase, monkeypatch):
+        db.register_repo("o", "r")
+        monkeypatch.setattr("mira.dashboard.api._app_db", db)
+        body = SimpleNamespace(mode="override", branches=[" main", "release/*\t "])
+        saved = set_branch_policy("o", "r", body, _admin_request())
+        assert saved.branches == ["main", "release/*"]
+        assert get_branch_policy("o", "r").branches == saved.branches
+        record = db.get_repo("o", "r")
+        assert json.loads(record.base_branch_policy)["branches"] == saved.branches
+
     def test_get_default_is_inherit(self, db: AppDatabase, monkeypatch):
         db.register_repo("o", "r")
         monkeypatch.setattr("mira.dashboard.api._app_db", db)

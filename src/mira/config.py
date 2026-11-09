@@ -188,7 +188,7 @@ class FilterConfig(BaseModel):
                     f"allowed_base_branch_overrides keys must be 'owner/repo' "
                     f"(or a nested namespace), got {repo_full!r}"
                 )
-            validate_patterns(patterns)
+            v[repo_full] = validate_patterns(patterns)
         return v
 
 
