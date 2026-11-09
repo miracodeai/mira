@@ -176,9 +176,7 @@ function RepoDetailPageContent({
 
   const savePolicy = async () => {
     if (!owner || !repo || !policy) return
-    // The PUT may resolve after the user has navigated to another repo;
-    // applying a stale response would populate the new repo's form with
-    // the previous repo's policy. The ref tracks the repo currently shown.
+    // A PUT resolving after repo navigation must not touch the new repo's form.
     const savedFor = `${owner}/${repo}`
     setSavingPolicy(true)
     setPolicyError("")
@@ -196,7 +194,6 @@ function RepoDetailPageContent({
       setPolicyBranchesDraft(saved.branches.join(", "))
       setPolicySaved(true)
       setTimeout(() => {
-        // A late timer must not clear the flag on a different repo's form.
         if (currentRepoRef.current === savedFor) setPolicySaved(false)
       }, 2000)
     } catch (err) {

@@ -141,6 +141,9 @@ export function SettingsPage() {
   const saveOverrides = async () => {
     setSavingOverrides(true)
     setFieldErrors({})
+    // Only this generation's pending resets are cleared by its own save;
+    // a reset clicked while the PUT is in flight belongs to the next one.
+    const savedResets = resetFields
     try {
       const body: Record<string, Record<string, number | boolean | string | string[]>> = {}
       if (Object.keys(overrides.filter).length > 0)
@@ -149,7 +152,11 @@ export function SettingsPage() {
         body.review = overrides.review
       await api.saveGlobalSettings(body)
       setOverridesSaved(true)
-      setResetFields(new Set())
+      setResetFields((prev) => {
+        const next = new Set(prev)
+        for (const f of savedResets) next.delete(f)
+        return next
+      })
       setTimeout(() => setOverridesSaved(false), 2000)
       const fresh = await api.getGlobalSettings()
       setEffective(
@@ -158,6 +165,7 @@ export function SettingsPage() {
           review?: Record<string, number | boolean | string | string[]>
         }) ?? null
       )
+      setResetFields(new Set())
     } catch (err) {
       // The API returns `{detail: {field?, message}}` for validation failures.
       // `fetchJson`/`putJson` wrap the response body in `API error NNN: <body>`,
@@ -413,6 +421,7 @@ export function SettingsPage() {
             size="sm"
             variant="ghost"
             className="h-6 px-2 text-xs"
+            disabled={savingOverrides}
             onClick={() => {
               setOverride(section, key, null)
               setResetFields((prev) => new Set(prev).add(fieldKey))

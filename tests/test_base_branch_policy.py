@@ -177,6 +177,8 @@ class TestConfigValidation:
             "owner//repo",  # empty middle segment
             "owner/ repo",  # inner whitespace
             " owner/repo",  # outer whitespace
+            "own er/repo",  # whitespace inside a segment
+            "owner/re\tpo",  # tab inside a segment
         ]:
             with pytest.raises(ValidationError):
                 MiraConfig(filter=FilterConfig(allowed_base_branch_overrides={bad_key: ["main"]}))
