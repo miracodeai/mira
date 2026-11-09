@@ -152,11 +152,6 @@ export function SettingsPage() {
         body.review = overrides.review
       await api.saveGlobalSettings(body)
       setOverridesSaved(true)
-      setResetFields((prev) => {
-        const next = new Set(prev)
-        for (const f of savedResets) next.delete(f)
-        return next
-      })
       setTimeout(() => setOverridesSaved(false), 2000)
       const fresh = await api.getGlobalSettings()
       setEffective(
@@ -165,7 +160,13 @@ export function SettingsPage() {
           review?: Record<string, number | boolean | string | string[]>
         }) ?? null
       )
-      setResetFields(new Set())
+      // Hints survive until fresh effective settings arrive, so the stale
+      // persisted override is never shown bare during the refresh.
+      setResetFields((prev) => {
+        const next = new Set(prev)
+        for (const f of savedResets) next.delete(f)
+        return next
+      })
     } catch (err) {
       // The API returns `{detail: {field?, message}}` for validation failures.
       // `fetchJson`/`putJson` wrap the response body in `API error NNN: <body>`,
