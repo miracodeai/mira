@@ -13,6 +13,7 @@ from fastapi import HTTPException, Request
 from fastapi import Response as FastAPIResponse
 
 from mira.dashboard import api as _api
+from mira.dashboard import queries as _queries
 from mira.dashboard.api import (
     BlastRadiusModel,
     BlastRadiusResponse,
@@ -60,24 +61,7 @@ def _parse_base_branch_policy(raw: str) -> RepoBaseBranchPolicy | None:
 @router.get("/api/repos", response_model=list[RepoListItem])
 def list_repos() -> list[RepoListItem]:
     """List all repos from the registry."""
-    repos = _api._app_db.list_repos()
-    return [
-        RepoListItem(
-            owner=r.owner,
-            repo=r.repo,
-            platform=r.platform,
-            status=r.status,
-            index_mode=r.index_mode,
-            file_count=r.files_indexed,
-            file_count_estimate=r.file_count_estimate,
-            installation_id=r.installation_id,
-            error=r.error,
-            last_indexed=datetime.fromtimestamp(r.last_indexed_at, tz=UTC).isoformat()
-            if r.last_indexed_at
-            else None,
-        )
-        for r in repos
-    ]
+    return [_queries.repo_list_item(r) for r in _api._app_db.list_repos()]
 
 
 @router.post("/api/repos/sync")
@@ -565,26 +549,7 @@ async def cancel_index(owner: str, repo: str, request: Request) -> dict:
 def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventModel]:
     """List recent review events for a repo."""
     with _open_store(owner, repo) as store:
-        events = store.list_review_events(limit=limit)
-        return [
-            ReviewEventModel(
-                id=e.id,
-                pr_number=e.pr_number,
-                pr_title=e.pr_title,
-                pr_url=e.pr_url,
-                comments_posted=e.comments_posted,
-                blockers=e.blockers,
-                warnings=e.warnings,
-                suggestions=e.suggestions,
-                files_reviewed=e.files_reviewed,
-                lines_changed=e.lines_changed,
-                tokens_used=e.tokens_used,
-                duration_ms=e.duration_ms,
-                categories=e.categories,
-                created_at=e.created_at,
-            )
-            for e in events
-        ]
+        return [_queries.review_event_model(e) for e in store.list_review_events(limit=limit)]
 
 
 @router.get("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBaseBranchPolicy)

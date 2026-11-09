@@ -8,6 +8,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Auto-review destination-branch scoping.** `filter.allowed_base_branches` limits automatic reviews to PRs whose destination (base/target) branch matches one of the configured glob patterns — e.g. `["main", "release/*"]` — and `filter.allowed_base_branch_overrides` replaces that list per repository (an empty override disables auto-review for that repo). A per-repo Review Policy tab in the dashboard sets the same policy without a restart: inherit the deployment default, override the branch list, or disable automatic reviews for that repo. Unconfigured deployments review every branch, exactly as before; manual `@bot review` commands, PR lifecycle tracking, indexing, and merged-PR learning are never gated by the branch policy. Skips are logged at INFO (see the companion to #316).
+- **Reusable dashboard read helpers.** `mira.dashboard.queries` builds the dashboard's repo list, activity feed, per-repo review list and aggregate stats from an explicit list of repositories, so another process can serve the same response models over a subset of the registry. The `/api/activity`, `/api/stats` and `/api/repos` routes now call these helpers and behave exactly as before.
+
+### Changed
+
+- The GitHub webhook dispatcher accepts any scheduler exposing `add_task` (the `TaskScheduler` protocol) instead of requiring FastAPI's `BackgroundTasks`, and the HMAC check is exported as `verify_signature` so other entry points can validate deliveries the same way. `_verify_signature` remains as an alias.
 
 ## [0.11.1] — 2026-11-09
 ### Added
