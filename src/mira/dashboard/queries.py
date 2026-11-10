@@ -182,22 +182,24 @@ def aggregate_org_stats(
             store = IndexStore.open(
                 repo_record.owner, repo_record.repo, platform=repo_record.platform
             )
-            total_files += len(store.all_paths())
-            stats = store.get_review_stats(since=since)
-            agg_stats["total_reviews"] += stats["total_reviews"]
-            agg_stats["total_comments"] += stats["total_comments"]
-            agg_stats["total_blockers"] += stats["total_blockers"]
-            agg_stats["total_warnings"] += stats["total_warnings"]
-            agg_stats["total_suggestions"] += stats["total_suggestions"]
-            agg_stats["total_files_reviewed"] += stats["total_files_reviewed"]
-            agg_stats["total_lines_changed"] += stats["total_lines_changed"]
-            agg_stats["total_tokens"] += stats["total_tokens"]
-            for cat, cnt in stats.get("categories", {}).items():
-                agg_stats["categories"][cat] = agg_stats["categories"].get(cat, 0) + cnt
-            if stats["total_reviews"] > 0:
-                duration_sum += stats["avg_duration_ms"] * stats["total_reviews"]
-                review_count += stats["total_reviews"]
-            store.close()
+            try:
+                total_files += len(store.all_paths())
+                stats = store.get_review_stats(since=since)
+                agg_stats["total_reviews"] += stats["total_reviews"]
+                agg_stats["total_comments"] += stats["total_comments"]
+                agg_stats["total_blockers"] += stats["total_blockers"]
+                agg_stats["total_warnings"] += stats["total_warnings"]
+                agg_stats["total_suggestions"] += stats["total_suggestions"]
+                agg_stats["total_files_reviewed"] += stats["total_files_reviewed"]
+                agg_stats["total_lines_changed"] += stats["total_lines_changed"]
+                agg_stats["total_tokens"] += stats["total_tokens"]
+                for cat, cnt in stats.get("categories", {}).items():
+                    agg_stats["categories"][cat] = agg_stats["categories"].get(cat, 0) + cnt
+                if stats["total_reviews"] > 0:
+                    duration_sum += stats["avg_duration_ms"] * stats["total_reviews"]
+                    review_count += stats["total_reviews"]
+            finally:
+                store.close()
         except Exception:
             logger.warning(
                 "Failed to read stats for %s/%s", repo_record.owner, repo_record.repo, exc_info=True
