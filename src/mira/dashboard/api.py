@@ -8,6 +8,7 @@ import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,6 +127,13 @@ class FileModel(BaseModel):
     loc: int = 0
 
 
+class RepoBaseBranchPolicy(BaseModel):
+    """Per-repo auto-review destination-branch policy (see repos.base_branch_policy)."""
+
+    mode: Literal["inherit", "override", "disable"]
+    branches: list[str] = Field(default_factory=list)
+
+
 class RepoDetail(BaseModel):
     owner: str
     repo: str
@@ -136,6 +144,10 @@ class RepoDetail(BaseModel):
     external_refs_count: int
     lines_count: int = 0
     last_indexed: str | None = None
+    # Stored auto-review destination-branch policy for this repo:
+    # "inherit" (deployment default), "override" (these patterns) or
+    # "disable".
+    base_branch_policy: RepoBaseBranchPolicy | None = None
 
 
 class ImportEdge(BaseModel):

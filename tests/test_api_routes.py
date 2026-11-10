@@ -61,6 +61,8 @@ EXPECTED_ROUTES = {
     ("/api/repos/{owner:path}/{repo}", "GET"),
     ("/api/repos/{owner:path}/{repo}/blast-radius", "GET"),
     ("/api/repos/{owner:path}/{repo}/blast-radius.svg", "GET"),
+    ("/api/repos/{owner:path}/{repo}/branch-policy", "GET"),
+    ("/api/repos/{owner:path}/{repo}/branch-policy", "PUT"),
     ("/api/repos/{owner:path}/{repo}/context", "GET"),
     ("/api/repos/{owner:path}/{repo}/context", "POST"),
     ("/api/repos/{owner:path}/{repo}/context/{context_id}", "DELETE"),

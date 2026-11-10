@@ -62,13 +62,13 @@ export const settingsApi = {
   getGlobalSettings: () =>
     fetchJson<{
       overrides: {
-        filter?: Record<string, number | boolean | string>
-        review?: Record<string, number | boolean | string>
+        filter?: Record<string, number | boolean | string | string[]>
+        review?: Record<string, number | boolean | string | string[]>
       }
       effective: Record<string, unknown>
     }>("/api/admin/settings"),
 
   saveGlobalSettings: (
-    overrides: Record<string, Record<string, number | boolean | string>>
+    overrides: Record<string, Record<string, number | boolean | string | string[]>>
   ) => putJson<{ ok: boolean }>("/api/admin/settings", { overrides }),
 }

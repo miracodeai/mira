@@ -136,6 +136,48 @@ async def test_pr_created_is_reviewed(client):
 
 
 @pytest.mark.asyncio
+async def test_pr_destination_branch_filtered(client):
+    payload = _pr_payload("alice")
+    payload["pullrequest"]["destination"] = {"branch": {"name": "develop"}}
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch(f"{WEBHOOK}.load_config", return_value=cfg),
+        patch(f"{WEBHOOK}.handle_bitbucket_pr", new=AsyncMock()) as h,
+    ):
+        resp = await _post(client, "pullrequest:created", payload)
+    assert resp.json()["status"] == "ignored"
+    h.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pr_destination_branch_allowed(client):
+    payload = _pr_payload("alice")
+    payload["pullrequest"]["destination"] = {"branch": {"name": "main"}}
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch(f"{WEBHOOK}.load_config", return_value=cfg),
+        patch(f"{WEBHOOK}.handle_bitbucket_pr", new=AsyncMock()) as h,
+    ):
+        resp = await _post(client, "pullrequest:created", payload)
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pr_comment_ignores_branch_policy(client):
+    # Manual commands are never gated by the branch policy.
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    payload = _comment_payload("@mira-bot review", _actor("alice"))
+    with (
+        patch(f"{WEBHOOK}.load_config", return_value=cfg),
+        patch(f"{WEBHOOK}.handle_bitbucket_comment", new=AsyncMock()) as h,
+    ):
+        resp = await _post(client, "pullrequest:comment_created", payload)
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_updated_without_new_commit_is_ignored(client):
     with patch(f"{WEBHOOK}.handle_bitbucket_pr", new=AsyncMock()) as h:
         await _post(client, "pullrequest:created", _pr_payload("alice", head="aaa111"))

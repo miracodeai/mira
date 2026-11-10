@@ -81,3 +81,6 @@ scripts/evaluate_snapshots.py
 scripts/replay_review.py
 scripts/replay_verification.py
 scripts/score_snapshots.py
+
+# Local feature-trial server (scratch SQLite DB + logs)
+.local-trial/

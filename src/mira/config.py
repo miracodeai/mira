@@ -155,6 +155,41 @@ class FilterConfig(BaseModel):
     # stripped by the dispatcher check so that `dependabot` here matches
     # `dependabot[bot]` in a webhook payload.
     blocked_authors: list[str] = Field(default_factory=list)
+    # Auto-review only PRs whose destination (base/target) branch matches one
+    # of these glob patterns — e.g. ["main", "release/*"] reviews PRs into
+    # main and release branches only. Empty (default) = review every branch.
+    # Manual `@bot review` commands are not affected.
+    allowed_base_branches: list[str] = Field(default_factory=list)
+    # Per-repo replacement for allowed_base_branches, keyed "owner/repo"
+    # (case-insensitive). An override replaces the deployment default for
+    # that repo; [] disables auto-review there.
+    allowed_base_branch_overrides: dict[str, list[str]] = Field(default_factory=dict)
+
+    @field_validator("allowed_base_branches")
+    @classmethod
+    def _validate_base_branches(cls, v: list[str]) -> list[str]:
+        from mira.platforms.base_branch_policy import validate_patterns
+
+        return validate_patterns(v)
+
+    @field_validator("allowed_base_branch_overrides")
+    @classmethod
+    def _validate_base_branch_overrides(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        from mira.platforms.base_branch_policy import validate_patterns
+
+        for repo_full, patterns in v.items():
+            # At least two non-empty segments, none containing whitespace —
+            # `owner/repo` or a nested GitLab namespace like
+            # `group/subgroup/repo`. `owner/` or `/repo` can only be a typo,
+            # and would silently leave that repo on the deployment default.
+            parts = repo_full.split("/") if isinstance(repo_full, str) else []
+            if len(parts) < 2 or any(not p or p.split() != [p] for p in parts):
+                raise ValueError(
+                    f"allowed_base_branch_overrides keys must be 'owner/repo' "
+                    f"(or a nested namespace), got {repo_full!r}"
+                )
+            v[repo_full] = validate_patterns(patterns)
+        return v
 
 
 class CommandOverrideConfig(BaseModel):
