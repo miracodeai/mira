@@ -590,9 +590,21 @@ class AppDatabase:
     def _init_postgres(self, url: str) -> None:
         self._backend = "postgres"
         try:
+            import psycopg
+
             from mira.db.postgres import connect
 
-            conn = connect(url)
+            # Postgres may still be starting (host reboot). Wait, then fail loudly:
+            # falling back to SQLite here serves an empty app that looks like a data reset.
+            for attempt in range(30):
+                try:
+                    conn = connect(url)
+                    break
+                except psycopg.OperationalError as exc:
+                    if attempt == 29:
+                        raise
+                    logger.warning("PostgreSQL not ready (%s), retrying in 2s", exc)
+                    time.sleep(2)
             self._pg_conn = conn
             with conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
@@ -650,9 +662,6 @@ class AppDatabase:
                 "psycopg not installed, falling back to SQLite. "
                 "Install with: pip install 'psycopg[binary]>=3.1'"
             )
-            self._init_sqlite("")
-        except Exception as exc:
-            logger.warning("PostgreSQL connection failed (%s), falling back to SQLite", exc)
             self._init_sqlite("")
 
     @contextmanager
