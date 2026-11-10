@@ -103,9 +103,7 @@ export function SettingsPage() {
             ? "inherit"
             : temperature === "omit"
               ? "omit"
-              : temperature === 0
-                ? "default"
-                : "custom"
+              : "custom"
         )
         setTemperatureInput(
           typeof temperature === "number" ? String(temperature) : ""
@@ -156,8 +154,6 @@ export function SettingsPage() {
         return
       }
       temperature = value
-    } else if (temperatureMode === "default") {
-      temperature = 0
     } else if (temperatureMode === "omit") {
       temperature = "omit"
     }
@@ -442,7 +438,6 @@ export function SettingsPage() {
                     <SelectItem value="inherit">
                       Inherit deployment config
                     </SelectItem>
-                    <SelectItem value="default">Mira default (0.0)</SelectItem>
                     <SelectItem value="omit">
                       Provider default (omit)
                     </SelectItem>

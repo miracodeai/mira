@@ -170,7 +170,10 @@ class TestIndexingTemperatureSettings:
                 LLMConfig(indexing_temperature=0.6), stored
             )
         assert (value, source) == (0.6, "config")
-        assert caplog.messages == ["Invalid saved indexing temperature; using deployment config"]
+        assert caplog.messages == [
+            "Invalid saved indexing_temperature. Using deployment config. "
+            "Clear the override in Models settings."
+        ]
 
     def test_non_admin_cannot_change_policy(self, in_memory_db):
         from fastapi import HTTPException

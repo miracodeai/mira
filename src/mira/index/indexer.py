@@ -293,6 +293,7 @@ def _build_file_summary(path: str, content: str, file_data: dict[str, Any]) -> F
 def _indexing_temperature_kwargs(llm: Any) -> dict[str, Any]:
     config = llm.config
     if config.provider in {"bedrock", "codex-cli", "codex_cli", "codex"}:
+        # Bedrock uses the established 0.0 for summaries. Codex CLI manages sampling itself.
         return {"temperature": 0.0}
     if config.indexing_temperature == "omit":
         return {"omit_temperature": True}

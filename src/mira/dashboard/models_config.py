@@ -27,7 +27,10 @@ def resolve_indexing_temperature(
         try:
             return _INDEXING_TEMPERATURE.validate_json(db_value), "dashboard"
         except ValidationError:
-            logger.warning("Invalid saved indexing temperature; using deployment config")
+            logger.warning(
+                "Invalid saved indexing_temperature. Using deployment config. "
+                "Clear the override in Models settings."
+            )
     return config.indexing_temperature, "config"
 
 

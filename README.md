@@ -201,7 +201,8 @@ temperature field out of requests, or to a finite nonnegative number supported
 by your endpoint. The dashboard's **Indexing Temperature** setting overrides
 config; **Inherit deployment config** clears that override. This does not change
 reviewer temperature defaults or reasoning effort. Existing reasoning policy may
-still omit a numeric temperature. Bedrock and Codex CLI behavior is unchanged.
+still omit a numeric temperature. Bedrock uses `0.0` for index summaries.
+Codex CLI manages sampling itself.
 
 ```yaml
 llm:
