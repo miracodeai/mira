@@ -938,6 +938,35 @@ class AppDatabase:
             with self._pg_cursor() as cur:
                 cur.execute("DELETE FROM sessions WHERE token = %s", (token,))
 
+    def delete_user_sessions(self, user_id: int, keep_token: str | None = None) -> None:
+        """Revoke every session of a user, except ``keep_token`` when given.
+
+        Called when a password is changed or reset so a session established
+        with the old password cannot outlive it (CWE-613). The caller passes
+        its own token to stay signed in through a self-service change.
+        """
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            if keep_token:
+                self._sqlite_conn.execute(
+                    "DELETE FROM sessions WHERE user_id = ? AND token != ?",
+                    (user_id, keep_token),
+                )
+            else:
+                self._sqlite_conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            self._sqlite_conn.commit()
+        else:
+            with self._pg_cursor() as cur:
+                if keep_token:
+                    cur.execute(
+                        "DELETE FROM sessions WHERE user_id = %s AND token <> %s",
+                        (user_id, keep_token),
+                    )
+                else:
+                    cur.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+            # autocommit today, but this keeps the write safe if that changes.
+            self._pg_commit()
+
     # ── Repos ──
 
     def register_repo(

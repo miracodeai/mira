@@ -26,6 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
 import { api, type BaseBranchPolicy, type ReviewContextModel } from "@/lib/api"
+import { useAuth } from "@/lib/auth"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { splitRepoKey } from "@/lib/repo-key"
 
@@ -85,6 +86,10 @@ function RepoDetailPageContent({
   )
   const [contextEntries, setContextEntries] = useState<ReviewContextModel[]>([])
   const [contextLoaded, setContextLoaded] = useState(false)
+  // Context goes straight into the review prompt, so only admins may change
+  // it (the API rejects other users' writes with 403).
+  const { user } = useAuth()
+  const canEditContext = !!user?.is_admin
   const [editingCtx, setEditingCtx] = useState<{
     id?: number
     title: string
@@ -457,12 +462,14 @@ function RepoDetailPageContent({
                     reviews for this repo
                   </CardDescription>
                 </div>
-                <Button
-                  size="sm"
-                  onClick={() => setEditingCtx({ title: "", content: "" })}
-                >
-                  <Plus className="mr-1 h-3 w-3" /> Add
-                </Button>
+                {canEditContext && (
+                  <Button
+                    size="sm"
+                    onClick={() => setEditingCtx({ title: "", content: "" })}
+                  >
+                    <Plus className="mr-1 h-3 w-3" /> Add
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -519,30 +526,32 @@ function RepoDetailPageContent({
                           {entry.content.length > 200 && "..."}
                         </pre>
                       </div>
-                      <div className="ml-4 flex gap-1">
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8"
-                          onClick={() =>
-                            setEditingCtx({
-                              id: entry.id,
-                              title: entry.title,
-                              content: entry.content,
-                            })
-                          }
-                        >
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8"
-                          onClick={() => deleteCtx(entry.id)}
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
+                      {canEditContext && (
+                        <div className="ml-4 flex gap-1">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() =>
+                              setEditingCtx({
+                                id: entry.id,
+                                title: entry.title,
+                                content: entry.content,
+                              })
+                            }
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() => deleteCtx(entry.id)}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

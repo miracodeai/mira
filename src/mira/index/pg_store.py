@@ -1596,6 +1596,13 @@ class PgIndexStore(_StoreSharedMixin):
         )
         if existing:
             # Preserve the existing approval status across re-synthesis.
+            if existing[1] == "rejected":
+                # An admin rejected this rule: leave their decision, and the
+                # text they rejected, untouched rather than re-describing it
+                # under the same verdict.
+                rejected = self.get_learned_rule(existing[0])
+                if rejected is not None:
+                    return rejected
             with self._cursor() as cur:
                 cur.execute(
                     "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "

@@ -187,10 +187,39 @@ def get_dependencies(owner: str, repo: str) -> DependencyGraph:
         return DependencyGraph(imports=imports, dependents=dependents)
 
 
+def _is_known_public(full_name: str) -> bool:
+    """True only when the registry records ``owner/repo`` as public; unknown
+    visibility counts as private, as it does everywhere else."""
+    owner, _, repo = full_name.rpartition("/")
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    return bool(records) and _pick_platform_record(records).private is False
+
+
 @router.get("/api/repos/{owner:path}/{repo}/blast-radius.svg")
-def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
-    """Render blast radius as an SVG image."""
+def get_blast_radius_svg(owner: str, repo: str, request: Request) -> FastAPIResponse:
+    """Render blast radius as an SVG image.
+
+    AuthMiddleware lets this path through without a session so GitHub can embed
+    the badge in a README, which makes it world-readable. An anonymous viewer
+    therefore gets file names only for a repo *known* to be public, and
+    cross-repo dependents only when they are known public too, so neither a
+    private repo's structure nor a private repo's name (via its dependency on
+    a public one) leaks. A signed-in dashboard user sees the full picture.
+    """
     from mira.dashboard.blast_svg import generate_blast_svg
+
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    if not records:
+        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    signed_in = getattr(request.state, "user", None) is not None
+    reviewed_private = _pick_platform_record(records).private
+    if not signed_in and reviewed_private is not False:
+        svg = generate_blast_svg([], [], [], caption="Private repository — sign in to view")
+        return FastAPIResponse(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=300", "Vary": "Cookie"},
+        )
 
     # Rank files by how many other files depend on them
     file_scores: list[tuple[str, int]] = []
@@ -227,6 +256,8 @@ def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
                     cross_repo.append(edge.source_repo)
     except Exception:
         pass
+    if not signed_in:
+        cross_repo = [name for name in cross_repo if _is_known_public(name)]
 
     svg = generate_blast_svg(
         changed_files=core_files,
@@ -238,7 +269,10 @@ def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
         content=svg,
         media_type="image/svg+xml",
         headers={
-            "Cache-Control": "public, max-age=300",
+            # The signed-in rendering must not be served to anonymous viewers
+            # from a shared cache.
+            "Cache-Control": f"{'private' if signed_in else 'public'}, max-age=300",
+            "Vary": "Cookie",
         },
     )
 

@@ -1362,6 +1362,13 @@ class IndexStore(_StoreSharedMixin):
         if existing:
             # Keep the existing approval status — re-synthesis (more samples)
             # must never silently re-activate a rejected rule or auto-approve.
+            if existing[1] == "rejected":
+                # An admin rejected this rule: leave their decision, and the
+                # text they rejected, untouched rather than re-describing it
+                # under the same verdict.
+                rejected = self.get_learned_rule(existing[0])
+                if rejected is not None:
+                    return rejected
             self._conn.execute(
                 "UPDATE learned_rules SET rule_text = ?, source_signal = ?, "
                 "sample_count = ?, updated_at = ? WHERE id = ?",

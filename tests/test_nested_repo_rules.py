@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.routing import APIRoute
 from starlette.routing import Match
 
 from mira.dashboard import api
-from mira.dashboard.db import AppDatabase
+from mira.dashboard.db import AppDatabase, User
 from mira.dashboard.routers import repos, rules
 
 
@@ -131,11 +132,13 @@ def test_nested_owner_routes_match(method: str, path: str, endpoint_name: str):
 def test_repo_rule_crud_with_nested_owner(nested_repo_db: AppDatabase):
     owner = "clients/mymedhub"
     repo = "mymedhub-api-nestjs"
+    admin = SimpleNamespace(state=SimpleNamespace(user=User(id=1, username="a", is_admin=True)))
 
     created = rules.create_repo_rule(
         owner,
         repo,
         api.RuleCreate(title="Keep modules focused", content="One responsibility per module."),
+        admin,
     )
 
     assert [rule.id for rule in rules.list_repo_rules(owner, repo)] == [created.id]
@@ -145,10 +148,11 @@ def test_repo_rule_crud_with_nested_owner(nested_repo_db: AppDatabase):
         repo,
         created.id,
         api.RuleCreate(title="Keep modules focused", content="Updated guidance."),
+        admin,
     )
     assert updated.content == "Updated guidance."
 
-    assert rules.delete_repo_rule(owner, repo, created.id) == {"ok": True}
+    assert rules.delete_repo_rule(owner, repo, created.id, admin) == {"ok": True}
     assert rules.list_repo_rules(owner, repo) == []
 
 
