@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import psycopg
 import pytest
 
 from mira.dashboard.db import AppDatabase
@@ -18,6 +17,8 @@ def _index_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_unreachable_postgres_raises_instead_of_sqlite_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    psycopg = pytest.importorskip("psycopg")
+
     def refuse(url: str) -> None:
         raise psycopg.OperationalError("the database system is starting up")
 
