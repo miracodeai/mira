@@ -38,6 +38,7 @@ def build_review_prompt(
     review_round: int = 1,
     resolved_threads: list[dict] | None = None,
     team_conventions: str = "",
+    linked_issue_context: str = "",
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -96,6 +97,7 @@ def build_review_prompt(
         resolved_threads=resolved_threads,
         team_conventions=team_conventions,
         footguns=footguns,
+        linked_issue_context=linked_issue_context,
     )
 
     # Build user message with optional code context before diffs
@@ -176,6 +178,7 @@ def build_walkthrough_prompt(
     config: MiraConfig,
     pr_title: str = "",
     pr_description: str = "",
+    linked_issue_context: str = "",
 ) -> list[dict[str, str]]:
     """Build the walkthrough prompt messages for the LLM.
 
@@ -202,6 +205,7 @@ def build_walkthrough_prompt(
         pr_description=pr_description,
         files_metadata=files_metadata,
         include_sequence_diagram=config.review.walkthrough_sequence_diagram,
+        linked_issue_context=linked_issue_context,
     )
 
     return [
