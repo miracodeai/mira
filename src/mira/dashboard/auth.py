@@ -128,6 +128,9 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
         if db.authenticate(user.username, body.current_password) is None:
             return JSONResponse(status_code=400, content={"error": "Current password is incorrect"})
         db.update_password(user.id, body.new_password)
+        # A session established with the old password must not outlive it.
+        # The caller's own session stays so they aren't signed out mid-flow.
+        db.delete_user_sessions(user.id, keep_token=request.cookies.get(SESSION_COOKIE))
         return {"ok": True}
 
     # ── User management (admin only) ──
@@ -176,6 +179,11 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
         if not body.new_password:
             return JSONResponse(status_code=400, content={"error": "New password cannot be empty"})
         db.update_password(user_id, body.new_password)
+        # A reset is how an admin cuts off a suspected-compromised account, so
+        # none of the target's existing sessions may survive it (only the
+        # admin's own, when resetting their own password).
+        keep = request.cookies.get(SESSION_COOKIE) if user_id == user.id else None
+        db.delete_user_sessions(user_id, keep_token=keep)
         return {"ok": True}
 
     return router
@@ -192,8 +200,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
-        # Allow the badge SVG for GitHub image embedding
+        # Allow the badge SVG for GitHub image embedding. A signed-in viewer is
+        # still identified so the badge can show them what the anonymous web
+        # must not see (a private repo's structure).
         if _PUBLIC_SVG.fullmatch(request.url.path):
+            token = request.cookies.get(SESSION_COOKIE)
+            user = self.db.validate_session(token) if token else None
+            if user:
+                request.state.user = user
             return await call_next(request)
         # Non-API paths (frontend assets) don't need auth
         if not request.url.path.startswith("/api/"):

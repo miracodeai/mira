@@ -3,24 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
 from datetime import UTC, datetime
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from mira.dashboard import api as _api
+from mira.dashboard import queries as _queries
 from mira.dashboard.api import (
-    ActivityEventModel,
     ActivityResponse,
     CostEstimate,
     IndexStatusModel,
     OrgStatsModel,
-    ReviewStatsModel,
     TimeSeriesPoint,
-    _open_relationships,
     _period_to_since,
-    logger,
     router,
 )
 from mira.index.store import IndexStore
@@ -131,139 +127,14 @@ def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResp
     Search scans history until 500 matches per repo; an empty search keeps
     the recent-500 feed. Matching timestamp ties use ascending event IDs.
     """
-    terms = [t for t in q.lower().split() if t]
-
-    repos = _api._app_db.list_repos()
-    repo_slugs = sorted(f"{r.owner}/{r.repo}" for r in repos)
-
-    events: list[ActivityEventModel] = []
-    for repo_record in repos:
-        slug = f"{repo_record.owner}/{repo_record.repo}"
-        if repo and slug != repo:
-            continue
-        try:
-            store = IndexStore.open(
-                repo_record.owner, repo_record.repo, platform=repo_record.platform
-            )
-            try:
-                source = (
-                    store.iter_review_events()
-                    if terms
-                    else nullcontext(store.list_review_events(limit=500))
-                )
-                with source as review_events:
-                    matched = 0
-                    for e in review_events:
-                        if terms:
-                            haystack = f"{e.pr_title} #{e.pr_number} {slug} {e.categories}".lower()
-                            if not all(t in haystack for t in terms):
-                                continue
-                        events.append(
-                            ActivityEventModel(
-                                id=e.id,
-                                pr_number=e.pr_number,
-                                pr_title=e.pr_title,
-                                pr_url=e.pr_url,
-                                comments_posted=e.comments_posted,
-                                blockers=e.blockers,
-                                warnings=e.warnings,
-                                suggestions=e.suggestions,
-                                files_reviewed=e.files_reviewed,
-                                lines_changed=e.lines_changed,
-                                tokens_used=e.tokens_used,
-                                duration_ms=e.duration_ms,
-                                categories=e.categories,
-                                created_at=e.created_at,
-                                owner=repo_record.owner,
-                                repo=repo_record.repo,
-                                author_username=e.author,
-                                author_avatar_url=e.author_avatar_url,
-                            )
-                        )
-                        matched += 1
-                        if terms and matched >= 500:
-                            break
-            finally:
-                store.close()
-        except Exception:
-            logger.warning("Failed to read activity for %s", slug, exc_info=True)
-
-    events.sort(key=lambda ev: ev.created_at, reverse=True)
-    return ActivityResponse(events=events[:limit], repos=repo_slugs)
+    return _queries.collect_activity(_api._app_db.list_repos(), limit=limit, repo=repo, q=q)
 
 
 @router.get("/api/stats", response_model=OrgStatsModel)
 def get_org_stats(period: str = "") -> OrgStatsModel:
     """Aggregate stats across all repos, optionally filtered by period."""
     since = _period_to_since(period) if period else None
-
-    repos = _api._app_db.list_repos()
-    total_repos = len(repos)
-    total_files = 0
-    agg_stats: dict = {
-        "total_reviews": 0,
-        "total_comments": 0,
-        "total_blockers": 0,
-        "total_warnings": 0,
-        "total_suggestions": 0,
-        "total_files_reviewed": 0,
-        "total_lines_changed": 0,
-        "total_tokens": 0,
-        "avg_duration_ms": 0,
-        "categories": {},
-        "avg_comments_per_pr": 0.0,
-    }
-    duration_sum = 0
-    review_count = 0
-
-    for repo_record in repos:
-        try:
-            store = IndexStore.open(
-                repo_record.owner, repo_record.repo, platform=repo_record.platform
-            )
-            total_files += len(store.all_paths())
-            stats = store.get_review_stats(since=since)
-            agg_stats["total_reviews"] += stats["total_reviews"]
-            agg_stats["total_comments"] += stats["total_comments"]
-            agg_stats["total_blockers"] += stats["total_blockers"]
-            agg_stats["total_warnings"] += stats["total_warnings"]
-            agg_stats["total_suggestions"] += stats["total_suggestions"]
-            agg_stats["total_files_reviewed"] += stats["total_files_reviewed"]
-            agg_stats["total_lines_changed"] += stats["total_lines_changed"]
-            agg_stats["total_tokens"] += stats["total_tokens"]
-            for cat, cnt in stats.get("categories", {}).items():
-                agg_stats["categories"][cat] = agg_stats["categories"].get(cat, 0) + cnt
-            if stats["total_reviews"] > 0:
-                duration_sum += stats["avg_duration_ms"] * stats["total_reviews"]
-                review_count += stats["total_reviews"]
-            store.close()
-        except Exception:
-            logger.warning(
-                "Failed to read stats for %s/%s", repo_record.owner, repo_record.repo, exc_info=True
-            )
-
-    agg_stats["avg_duration_ms"] = int(duration_sum / review_count) if review_count > 0 else 0
-    agg_stats["avg_comments_per_pr"] = (
-        round(agg_stats["total_comments"] / review_count, 1) if review_count > 0 else 0.0
-    )
-
-    # Get relationship counts
-    total_edges = 0
-    total_groups = 0
-    try:
-        with _open_relationships() as rs:
-            total_edges = len(rs.resolve_edges())
-            total_groups = len(rs.group_repos(rs.repos))
-    except Exception:
-        pass
-
-    return OrgStatsModel(
-        total_repos=total_repos,
-        total_files=total_files,
-        total_edges=total_edges,
-        total_groups=total_groups,
-        review_stats=ReviewStatsModel(**agg_stats),
-    )
+    return _queries.aggregate_org_stats(_api._app_db.list_repos(), since)
 
 
 @router.get("/api/stats/timeseries", response_model=list[TimeSeriesPoint])
