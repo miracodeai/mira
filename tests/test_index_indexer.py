@@ -492,16 +492,22 @@ class TestIndexConventionsCacheMiss:
             contents={"AGENTS.md": "# Team rules\n\n- Always flag bare excepts.\n"}
         )
 
-        with patch("mira.dashboard.api._app_db") as app_db:
-            await _index_conventions(
-                "o",
-                "r",
-                fetcher,
-                "main",
-                ["AGENTS.md", "main.py"],
-                asyncio.Semaphore(4),
-                cached_contents={"main.py": "print()"},
-            )
+        store = IndexStore(":memory:")
+        try:
+            with patch("mira.dashboard.api._app_db") as app_db:
+                await _index_conventions(
+                    "o",
+                    "r",
+                    fetcher,
+                    "main",
+                    ["AGENTS.md", "main.py"],
+                    asyncio.Semaphore(4),
+                    cached_contents={"main.py": "print()"},
+                    store=store,
+                    run=store.claim_index_run(),
+                )
+        finally:
+            store.close()
 
         app_db.set_repo_conventions.assert_called_once()
         owner, repo, extracted = app_db.set_repo_conventions.call_args.args

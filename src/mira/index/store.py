@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from mira.index._package_search import PackageGroups, matching_sqlite_packages
 from mira.index._store_shared import _StoreSharedMixin
@@ -21,6 +22,12 @@ logger = logging.getLogger(__name__)
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS index_runs (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    token TEXT NOT NULL,
+    pending INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
     language TEXT NOT NULL DEFAULT '',
@@ -376,11 +383,22 @@ class BlastRadiusEntry:
     depth: int
 
 
+@dataclass(frozen=True)
+class IndexRun:
+    token: str
+    needs_reconciliation: bool
+
+
+class IndexingSuperseded(Exception):
+    """A newer indexing run owns this repository."""
+
+
 class IndexStore(_StoreSharedMixin):
     """SQLite-backed index for a single repository."""
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
+        self._index_write_active = False
         self._conn = sqlite3.connect(db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -417,7 +435,9 @@ class IndexStore(_StoreSharedMixin):
         self._conn.commit()
 
     @classmethod
-    def open(cls, owner: str, repo: str, platform: str = "github"):  # type: ignore[no-untyped-def]
+    def open(  # type: ignore[no-untyped-def]
+        cls, owner: str, repo: str, platform: str = "github", *, allow_fallback: bool = True
+    ):
         """Open (or create) the index store for a repo.
 
         Returns a PgIndexStore if DATABASE_URL is set, otherwise an IndexStore
@@ -433,6 +453,8 @@ class IndexStore(_StoreSharedMixin):
 
                 return PgIndexStore(key_owner, repo, db_url)
             except Exception as exc:
+                if not allow_fallback:
+                    raise
                 logger.warning("Postgres store unavailable (%s), falling back to SQLite", exc)
 
         index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
@@ -440,6 +462,45 @@ class IndexStore(_StoreSharedMixin):
         os.makedirs(repo_dir, exist_ok=True)
         db_path = os.path.join(repo_dir, f"{repo}.db")
         return cls(db_path)
+
+    def claim_index_run(self) -> IndexRun:
+        """Persist a new owner before acquiring any index input."""
+        if self._conn.in_transaction:
+            raise RuntimeError("Cannot claim an index run inside another transaction")
+        token = uuid4().hex
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            previous = self._conn.execute("SELECT pending FROM index_runs WHERE id=1").fetchone()
+            self._conn.execute(
+                "INSERT INTO index_runs (id, token, pending) VALUES (1, ?, 1) "
+                "ON CONFLICT(id) DO UPDATE SET token=excluded.token, pending=1",
+                (token,),
+            )
+        return IndexRun(token, bool(previous and previous[0]))
+
+    @contextmanager
+    def index_write(self, run: IndexRun) -> Iterator[None]:
+        """Hold ownership and publish a synchronous batch in one transaction."""
+        if self._conn.in_transaction:
+            raise RuntimeError("Nested index write")
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute("SELECT token FROM index_runs WHERE id=1").fetchone()
+            if row != (run.token,):
+                raise IndexingSuperseded
+            self._index_write_active = True
+            try:
+                yield
+            finally:
+                self._index_write_active = False
+
+    def finish_index_run(self, run: IndexRun) -> None:
+        with self.index_write(run):
+            self._conn.execute("UPDATE index_runs SET pending=0 WHERE id=1")
+
+    def _commit_index_write(self) -> None:
+        if not self._index_write_active:
+            self._conn.commit()
 
     def get_summary(self, path: str) -> FileSummary | None:
         """Get the summary for a single file."""
@@ -537,7 +598,7 @@ class IndexStore(_StoreSharedMixin):
                 "VALUES (?, ?, ?, ?)",
                 (summary.path, ref.kind, ref.target, ref.description),
             )
-        self._conn.commit()
+        self._commit_index_write()
 
     def upsert_directory(self, summary: DirectorySummary) -> None:
         """Insert or update a directory summary."""
@@ -551,13 +612,13 @@ class IndexStore(_StoreSharedMixin):
                  updated_at=excluded.updated_at""",
             (summary.path, summary.summary, summary.file_count, now),
         )
-        self._conn.commit()
+        self._commit_index_write()
 
     def remove_paths(self, paths: list[str]) -> None:
         """Remove files (and their symbols/imports via CASCADE) from the index."""
         for path in paths:
             self._conn.execute("DELETE FROM files WHERE path = ?", (path,))
-        self._conn.commit()
+        self._commit_index_write()
 
     def all_paths(self) -> set[str]:
         """Return all indexed file paths."""
@@ -1484,7 +1545,7 @@ class IndexStore(_StoreSharedMixin):
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 rows,
             )
-        self._conn.commit()
+        self._commit_index_write()
         return len(packages)
 
     def list_manifest_packages(self) -> list[PackageManifestRow]:
@@ -1524,7 +1585,7 @@ class IndexStore(_StoreSharedMixin):
             "DELETE FROM package_manifests WHERE file_path = ?",
             [(p,) for p in stale],
         )
-        self._conn.commit()
+        self._commit_index_write()
         return len(stale)
 
     def replace_vulnerabilities_for_package(

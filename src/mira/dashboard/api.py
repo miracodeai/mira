@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
 from mira.dashboard.db import AppDatabase, RepoRecord
 from mira.index.relationships import RelationshipStore
-from mira.index.store import IndexStore
+from mira.index.store import IndexingSuperseded, IndexStore
 
 logger = logging.getLogger(__name__)
 
@@ -524,7 +524,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
 
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
-    from mira.index.indexer import index_repo
+    from mira.index.indexer import IndexingRecoveryPending, index_repo
     from mira.llm import create_llm
     from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
@@ -552,10 +552,15 @@ async def _run_initial_indexing(default_mode: str) -> None:
             # crashing on an empty auth header.
             logger.warning("Skipping initial index of %s — no %s token", full_name, platform)
             continue
+        store = None
+        run = None
+        job = None
         try:
-            _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
-            tracker.start(full_name)
-            store = IndexStore.open(owner, repo, platform=platform)
+            store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
+            run = store.claim_index_run()
+            with store.index_write(run):
+                _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
+                job = tracker.start(full_name)
             count = await index_repo(
                 owner=owner,
                 repo=repo,
@@ -564,31 +569,48 @@ async def _run_initial_indexing(default_mode: str) -> None:
                 store=store,
                 llm=llm,
                 full=(repo_record.index_mode == "full"),
-            )
-            # `count` is files re-indexed this run, not the store total.
-            # Read the true total before closing to keep the DB in sync.
-            total_files = len(store.all_paths())
-            store.close()
-            _app_db.set_repo_status(
-                owner,
-                repo,
-                "ready",
-                files_indexed=total_files,
-                bump_last_indexed=True,
+                run=run,
                 platform=platform,
             )
-            tracker.complete(full_name, count)
+            with store.index_write(run):
+                _app_db.set_repo_status(
+                    owner,
+                    repo,
+                    "ready",
+                    files_indexed=len(store.all_paths()),
+                    bump_last_indexed=True,
+                    platform=platform,
+                )
+                tracker.complete(full_name, count, expected=job)
             logger.info("Indexed %s: %d files", full_name, count)
             from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
 
             await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
-        except EmptyRepoError as empty:
-            _app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
-            tracker.complete(full_name, 0)
+        except IndexingSuperseded:
+            if job is not None:
+                tracker.discard(job)
+            logger.info("Indexing superseded for %s", full_name)
         except Exception as exc:
-            _app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform=platform)
-            tracker.fail(full_name, str(exc))
-            logger.exception("Failed to index %s", full_name)
+            try:
+                with store.index_write(run) if store is not None and run else nullcontext():
+                    if isinstance(exc, IndexingRecoveryPending):
+                        status = "indexing"
+                    else:
+                        status = "empty" if isinstance(exc, EmptyRepoError) else "failed"
+                    _app_db.set_repo_status(owner, repo, status, error=str(exc), platform=platform)
+                    if job is None:
+                        logger.exception("Failed to start indexing %s", full_name)
+                    elif status == "empty":
+                        tracker.complete(full_name, 0, expected=job)
+                    else:
+                        tracker.fail(full_name, str(exc), expected=job)
+                        logger.exception("Failed to index %s", full_name)
+            except IndexingSuperseded:
+                if job is not None:
+                    tracker.discard(job)
+        finally:
+            if store is not None:
+                store.close()
 
 
 class BlastRadiusModel(BaseModel):

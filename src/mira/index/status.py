@@ -26,14 +26,21 @@ class IndexingTracker:
         self._lock = threading.Lock()
         self._jobs: dict[str, RepoIndexStatus] = {}
 
-    def start(self, repo: str, files_total: int = 0) -> None:
+    def start(self, repo: str, files_total: int = 0) -> RepoIndexStatus:
         with self._lock:
-            self._jobs[repo] = RepoIndexStatus(
+            job = self._jobs[repo] = RepoIndexStatus(
                 repo=repo,
                 status="indexing",
                 files_total=files_total,
                 started_at=time.time(),
             )
+            return job
+
+    def discard(self, job: RepoIndexStatus) -> None:
+        """Retire a superseded entry without clearing a replacement job."""
+        with self._lock:
+            if self._jobs.get(job.repo) is job:
+                del self._jobs[job.repo]
 
     def progress(self, repo: str, files_done: int) -> None:
         with self._lock:
@@ -41,18 +48,20 @@ class IndexingTracker:
             if job:
                 job.files_done = files_done
 
-    def complete(self, repo: str, files_done: int) -> None:
+    def complete(
+        self, repo: str, files_done: int, *, expected: RepoIndexStatus | None = None
+    ) -> None:
         with self._lock:
             job = self._jobs.get(repo)
-            if job:
+            if job and (expected is None or job is expected):
                 job.status = "completed"
                 job.files_done = files_done
                 job.finished_at = time.time()
 
-    def fail(self, repo: str, error: str) -> None:
+    def fail(self, repo: str, error: str, *, expected: RepoIndexStatus | None = None) -> None:
         with self._lock:
             job = self._jobs.get(repo)
-            if job:
+            if job and (expected is None or job is expected):
                 job.status = "failed"
                 job.error = error
                 job.finished_at = time.time()
@@ -71,11 +80,13 @@ class IndexingTracker:
             job = self._jobs.get(repo)
             return bool(job and job.cancel_requested)
 
-    def cancel(self, repo: str, files_done: int) -> None:
+    def cancel(
+        self, repo: str, files_done: int, *, expected: RepoIndexStatus | None = None
+    ) -> None:
         """Mark a job as finished due to cancellation."""
         with self._lock:
             job = self._jobs.get(repo)
-            if job:
+            if job and (expected is None or job is expected):
                 job.status = "cancelled"
                 job.files_done = files_done
                 job.finished_at = time.time()

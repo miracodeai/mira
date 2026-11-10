@@ -7,7 +7,8 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,15 @@ from jinja2 import Environment, FileSystemLoader
 from mira.config import MiraConfig, load_config
 from mira.core.file_types import is_indexable_path, language_from_path
 from mira.index.manifests import is_manifest, parse_manifest
-from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
+from mira.index.store import (
+    DirectorySummary,
+    ExternalRef,
+    FileSummary,
+    IndexingSuperseded,
+    IndexRun,
+    IndexStore,
+    SymbolInfo,
+)
 from mira.llm import create_llm
 from mira.llm.utils import strip_think_blocks
 from mira.platforms.fetch import RepoFetcher, make_fetcher
@@ -35,6 +44,10 @@ class IndexingCancelled(Exception):
     def __init__(self, files_indexed: int) -> None:
         super().__init__(f"Indexing cancelled after {files_indexed} files")
         self.files_indexed = files_indexed
+
+
+class IndexingRecoveryPending(RuntimeError):
+    """An interrupted index still needs a complete recovery pass."""
 
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts" / "templates"
@@ -341,6 +354,37 @@ async def _summarize_batch(
     return results
 
 
+@contextmanager
+def _complete_index_run(store: IndexStore, run: IndexRun) -> Iterator[None]:
+    # Keep the pending marker after an exception or cancellation. A later
+    # incremental push must reconcile paths it may not have in its payload.
+    try:
+        yield
+    except IndexingSuperseded:
+        raise
+    except Exception as exc:
+        # An error from a stale fetch must not be reported as the current run's
+        # error. Check again before allowing its caller to handle the error.
+        with store.index_write(run):
+            pass
+        if run.needs_reconciliation and not isinstance(
+            exc, (IndexingCancelled, IndexingRecoveryPending)
+        ):
+            raise IndexingRecoveryPending(f"Index reconciliation incomplete: {exc}") from exc
+        raise
+    else:
+        store.finish_index_run(run)
+
+
+def _queue_vulnerability_scan(owner: str, repo: str) -> None:
+    try:
+        from mira.security.poller import poll_repo
+
+        asyncio.create_task(poll_repo(owner, repo))
+    except Exception as exc:
+        logger.debug("Failed to schedule vuln poll for %s/%s: %s", owner, repo, exc)
+
+
 async def index_repo(
     owner: str,
     repo: str,
@@ -352,6 +396,10 @@ async def index_repo(
     branch: str | None = None,
     cancel_check: Callable[[], bool] | None = None,
     fetcher: RepoFetcher | None = None,
+    *,
+    run: IndexRun | None = None,
+    reset: bool = False,
+    platform: str = "github",
 ) -> int:
     """Index a full repository. Returns number of files indexed.
 
@@ -369,12 +417,52 @@ async def index_repo(
         from mira.dashboard.models_config import llm_config_for
 
         llm = create_llm(llm_config_for("indexing", config.llm))
+    owns_store = store is None
     if store is None:
-        store = IndexStore.open(owner, repo)
+        store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
     # Back-compat: callers that pass a raw GitHub token get a GitHub fetcher.
     if fetcher is None:
         fetcher = make_fetcher("github", token or "")
 
+    try:
+        run = run if run is not None else store.claim_index_run()
+        with _complete_index_run(store, run):
+            count = await _index_repo(
+                owner,
+                repo,
+                config,
+                store,
+                llm,
+                fetcher,
+                branch,
+                run,
+                full=full,
+                reset=reset,
+                cancel_check=cancel_check,
+                platform=platform,
+            )
+        _queue_vulnerability_scan(owner, repo)
+        return count
+    finally:
+        if owns_store:
+            store.close()
+
+
+async def _index_repo(
+    owner: str,
+    repo: str,
+    config: MiraConfig,
+    store: IndexStore,
+    llm: Any,
+    fetcher: RepoFetcher,
+    branch: str | None,
+    run: IndexRun,
+    *,
+    full: bool = False,
+    reset: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
+    platform: str = "github",
+) -> int:
     # Auto-detect default branch if not specified
     if branch is None:
         branch = await fetcher.default_branch(owner, repo)
@@ -397,23 +485,29 @@ async def index_repo(
     max_file_size = config.index.max_file_size
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
     indexable_set = set(indexable)
-    tarball: dict[str, str] | None = await fetcher.repo_tarball(
+    tarball = await fetcher.repo_tarball(
         owner,
         repo,
         branch,
         max_file_size=max_file_size,
         indexable_paths=indexable_set,
     )
-
-    if tarball is not None:
-        contents: list[str | None] = [tarball.get(p) for p in indexable]
-    else:
+    contents = [tarball.get(p) if tarball is not None else None for p in indexable]
+    if tarball is None:
         logger.info("Tarball unavailable, falling back to per-file fetch")
+    if tarball is None or run.needs_reconciliation:
+        # A missing archive entry can be a fetch failure or a deliberate
+        # size cap. Retry omissions before a recovery clears pending.
+        missing = [i for i, content in enumerate(contents) if content is None]
         fetch_tasks = [
-            fetcher.file_content(owner, repo, path, branch, semaphore=fetch_sem)
-            for path in indexable
+            fetcher.file_content(owner, repo, indexable[i], branch, semaphore=fetch_sem)
+            for i in missing
         ]
-        contents = await asyncio.gather(*fetch_tasks)
+        for i, content in zip(missing, await asyncio.gather(*fetch_tasks), strict=True):
+            contents[i] = content
+
+    if run.needs_reconciliation and any(content is None for content in contents):
+        raise IndexingRecoveryPending("Could not read every file needed to reconcile the index")
 
     # Filter out failed fetches and compute hashes for staleness check
     file_pairs: list[tuple[str, str]] = []
@@ -426,7 +520,7 @@ async def index_repo(
         if max_file_size and len(content.encode("utf-8")) > max_file_size:
             skipped_large += 1
             continue
-        if not full:
+        if not (full or reset):
             existing = store.get_summary(path)
             if existing and existing.content_hash == _content_hash(content):
                 continue
@@ -446,28 +540,31 @@ async def index_repo(
         skipped_large,
     )
 
-    # Clean up deleted files
-    existing_paths = store.all_paths()
-    tree_set = set(tree_paths)
-    deleted = existing_paths - tree_set
-    if deleted:
-        store.remove_paths(list(deleted))
-        logger.info("Removed %d deleted files from index", len(deleted))
+    with store.index_write(run):
+        # Clean up deleted files
+        existing_paths = store.all_paths()
+        tree_set = set(tree_paths)
+        deleted = existing_paths if reset else existing_paths - tree_set
+        if deleted:
+            store.remove_paths(list(deleted))
+            logger.info("Removed %d deleted files from index", len(deleted))
 
-    # Persist trivial files immediately — no LLM, no batch quota.
-    for path, content in trivial_pairs:
-        store.upsert_summary(
-            FileSummary(
-                path=path,
-                language=_language_from_path(path),
-                summary="",
-                symbols=[],
-                imports=[],
-                external_refs=[],
-                content_hash=_content_hash(content),
-                loc=content.count("\n") + (0 if content.endswith("\n") else 1) if content else 0,
+        # Persist trivial files immediately — no LLM, no batch quota.
+        for path, content in trivial_pairs:
+            store.upsert_summary(
+                FileSummary(
+                    path=path,
+                    language=_language_from_path(path),
+                    summary="",
+                    symbols=[],
+                    imports=[],
+                    external_refs=[],
+                    content_hash=_content_hash(content),
+                    loc=content.count("\n") + (0 if content.endswith("\n") else 1)
+                    if content
+                    else 0,
+                )
             )
-        )
 
     # Batch summarize. The previous `for batch in batches: await ...` pattern
     # was serial — `_summarize_batch`'s internal semaphore allowed N
@@ -483,6 +580,7 @@ async def index_repo(
     ]
 
     indexed_count = len(trivial_pairs)
+    summarized: set[str] = set()
     try:
         for fut in asyncio.as_completed(summary_tasks):
             if cancel_check and cancel_check():
@@ -503,15 +601,26 @@ async def index_repo(
                 # abort the repo (and aborting leaves the other tasks burning tokens).
                 logger.warning("Skipping a summarization batch for %s/%s: %s", owner, repo, exc)
                 continue
+            summaries = []
             for path, content, data in results:
                 try:
-                    summary = _build_file_summary(path, content, data)
-                    store.upsert_summary(summary)
-                    indexed_count += 1
+                    summaries.append(_build_file_summary(path, content, data))
                 except Exception as exc:
                     logger.warning("Skipping file %s in %s/%s: %s", path, owner, repo, exc)
-    except IndexingCancelled:
-        raise
+            if summaries:
+                with store.index_write(run):
+                    for summary in summaries:
+                        store.upsert_summary(summary)
+                indexed_count += len(summaries)
+                summarized.update(summary.path for summary in summaries)
+    finally:
+        for task in summary_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*summary_tasks, return_exceptions=True)
+
+    if run.needs_reconciliation and any(path not in summarized for path, _ in file_pairs):
+        raise IndexingRecoveryPending("Missing file summaries during index reconciliation")
 
     if cancel_check and cancel_check():
         logger.info(
@@ -535,8 +644,13 @@ async def index_repo(
             tree_paths,
             fetch_sem,
             cached_contents=tarball,
+            run=run,
         )
+    except IndexingSuperseded:
+        raise
     except Exception as exc:
+        if run.needs_reconciliation:
+            raise
         logger.warning("Manifest indexing failed for %s/%s: %s", owner, repo, exc)
 
     # ── Conventions pass (no LLM calls — pure file reads) ──
@@ -544,23 +658,26 @@ async def index_repo(
     # extract team-specific coding rules. Stored on the repos row so the
     # review prompt can inject them.
     try:
-        await _index_conventions(owner, repo, fetcher, branch, tree_paths, fetch_sem, tarball)
+        await _index_conventions(
+            owner,
+            repo,
+            fetcher,
+            branch,
+            tree_paths,
+            fetch_sem,
+            tarball,
+            store=store,
+            run=run,
+            platform=platform,
+        )
+    except IndexingSuperseded:
+        raise
     except Exception as exc:
+        if run.needs_reconciliation:
+            raise
         logger.warning("Conventions indexing failed for %s/%s: %s", owner, repo, exc)
 
-    # ── Vulnerability scan (fire-and-forget) ──
-    # Triggers an OSV.dev poll for this repo's packages so freshly-indexed
-    # manifests get a vuln check without waiting for the next hourly tick.
-    # Doesn't block indexing completion.
-    try:
-        from mira.security.poller import poll_repo as _vuln_poll_repo
-
-        asyncio.create_task(_vuln_poll_repo(owner, repo))
-    except Exception as exc:
-        logger.debug("Failed to schedule vuln poll for %s/%s: %s", owner, repo, exc)
-
-    # Directory summarization pass
-    await _summarize_directories(store, llm, llm_sem)
+    await _summarize_directories(store, llm, llm_sem, run)
 
     logger.info("Indexing complete: %d files indexed for %s/%s", indexed_count, owner, repo)
     return indexed_count
@@ -601,6 +718,10 @@ async def _index_conventions(
     tree_paths: list[str],
     fetch_sem: asyncio.Semaphore,
     cached_contents: dict[str, str] | None = None,
+    *,
+    store: IndexStore,
+    run: IndexRun,
+    platform: str = "github",
 ) -> None:
     """Read team-conventions files from the repo and persist the extracted
     rules so they can be injected into review prompts.
@@ -617,6 +738,8 @@ async def _index_conventions(
     resolved = await _read_paths(
         owner, repo, fetcher, branch, candidates, fetch_sem, cached_contents
     )
+    if run.needs_reconciliation and any(content is None for content in resolved.values()):
+        raise IndexingRecoveryPending("Could not read every conventions file during reconciliation")
     file_contents = {p: (c or "") for p, c in resolved.items()}
 
     extracted = extract_conventions(file_contents)
@@ -626,7 +749,8 @@ async def _index_conventions(
     try:
         from mira.dashboard.api import _app_db
 
-        _app_db.set_repo_conventions(owner, repo, extracted)
+        with store.index_write(run):
+            _app_db.set_repo_conventions(owner, repo, extracted, platform=platform)
         logger.info(
             "Extracted %d-char conventions block for %s/%s from %s",
             len(extracted),
@@ -634,7 +758,11 @@ async def _index_conventions(
             repo,
             ", ".join(p for p, c in file_contents.items() if c),
         )
+    except IndexingSuperseded:
+        raise
     except Exception as exc:
+        if run.needs_reconciliation:
+            raise
         logger.warning("Failed to persist conventions for %s/%s: %s", owner, repo, exc)
 
 
@@ -667,6 +795,8 @@ async def _index_manifests(
     tree_paths: list[str],
     fetch_sem: asyncio.Semaphore,
     cached_contents: dict[str, str] | None = None,
+    *,
+    run: IndexRun,
 ) -> None:
     """Fetch known manifest files, parse them, and persist declared packages.
 
@@ -675,25 +805,20 @@ async def _index_manifests(
     whichever manifests it holds; the rest are fetched.
     """
     manifest_paths = [p for p in tree_paths if is_manifest(p)]
-    if not manifest_paths:
-        store.clear_manifest_packages_for_missing_files(set())
-        return
-
     resolved = await _read_paths(
         owner, repo, fetcher, branch, manifest_paths, fetch_sem, cached_contents
     )
-    contents: list[str | None] = [resolved[p] for p in manifest_paths]
-
-    live: set[str] = set()
     total_packages = 0
-    for path, content in zip(manifest_paths, contents, strict=False):
-        if content is None:
-            continue
-        live.add(path)
-        total_packages += _store_manifest_file(store, path, content)
-
-    # Drop manifest entries whose source file disappeared from the repo.
-    store.clear_manifest_packages_for_missing_files(live)
+    live = {path for path in manifest_paths if resolved[path] is not None}
+    if run.needs_reconciliation and len(live) != len(manifest_paths):
+        raise IndexingRecoveryPending("Could not read every manifest during reconciliation")
+    with store.index_write(run):
+        for path in manifest_paths:
+            content = resolved[path]
+            if content is not None:
+                total_packages += _store_manifest_file(store, path, content)
+        # A failed fetch is not evidence that the manifest disappeared.
+        store.clear_manifest_packages_for_missing_files(set(manifest_paths))
 
     if total_packages:
         logger.info(
@@ -705,7 +830,9 @@ async def _index_manifests(
         )
 
 
-async def _summarize_directories(store: IndexStore, llm: Any, semaphore: asyncio.Semaphore) -> None:
+async def _summarize_directories(
+    store: IndexStore, llm: Any, semaphore: asyncio.Semaphore, run: IndexRun
+) -> None:
     """Generate directory summaries from file summaries.
 
     Batched into chunks of ~15 directories per LLM call. Each directory was
@@ -772,6 +899,8 @@ async def _summarize_directories(store: IndexStore, llm: Any, semaphore: asyncio
                 )
                 data = json.loads(strip_think_blocks(_strip_code_fences(raw)))
             except Exception as exc:
+                if run.needs_reconciliation:
+                    raise
                 logger.warning("Directory batch summary failed: %s", exc)
                 return
 
@@ -788,18 +917,28 @@ async def _summarize_directories(store: IndexStore, llm: Any, semaphore: asyncio
             if s:
                 by_path[p] = s
 
-        for dir_path, file_count, _summaries in chunk:
-            summary_text = by_path.get(dir_path)
-            if summary_text:
-                store.upsert_directory(
-                    DirectorySummary(
-                        path=dir_path,
-                        summary=summary_text,
-                        file_count=file_count,
+        if run.needs_reconciliation and any(path not in by_path for path, _, _ in chunk):
+            raise IndexingRecoveryPending("Missing directory summaries during reconciliation")
+        with store.index_write(run):
+            for dir_path, file_count, _summaries in chunk:
+                summary_text = by_path.get(dir_path)
+                if summary_text:
+                    store.upsert_directory(
+                        DirectorySummary(
+                            path=dir_path,
+                            summary=summary_text,
+                            file_count=file_count,
+                        )
                     )
-                )
 
-    await asyncio.gather(*(_process_chunk(c) for c in chunks))
+    tasks = [asyncio.create_task(_process_chunk(chunk)) for chunk in chunks]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _refresh_manifests_incremental(
@@ -810,20 +949,22 @@ async def _refresh_manifests_incremental(
     store: IndexStore,
     changed_paths: list[str] | None,
     removed_paths: list[str] | None,
+    run: IndexRun,
 ) -> int:
     """Refresh package rows for manifests touched by a push. Returns the
     number of manifest files updated or cleared."""
     changed = [p for p in changed_paths or [] if is_manifest(p)]
     removed = [p for p in removed_paths or [] if is_manifest(p)]
-    for path in removed:
-        store.replace_manifest_packages(path, [])
-
+    if not changed and not removed:
+        return 0
+    fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
+    contents = await asyncio.gather(
+        *(fetcher.file_content(owner, repo, p, branch, semaphore=fetch_sem) for p in changed)
+    )
     touched = len(removed)
-    if changed:
-        fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
-        contents = await asyncio.gather(
-            *(fetcher.file_content(owner, repo, p, branch, semaphore=fetch_sem) for p in changed)
-        )
+    with store.index_write(run):
+        for path in removed:
+            store.replace_manifest_packages(path, [])
         for path, content in zip(changed, contents, strict=False):
             if content is None:
                 continue
@@ -845,6 +986,9 @@ async def index_diff(
     removed_paths: list[str] | None = None,
     branch: str = "main",
     fetcher: RepoFetcher | None = None,
+    *,
+    run: IndexRun | None = None,
+    platform: str = "github",
 ) -> int:
     """Incremental index for changed files. Returns number of files re-indexed."""
     if config is None:
@@ -853,36 +997,76 @@ async def index_diff(
         from mira.dashboard.models_config import llm_config_for
 
         llm = create_llm(llm_config_for("indexing", config.llm))
+    owns_store = store is None
     if store is None:
-        store = IndexStore.open(owner, repo)
+        store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
     if fetcher is None:
         fetcher = make_fetcher("github", token or "")
 
+    try:
+        run = run if run is not None else store.claim_index_run()
+        with _complete_index_run(store, run):
+            if run.needs_reconciliation:
+                logger.info("Reconciling unfinished index for %s/%s", owner, repo)
+                count = await _index_repo(
+                    owner, repo, config, store, llm, fetcher, branch, run, platform=platform
+                )
+                poll = True
+            else:
+                count, poll = await _index_diff(
+                    owner,
+                    repo,
+                    config,
+                    store,
+                    llm,
+                    fetcher,
+                    branch,
+                    run,
+                    changed_paths,
+                    removed_paths,
+                )
+        if poll:
+            _queue_vulnerability_scan(owner, repo)
+        return count
+    finally:
+        if owns_store:
+            store.close()
+
+
+async def _index_diff(
+    owner: str,
+    repo: str,
+    config: MiraConfig,
+    store: IndexStore,
+    llm: Any,
+    fetcher: RepoFetcher,
+    branch: str,
+    run: IndexRun,
+    changed_paths: list[str] | None,
+    removed_paths: list[str] | None,
+) -> tuple[int, bool]:
     # Remove deleted files
     if removed_paths:
-        store.remove_paths(removed_paths)
+        with store.index_write(run):
+            store.remove_paths(removed_paths)
         logger.info("Removed %d deleted files from index", len(removed_paths))
 
     # Manifests/lockfiles are excluded from code indexing but feed the package
     # inventory — a dependency-bump push usually touches nothing else (#157).
+    touched = 0
     try:
         touched = await _refresh_manifests_incremental(
-            owner, repo, fetcher, branch, store, changed_paths, removed_paths
+            owner, repo, fetcher, branch, store, changed_paths, removed_paths, run
         )
-        if touched:
-            from mira.security.poller import poll_repo as _vuln_poll_repo
-
-            asyncio.create_task(_vuln_poll_repo(owner, repo))
+    except IndexingSuperseded:
+        raise
     except Exception as exc:
         logger.warning("Manifest refresh failed for %s/%s: %s", owner, repo, exc)
 
-    if not changed_paths:
-        return 0
-
     # Filter to indexable files
-    to_index = [p for p in changed_paths if _should_index(p, config.filter.exclude_patterns)]
+    to_index = [p for p in changed_paths or [] if _should_index(p, config.filter.exclude_patterns)]
     if not to_index:
-        return 0
+        return 0, bool(touched)
 
     # Fetch content
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
@@ -911,10 +1095,12 @@ async def index_diff(
             *(_summarize_batch(batch, llm, llm_sem) for batch in batches)
         )
         for results in all_results:
-            for path, content, data in results:
-                summary = _build_file_summary(path, content, data)
-                store.upsert_summary(summary)
-                indexed_count += 1
+            if results:
+                with store.index_write(run):
+                    for path, content, data in results:
+                        summary = _build_file_summary(path, content, data)
+                        store.upsert_summary(summary)
+                indexed_count += len(results)
 
     # Re-generate directory summaries for affected parent dirs
     affected_dirs: set[str] = set()
@@ -927,7 +1113,7 @@ async def index_diff(
             affected_dirs.add("" if parent == "." else parent)
     if affected_dirs:
         logger.info("Re-generating summaries for %d affected directories", len(affected_dirs))
-        await _summarize_directories_selective(store, llm, llm_sem, affected_dirs)
+        await _summarize_directories_selective(store, llm, llm_sem, affected_dirs, run)
 
     logger.info(
         "Incremental index: %d files re-indexed for %s/%s",
@@ -935,7 +1121,7 @@ async def index_diff(
         owner,
         repo,
     )
-    return indexed_count
+    return indexed_count, bool(touched)
 
 
 async def _summarize_directories_selective(
@@ -943,6 +1129,7 @@ async def _summarize_directories_selective(
     llm: Any,
     semaphore: asyncio.Semaphore,
     target_dirs: set[str],
+    run: IndexRun,
 ) -> None:
     """Re-generate directory summaries only for the specified directories."""
     all_paths = store.all_paths()
@@ -984,13 +1171,15 @@ async def _summarize_directories_selective(
                 raw = await llm.complete(messages, json_mode=True, temperature=0.0)
                 data = json.loads(strip_think_blocks(_strip_code_fences(raw)))
                 summary_text = data.get("summary", "")
-                if summary_text:
-                    store.upsert_directory(
-                        DirectorySummary(
-                            path=dir_path,
-                            summary=summary_text,
-                            file_count=len(file_paths),
-                        )
-                    )
             except Exception as exc:
                 logger.warning("Directory summary failed for %s: %s", display_path, exc)
+                continue
+        if summary_text:
+            with store.index_write(run):
+                store.upsert_directory(
+                    DirectorySummary(
+                        path=dir_path,
+                        summary=summary_text,
+                        file_count=len(file_paths),
+                    )
+                )
