@@ -3345,6 +3345,58 @@ class TestIncrementalWalkthroughScope:
         )
         assert details.startswith("25 files in PR · 5 reviewed in this push · 1 new comment")
 
+    @pytest.mark.asyncio
+    async def test_review_rest_does_not_rescore_on_its_own_rounds_threads(self, monkeypatch):
+        """review-rest continues round 1, so the threads already on the PR are
+        this review's own, not findings left open from an earlier one."""
+        from mira.models import BotThreadRecord
+
+        open_thread = BotThreadRecord(
+            thread_id="t", path="b.py", line=1, body=self._OPEN_THREAD_BODY, is_resolved=False
+        )
+        provider = self._provider([open_thread])
+        captured: dict = {}
+        engine = self._engine(provider, monkeypatch, "134545e90f1c", captured)
+        engine._review_only_paths = {"b.py"}
+
+        result = await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["walkthrough_diff_text"] is None
+        assert result.walkthrough.confidence_score.score == 5
+        assert result.walkthrough.confidence_score.label == "No issues to flag"
+        posted = [
+            c.args[1] for c in provider.post_comment.call_args_list if "reviewed" in c.args[1]
+        ]
+        assert len(posted) == 1
+        assert "Still open" not in posted[0]
+        assert "unresolved" not in posted[0]
+
+    @pytest.mark.asyncio
+    async def test_outdated_open_thread_is_ignored(self, monkeypatch):
+        """An unresolved thread whose code has since changed does not hold the score."""
+        from mira.models import BotThreadRecord
+
+        outdated = BotThreadRecord(
+            thread_id="t",
+            path="b.py",
+            line=1,
+            body=self._OPEN_THREAD_BODY,
+            is_resolved=False,
+            is_outdated=True,
+        )
+        provider = self._provider([outdated])
+        captured: dict = {}
+        engine = self._engine(provider, monkeypatch, "134545e90f1c", captured)
+
+        result = await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["walkthrough_diff_text"] == self._FULL  # still round 2
+        assert result.walkthrough.confidence_score.score == 5
+        posted = [c.args[1] for c in provider.post_comment.call_args_list if "in PR" in c.args[1]]
+        assert len(posted) == 1
+        assert "*2 files in PR \u00b7 1 reviewed in this push*" in posted[0]
+        assert "Still open" not in posted[0]
+
 
 class TestClampWithOpenThreads:
     """Unresolved threads from earlier rounds count in the whole-PR verdict."""
@@ -3436,6 +3488,22 @@ class TestClampWithOpenThreads:
         assert wt.confidence_score.label == "Major concerns"
         assert wt.confidence_score.reason == "original"
 
+    def test_outdated_thread_is_ignored(self):
+        from mira.models import BotThreadRecord
+
+        wt = self._wt()
+        outdated = BotThreadRecord(
+            thread_id="t",
+            path="x.py",
+            line=1,
+            body="**Note**\n\U0001f6d1 Blocker \u2014 must fix before merge\n\n**Title**\n\nbody",
+            is_resolved=False,
+            is_outdated=True,
+        )
+        _clamp_confidence_to_findings(wt, [], open_threads=[outdated])
+        assert wt.confidence_score.score == 5
+        assert wt.confidence_score.label == "No issues to flag"
+
 
 class TestOpenThreadKeyIssues:
     def _thread(self, path, line, title="Old finding"):
@@ -3477,3 +3545,17 @@ class TestOpenThreadKeyIssues:
                 issue="Still open from an earlier review: see the open thread", path="c.py", line=2
             )
         ]
+
+    def test_outdated_thread_is_skipped(self):
+        from mira.core.engine import _with_open_thread_issues
+        from mira.models import BotThreadRecord
+
+        outdated = BotThreadRecord(
+            thread_id="t",
+            path="b.py",
+            line=7,
+            body="**Note**\n\u26a0\ufe0f Warning\n\n**Old finding**\n\nbody",
+            is_resolved=False,
+            is_outdated=True,
+        )
+        assert _with_open_thread_issues([], [outdated]) == []

@@ -250,13 +250,14 @@ def _clamp_confidence_to_findings(
     counts like a blocker found now, open warnings add to the warning count,
     and a push with nothing new to say still scores at most 4 while a warning
     from an earlier review is open. Open suggestions and nitpicks do not move
-    the score; a thread whose severity badge cannot be read is ignored.
+    the score; a thread whose severity badge cannot be read is ignored, as is
+    an outdated one, whose code has changed since it was filed.
     """
     cs = walkthrough.confidence_score
     if cs is None:
         return
 
-    open_severities = [thread_severity(t.body) for t in open_threads or []]
+    open_severities = [thread_severity(t.body) for t in open_threads or [] if not t.is_outdated]
     open_blockers = sum(1 for s in open_severities if s == Severity.BLOCKER)
     open_warnings = sum(1 for s in open_severities if s == Severity.WARNING)
     blockers = sum(1 for c in comments if c.severity == Severity.BLOCKER) + open_blockers
@@ -323,13 +324,14 @@ def _with_open_thread_issues(
     Round 2+ reviews only the latest push, so its key issues cover that push
     alone; the walkthrough should still show everything outstanding on the
     PR. A thread already named by a key issue at the same place is not
-    repeated. Returns a new list; the review's own key issues are untouched
-    (the review summary posted alongside lists only this round's).
+    repeated, and an outdated thread (its code has changed since) is skipped.
+    Returns a new list; the review's own key issues are untouched (the review
+    summary posted alongside lists only this round's).
     """
     merged = list(key_issues)
     covered = {(ki.path, ki.line) for ki in key_issues}
     for t in open_threads:
-        if (t.path, t.line) in covered:
+        if t.is_outdated or (t.path, t.line) in covered:
             continue
         title = thread_title(t.body) or "see the open thread"
         merged.append(
@@ -968,7 +970,10 @@ class ReviewEngine:
         resolved_thread_dicts: list[dict] = []
         # Threads from earlier rounds nobody has resolved. The walkthrough is
         # the verdict on the whole PR, so they count in its score, its key
-        # issues and its footer alongside what this round finds.
+        # issues and its footer alongside what this round finds. Outdated
+        # threads (the code they point at has since changed) are left out, and
+        # so is a review-rest run, which continues round 1: its threads were
+        # filed minutes ago by the same review, not left open from an earlier one.
         open_threads: list[BotThreadRecord] = []
         try:
             if self.bot_name and self.provider is not None:
@@ -978,7 +983,11 @@ class ReviewEngine:
                 )
                 if all_bot_threads and not is_review_rest:
                     review_round = 2
-                open_threads = [t for t in all_bot_threads if not t.is_resolved]
+                open_threads = (
+                    []
+                    if is_review_rest
+                    else [t for t in all_bot_threads if not t.is_resolved and not t.is_outdated]
+                )
                 resolved_thread_dicts = [
                     {
                         "path": t.path,
