@@ -483,6 +483,10 @@ class IndexStore(_StoreSharedMixin):
 
         if not has_legacy_identity("package_manifests"):
             return
+        if self._conn.in_transaction:
+            raise ManifestPackageMigrationError(
+                "Package manifest migration must run outside a transaction"
+            )
         self._conn.execute("PRAGMA foreign_keys=OFF")
         try:
             with self._conn:

@@ -297,16 +297,16 @@ def _migrate_manifest_package_version_identity(url: str) -> None:
         with connect(url) as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute("LOCK TABLE package_manifests IN ACCESS EXCLUSIVE MODE")
             legacy = _legacy_manifest_constraint(cur)
-            if legacy is None:
-                return
             cur.execute(
-                "ALTER TABLE package_manifests ADD COLUMN scan_eligible INTEGER NOT NULL DEFAULT 1"
+                "ALTER TABLE package_manifests ADD COLUMN IF NOT EXISTS "
+                "scan_eligible INTEGER NOT NULL DEFAULT 1"
             )
-            cur.execute(
-                sql.SQL("ALTER TABLE package_manifests DROP CONSTRAINT {}").format(
-                    sql.Identifier(legacy)
+            if legacy is not None:
+                cur.execute(
+                    sql.SQL("ALTER TABLE package_manifests DROP CONSTRAINT {}").format(
+                        sql.Identifier(legacy)
+                    )
                 )
-            )
     except ManifestPackageMigrationError:
         raise
     except Exception as exc:
@@ -317,6 +317,8 @@ def _get_conn(url: str) -> Any:
     """Get the shared Postgres connection, initializing schema on first use."""
     global _pg_conn, _schema_initialized
     with _lock:
+        from psycopg.errors import UndefinedColumn
+
         from mira.db.postgres import connect
 
         if _pg_conn is None:
@@ -348,7 +350,10 @@ def _get_conn(url: str) -> Any:
                 try:
                     needs_migration = _legacy_manifest_constraint(cur) is not None
                     if not needs_migration:
-                        cur.execute("SELECT scan_eligible FROM package_manifests LIMIT 0")
+                        try:
+                            cur.execute("SELECT scan_eligible FROM package_manifests LIMIT 0")
+                        except UndefinedColumn:
+                            needs_migration = True
                 except ManifestPackageMigrationError:
                     raise
                 except Exception as exc:

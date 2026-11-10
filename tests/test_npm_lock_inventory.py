@@ -14,7 +14,7 @@ from mira.index import pg_store
 from mira.index.indexer import _store_manifest_file
 from mira.index.manifests import parse_manifest
 from mira.index.pg_store import PgIndexStore
-from mira.index.store import IndexStore
+from mira.index.store import IndexStore, ManifestPackageMigrationError
 from mira.security import poller
 
 
@@ -174,6 +174,28 @@ def test_sqlite_upgrade_preserves_existing_rows_and_reopens(tmp_path):
         ).fetchone()
 
 
+def test_sqlite_migration_leaves_callers_transaction_intact():
+    store = IndexStore(":memory:")
+    try:
+        conn = store._conn
+        conn.executescript("DROP TABLE package_manifests;" + _SQLITE_LEGACY)
+        conn.execute("UPDATE package_manifests SET version='2.0.0' WHERE id=7")
+        assert conn.in_transaction
+        with pytest.raises(ManifestPackageMigrationError, match="outside a transaction"):
+            store._migrate_manifest_package_version_identity()
+        assert conn.in_transaction
+        assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+        assert conn.execute("SELECT version FROM package_manifests WHERE id=7").fetchone() == (
+            "2.0.0",
+        )
+        conn.rollback()
+        assert conn.execute("SELECT version FROM package_manifests WHERE id=7").fetchone() == (
+            "1.0.0",
+        )
+    finally:
+        store.close()
+
+
 @pytest.fixture
 def postgres_url(monkeypatch):
     url = os.environ.get("MIRA_TEST_POSTGRES_URL")
@@ -201,12 +223,12 @@ def postgres_url(monkeypatch):
             conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
-@pytest.mark.parametrize("legacy_schema", [False, True])
-def test_postgres_inventory_and_upgrade(postgres_url, monkeypatch, legacy_schema):
+@pytest.mark.parametrize("schema", ["fresh", "legacy", "missing_scan_eligible"])
+def test_postgres_inventory_and_upgrade(postgres_url, monkeypatch, schema):
     import psycopg
 
     old_raw_version = random.Random(0).randbytes(4096).hex()
-    if legacy_schema:
+    if schema != "fresh":
         with psycopg.connect(postgres_url, autocommit=True) as conn:
             conn.execute(
                 """
@@ -215,7 +237,7 @@ def test_postgres_inventory_and_upgrade(postgres_url, monkeypatch, legacy_schema
                     name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '',
                     file_path TEXT NOT NULL DEFAULT '', is_dev INTEGER NOT NULL DEFAULT 0,
                     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-                    UNIQUE(owner, repo, name, kind, file_path)
+                    CONSTRAINT legacy_package_identity UNIQUE(owner, repo, name, kind, file_path)
                 );
                 CREATE INDEX custom_package_path ON package_manifests(file_path);
                 INSERT INTO package_manifests VALUES
@@ -228,17 +250,22 @@ def test_postgres_inventory_and_upgrade(postgres_url, monkeypatch, legacy_schema
                 "VALUES (8, 'peer', 'app', 'example', 'npm', %s, 'package-lock.json')",
                 (old_raw_version,),
             )
+            if schema == "missing_scan_eligible":
+                conn.execute(
+                    "ALTER TABLE package_manifests DROP CONSTRAINT legacy_package_identity"
+                )
     for _ in range(2):
         store = PgIndexStore("example", "app", postgres_url)
-        if legacy_schema:
+        if schema != "fresh":
             (row,) = store.list_manifest_packages()
             assert (row.id, row.version, row.is_dev, row.updated_at) == (7, "1.0.0", True, 123.5)
+            assert row.scan_eligible
         pg_store._drop_pg_conn()
         monkeypatch.setattr(pg_store, "_schema_initialized", False)
     store = PgIndexStore("example", "app", postgres_url)
     _seed_inventory(store)
     _assert_inventory(store)
-    if legacy_schema:
+    if schema != "fresh":
         assert all(p.id > 100 for p in store.list_manifest_packages())
         (peer_row,) = PgIndexStore("peer", "app", postgres_url).list_manifest_packages()
         assert (peer_row.id, peer_row.version) == (8, old_raw_version)
