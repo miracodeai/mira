@@ -80,6 +80,63 @@ class TestLLMProviderInit:
 
 class TestPerCallTemperatureOmission:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("retry_kind", ["reasoning_rejected", "budget_exhausted"])
+    @pytest.mark.parametrize("omit_temperature", [False, True])
+    async def test_chat_retry_preserves_temperature_policy(
+        self, monkeypatch, retry_kind, omit_temperature
+    ):
+        provider = LLMProvider(
+            LLMConfig(model="test-model", api_key_env="", reasoning_effort="low", max_tokens=4096)
+        )
+        provider.profile = {
+            **provider.profile,
+            "reasoning_on_payload": {"thinking": {"type": "enabled"}},
+            "reasoning_off_payload": {"thinking": {"type": "disabled"}, "temperature": 0.7},
+        }
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                if retry_kind == "reasoning_rejected":
+                    return httpx.Response(400, json={"error": "reasoning unsupported"})
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                        "usage": {
+                            "completion_tokens": 4096,
+                            "completion_tokens_details": {"reasoning_tokens": 4000},
+                        },
+                    },
+                )
+            return httpx.Response(200, json=_make_response_json("ok"))
+
+        client_class = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs),
+        )
+        assert (
+            await provider.complete(
+                [{"role": "user", "content": "Hello"}],
+                temperature=0.3,
+                omit_temperature=omit_temperature,
+            )
+            == "ok"
+        )
+        initial, retried = requests
+        assert initial["reasoning_effort"] == "low"
+        assert "temperature" not in initial
+        assert "reasoning_effort" not in retried
+        assert retried["thinking"] == {"type": "disabled"}
+        if omit_temperature:
+            assert "temperature" not in retried
+        else:
+            assert retried["temperature"] == (0.3 if retry_kind == "reasoning_rejected" else 0.7)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("api_style", ["chat", "responses"])
     @pytest.mark.parametrize("effort", [None, "off", "low"])
     async def test_profile_cannot_reinsert_explicitly_omitted_temperature(
@@ -513,7 +570,10 @@ class TestComplete:
             assert "temperature" not in body
 
     @pytest.mark.asyncio
-    async def test_reasoning_off_leaves_body_unchanged(self):
+    async def test_reasoning_off_sends_no_effort_and_keeps_temperature(self):
+        # The default endpoint is OpenRouter, where "off" is an explicit
+        # ``reasoning: {"enabled": false}`` because thinking models think by
+        # default there; the effort field itself is never sent.
         for effort in (None, "off"):
             config = LLMConfig(model="test-model", reasoning_effort=effort)
             provider = LLMProvider(config)
@@ -531,7 +591,8 @@ class TestComplete:
 
                 call_kwargs = mock_client.post.call_args
                 body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
-                assert "reasoning" not in body
+                assert "reasoning_effort" not in body
+                assert body["reasoning"] == {"enabled": False}
                 assert "temperature" in body
 
     @pytest.mark.asyncio
@@ -1119,7 +1180,9 @@ class TestResponseDiagnostics:
     @pytest.mark.asyncio
     async def test_empty_response_reports_finish_reason_and_usage(self):
         # max_retries=1: no_tool_call is retriable, so keep the test to one call.
-        provider = LLMProvider(LLMConfig(model="m", max_retries=1))
+        # max_tokens=4096: below the retry budget, so the cut-off reply is
+        # retried once with the larger one and the diagnostic is still carried.
+        provider = LLMProvider(LLMConfig(model="m", max_retries=1, max_tokens=4096))
         empty = _mock_httpx_response(
             {
                 "choices": [
@@ -1144,11 +1207,15 @@ class TestResponseDiagnostics:
             patch("mira.llm.provider.httpx.AsyncClient") as cls,
             pytest.raises(LLMError) as excinfo,
         ):
-            cls.return_value = self._client([empty])
+            # A reply cut off at the budget is retried once with a larger one;
+            # the model exhausts that too, and the diagnostic is still carried.
+            client = self._client([empty, empty])
+            cls.return_value = client
             await provider.complete_with_tools(
                 [{"role": "user", "content": "hi"}], tools=[self._TOOL]
             )
 
+        assert client.post.await_count == 2
         message = str(excinfo.value)
         assert "finish_reason=length" in message
         assert "reasoning_len=50" in message

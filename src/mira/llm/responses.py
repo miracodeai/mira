@@ -327,10 +327,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
                 and self._has_reasoning(body)
                 and "reasoning" in resp.text.lower()
             ):
-                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
-                self._no_reasoning.add(api_model)
-                self._remove_reasoning(body)
-                self._apply_reasoning_off(body, protocol="responses")
+                self._drop_rejected_reasoning(body, api_model, protocol="responses")
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
@@ -416,10 +413,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
                 and "reasoning" in resp.text.lower()
             ):
                 api_model = _strip_model_prefix(model, self.config.base_url)
-                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
-                self._no_reasoning.add(api_model)
-                self._remove_reasoning(body)
-                self._apply_reasoning_off(body, protocol="responses")
+                self._drop_rejected_reasoning(body, api_model, protocol="responses")
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )

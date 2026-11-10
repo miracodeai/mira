@@ -187,7 +187,12 @@ class TestIndexingTemperatureSettings:
 
     @pytest.mark.parametrize("value", [0, 0.4, "omit"])
     def test_saved_policy_overrides_config_only_for_indexing(self, in_memory_db, value):
-        body = ModelsUpdate(indexing_model="", review_model="", indexing_temperature=value)
+        body = ModelsUpdate(
+            indexing_model="",
+            review_model="",
+            indexing_temperature=value,
+            review_thinking_mode="low",
+        )
         set_models(body, _admin_req())
         saved = in_memory_db.get_setting("indexing_temperature")
         assert saved is not None

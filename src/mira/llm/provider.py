@@ -73,6 +73,7 @@ class LLMProvider(OpenAICompatibleProvider):
             body["response_format"] = {"type": "json_object"}
             # Copied container — caller-owned ``messages`` stay untouched.
             body["messages"] = _ensure_json_hint(messages)
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body)
         if omit_temperature:
@@ -84,8 +85,35 @@ class LLMProvider(OpenAICompatibleProvider):
                 headers=self._build_headers(),
                 json=body,
             )
+            if (
+                resp.status_code == 400
+                and self._has_reasoning(body)
+                and "reasoning" in resp.text.lower()
+            ):
+                self._drop_rejected_reasoning(body, body["model"])
+                if omit_temperature:
+                    body.pop("temperature", None)
+                else:
+                    body["temperature"] = (
+                        temperature if temperature is not None else self.config.temperature
+                    )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
+            # A caller that set its own budget asked for a short answer; only
+            # the config default is raised when the model ran out of room.
+            retry_body = self._budget_exhausted_retry(body, data) if max_tokens is None else None
+            if retry_body is not None:
+                if omit_temperature:
+                    retry_body.pop("temperature", None)
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
         choice = data["choices"][0]
@@ -144,6 +172,7 @@ class LLMProvider(OpenAICompatibleProvider):
             "temperature": temperature if temperature is not None else self.config.temperature,
             self._max_tokens_field(): self.config.max_tokens,
         }
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body)
 
@@ -185,21 +214,25 @@ class LLMProvider(OpenAICompatibleProvider):
                 and self._has_reasoning(body)
                 and "reasoning" in resp.text.lower()
             ):
-                # Reasoning effort unsupported on this model/endpoint — drop it
-                # and review without thinking instead of failing the review.
-                # Re-apply the provider's explicit off payload where one exists
-                # (DeepSeek), so removing the field doesn't leave default-on
-                # thinking in place.
-                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
-                self._no_reasoning.add(api_model)
-                self._remove_reasoning(body)
-                self._apply_reasoning_off(body)
+                # Reasoning unsupported on this model/endpoint — strip what was
+                # refused and review without thinking instead of failing.
+                self._drop_rejected_reasoning(body, api_model)
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
+            retry_body = self._budget_exhausted_retry(body, data)
+            if retry_body is not None:
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
 
@@ -272,6 +305,7 @@ class LLMProvider(OpenAICompatibleProvider):
             "temperature": temperature if temperature is not None else self.config.temperature,
             self._max_tokens_field(): self.config.max_tokens,
         }
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body, conversation=True)
 
@@ -281,8 +315,28 @@ class LLMProvider(OpenAICompatibleProvider):
                 headers=self._build_headers(),
                 json=body,
             )
+            if (
+                resp.status_code == 400
+                and self._has_reasoning(body)
+                and "reasoning" in resp.text.lower()
+            ):
+                self._drop_rejected_reasoning(body, body["model"])
+                body["temperature"] = (
+                    temperature if temperature is not None else self.config.temperature
+                )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
+            retry_body = self._budget_exhausted_retry(body, data)
+            if retry_body is not None:
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
         choice = data["choices"][0]

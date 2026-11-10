@@ -10,6 +10,8 @@
       "X-Title": "Mira Code Reviewer"
     },
     "reasoning_effort_map": { "max": "xhigh" },
+    "reasoning_off_payload": { "reasoning": { "enabled": false } },
+    "reasoning_off_payload_responses": { "reasoning": { "enabled": false } },
     "prompt_caching": "anthropic"
   },
 

@@ -49,15 +49,20 @@ class LLMConfig(BaseModel):
     # the security sweep is the highest-stakes pass and must not silently
     # downgrade to the indexing tier.
     security_model: str | None = None
-    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max";
-    # None/"off" = no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
-    # `reasoning_effort` is the resolved value the provider reads (set by
-    # `llm_config_for`, the same way `model` is resolved from `review_model`).
+    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max").
+    # `review_reasoning_effort` is the mira.yaml-level setting; unset means the
+    # product default, "medium", which is what the published benchmark ran with,
+    # and "off" means no reasoning. `reasoning_effort` is the resolved value the
+    # provider reads (set by `llm_config_for`, the same way `model` is resolved
+    # from `review_model`); None there means no reasoning.
     review_reasoning_effort: str | None = None
     reasoning_effort: str | None = None
     temperature: float = 0.2
     indexing_temperature: IndexingTemperature = 0.0
-    max_tokens: int = 4096
+    # Output budget per call. Thinking tokens count against it on most
+    # providers, so it is sized for a medium-effort review of a large chunk;
+    # an endpoint that rejects it is retried at 4096 and remembered.
+    max_tokens: int = 16384
     max_context_tokens: int = 120_000
     # Provider selection. "openai" uses any OpenAI-compatible endpoint (default).
     # "bedrock" uses AWS Bedrock Converse API directly (requires boto3).

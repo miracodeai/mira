@@ -101,12 +101,38 @@ def _repair_json(text: str) -> str:
 
 
 def loads_lenient(text: str) -> object | None:
-    """Parse JSON, repairing leaked tool-call XML / missing braces. None on failure."""
+    """Parse JSON, repairing leaked tool-call XML / missing braces. None on failure.
+
+    As a last resort the first complete JSON value in the text is taken: some
+    hosts hand back tool arguments with reasoning or tool-call markup leaked
+    *after* a well-formed object (``{...}</think> <｜DSML｜ calls>…``), which
+    is a complete answer with junk behind it, not a broken one.
+    """
     for candidate in (text, _repair_json(text)):
         try:
             return json.loads(candidate, strict=False)
         except (json.JSONDecodeError, TypeError):
             continue
+    return _first_json_value(text)
+
+
+def _first_json_value(text: str, max_starts: int = 20) -> object | None:
+    """The first complete JSON object or array in ``text``, ignoring what follows."""
+    if not isinstance(text, str):
+        return None
+    decoder = json.JSONDecoder(strict=False)
+    starts = 0
+    for i, ch in enumerate(text):
+        if ch not in "{[":
+            continue
+        starts += 1
+        if starts > max_starts:
+            break
+        try:
+            value, _ = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue
+        return value
     return None
 
 
