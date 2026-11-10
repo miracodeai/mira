@@ -3174,3 +3174,388 @@ class TestAgenticSecurityPass(TestAgenticToolsOnIndexedRepos):
         main_llm.complete_with_tools.assert_called_once()
         assert len(out) == 1
         assert out[0].source_pass == "security"
+
+
+class TestIncrementalWalkthroughScope:
+    """Round 2 reviews the latest push, but the walkthrough describes the whole PR.
+
+    Regression for miracodeai/mira#434: the second review of a 25-file PR
+    rewrote the walkthrough with a summary of the 5-file fix push, a fresh
+    5/5 and "5 files reviewed", with nothing to say why.
+    """
+
+    _FULL = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "diff --git a/b.py b/b.py\n"
+        "--- a/b.py\n"
+        "+++ b/b.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    _INCREMENTAL = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-new\n+newer\n"
+    # A round-1 comment as the bot posts it: category, severity badge, title.
+    _OPEN_THREAD_BODY = (
+        "**Configuration**  \n⚠️ Warning\n\n**Patterns are never stripped**\n\nDetails."
+    )
+
+    def _provider(self, threads):
+        from mira.models import PRInfo
+
+        provider = MagicMock()
+        provider.get_pr_info = AsyncMock(
+            return_value=PRInfo(
+                title="t",
+                description="",
+                base_branch="main",
+                head_branch="f",
+                url="https://github.com/o/r/pull/1",
+                number=1,
+                owner="o",
+                repo="r",
+                head_sha="7f017290aa05",
+            )
+        )
+        provider.get_pr_diff = AsyncMock(return_value=self._FULL)
+        provider.get_compare_diff = AsyncMock(return_value=self._INCREMENTAL)
+        provider.get_unresolved_bot_threads = AsyncMock(return_value=[])
+        provider.get_all_bot_threads = AsyncMock(return_value=threads)
+        provider.find_bot_comment = AsyncMock(return_value=None)
+        provider.post_comment = AsyncMock()
+        provider.update_comment = AsyncMock()
+        provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
+        provider.start_check_run = AsyncMock(return_value=0)
+        provider.finish_check_run = AsyncMock()
+        return provider
+
+    def _engine(self, provider, monkeypatch, last_sha, captured):
+        from mira.models import ReviewResult, WalkthroughResult
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value=last_sha)
+        mock_db.get_repo = MagicMock(return_value=None)
+        mock_db.set_last_reviewed_sha = MagicMock()
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["diff_text"] = diff_text
+            captured["walkthrough_diff_text"] = kwargs.get("walkthrough_diff_text")
+            return ReviewResult(
+                summary="",
+                reviewed_files=1,
+                reviewed_paths=["a.py"],
+                walkthrough=WalkthroughResult(
+                    summary="Whole-PR summary.",
+                    confidence_score=WalkthroughConfidenceScore(
+                        score=5, label="Safe", reason="fine"
+                    ),
+                ),
+            )
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+        config = MiraConfig()
+        config.review.overlap.enabled = False
+        return ReviewEngine(config=config, llm=AsyncMock(), provider=provider, bot_name="mira")
+
+    @pytest.mark.asyncio
+    async def test_round_2_reviews_push_but_describes_whole_pr(self, monkeypatch):
+        from mira.models import BotThreadRecord
+
+        open_thread = BotThreadRecord(
+            thread_id="t", path="b.py", line=1, body=self._OPEN_THREAD_BODY, is_resolved=False
+        )
+        provider = self._provider([open_thread])
+        captured: dict = {}
+        engine = self._engine(provider, monkeypatch, "134545e90f1c", captured)
+
+        result = await engine.review_pr("https://github.com/o/r/pull/1")
+
+        # The push is what gets reviewed; the whole PR is what gets described.
+        assert captured["diff_text"] == self._INCREMENTAL
+        assert captured["walkthrough_diff_text"] == self._FULL
+        assert result.incremental_since == "134545e90f1c"
+        assert result.pr_file_count == 2
+
+        posted = [c.args[1] for c in provider.post_comment.call_args_list if "in PR" in c.args[1]]
+        assert len(posted) == 1, provider.post_comment.call_args_list
+        markdown = posted[0]
+        assert "Incremental" not in markdown
+        assert "*2 files in PR · 1 reviewed in this push · 1 unresolved thread*" in markdown
+
+        # The warning left open from round 1 holds the score and is listed.
+        assert result.walkthrough.confidence_score.score == 4
+        assert result.walkthrough.confidence_score.label == "Earlier findings still open"
+        assert "<b>Confidence: 4/5</b>" in markdown
+        assert (
+            "- `b.py:1` — Still open from an earlier review: Patterns are never stripped"
+            in markdown
+        )
+        # The review's own key issues are not rewritten for the review summary.
+        assert result.key_issues == []
+
+        details = provider.finish_check_run.call_args.kwargs["details"]
+        assert details == "2 files in PR · 1 reviewed in this push"
+
+    @pytest.mark.asyncio
+    async def test_round_1_describes_the_reviewed_diff(self, monkeypatch):
+        provider = self._provider([])
+        captured: dict = {}
+        engine = self._engine(provider, monkeypatch, "", captured)
+
+        result = await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["diff_text"] == self._FULL
+        assert captured["walkthrough_diff_text"] is None
+        assert result.incremental_since == ""
+        assert result.walkthrough.confidence_score.score == 5
+        posted = [
+            c.args[1] for c in provider.post_comment.call_args_list if "reviewed" in c.args[1]
+        ]
+        assert len(posted) == 1
+        assert "*1 file reviewed*" in posted[0]
+        assert "in PR" not in posted[0]
+
+    def test_full_review_check_details_unchanged(self):
+        from mira.models import ReviewResult
+
+        assert ReviewEngine._check_details(ReviewResult(reviewed_files=25)) == "25 files reviewed"
+
+    def test_incremental_check_details_count_new_comments(self):
+        from mira.models import ReviewResult
+
+        comment = ReviewComment(
+            path="a.py",
+            line=1,
+            end_line=None,
+            severity=Severity.WARNING,
+            category="other",
+            title="t",
+            body="b",
+            confidence=0.9,
+        )
+        details = ReviewEngine._check_details(
+            ReviewResult(
+                reviewed_files=5, comments=[comment], incremental_since="abc", pr_file_count=25
+            )
+        )
+        assert details.startswith("25 files in PR · 5 reviewed in this push · 1 new comment")
+
+    @pytest.mark.asyncio
+    async def test_review_rest_does_not_rescore_on_its_own_rounds_threads(self, monkeypatch):
+        """review-rest continues round 1, so the threads already on the PR are
+        this review's own, not findings left open from an earlier one."""
+        from mira.models import BotThreadRecord
+
+        open_thread = BotThreadRecord(
+            thread_id="t", path="b.py", line=1, body=self._OPEN_THREAD_BODY, is_resolved=False
+        )
+        provider = self._provider([open_thread])
+        captured: dict = {}
+        engine = self._engine(provider, monkeypatch, "134545e90f1c", captured)
+        engine._review_only_paths = {"b.py"}
+
+        result = await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["walkthrough_diff_text"] is None
+        assert result.walkthrough.confidence_score.score == 5
+        assert result.walkthrough.confidence_score.label == "No issues to flag"
+        posted = [
+            c.args[1] for c in provider.post_comment.call_args_list if "reviewed" in c.args[1]
+        ]
+        assert len(posted) == 1
+        assert "Still open" not in posted[0]
+        assert "unresolved" not in posted[0]
+
+    @pytest.mark.asyncio
+    async def test_outdated_open_thread_is_ignored(self, monkeypatch):
+        """An unresolved thread whose code has since changed does not hold the score."""
+        from mira.models import BotThreadRecord
+
+        outdated = BotThreadRecord(
+            thread_id="t",
+            path="b.py",
+            line=1,
+            body=self._OPEN_THREAD_BODY,
+            is_resolved=False,
+            is_outdated=True,
+        )
+        provider = self._provider([outdated])
+        captured: dict = {}
+        engine = self._engine(provider, monkeypatch, "134545e90f1c", captured)
+
+        result = await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["walkthrough_diff_text"] == self._FULL  # still round 2
+        assert result.walkthrough.confidence_score.score == 5
+        posted = [c.args[1] for c in provider.post_comment.call_args_list if "in PR" in c.args[1]]
+        assert len(posted) == 1
+        assert "*2 files in PR \u00b7 1 reviewed in this push*" in posted[0]
+        assert "Still open" not in posted[0]
+
+
+class TestClampWithOpenThreads:
+    """Unresolved threads from earlier rounds count in the whole-PR verdict."""
+
+    def _wt(self, score=5, label="Safe", reason="fine"):
+        return WalkthroughResult(
+            confidence_score=WalkthroughConfidenceScore(score=score, label=label, reason=reason)
+        )
+
+    def _thread(self, badge, path="x.py", line=1):
+        from mira.models import BotThreadRecord
+
+        return BotThreadRecord(
+            thread_id="t",
+            path=path,
+            line=line,
+            body=f"**Note**\n{badge}\n\n**Title here**\n\nbody",
+            is_resolved=False,
+        )
+
+    def _comment(self, severity):
+        return ReviewComment(
+            path="x.py",
+            line=1,
+            end_line=None,
+            severity=severity,
+            category="other",
+            title="t",
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_open_blocker_forces_two(self):
+        wt = self._wt()
+        _clamp_confidence_to_findings(
+            wt, [], open_threads=[self._thread("\U0001f6d1 Blocker — must fix before merge")]
+        )
+        assert wt.confidence_score.score == 2
+        assert wt.confidence_score.label == "Do not merge"
+        assert "1 blocker" in wt.confidence_score.reason
+        assert "1 still open from an earlier review" in wt.confidence_score.reason
+
+    def test_open_warning_caps_at_four_when_nothing_new(self):
+        wt = self._wt()
+        _clamp_confidence_to_findings(wt, [], open_threads=[self._thread("⚠️ Warning")])
+        assert wt.confidence_score.score == 4
+        assert wt.confidence_score.label == "Earlier findings still open"
+        assert "1 warning from an earlier review is still open" in wt.confidence_score.reason
+
+    def test_open_warnings_add_to_new_ones(self):
+        wt = self._wt()
+        _clamp_confidence_to_findings(
+            wt,
+            [self._comment(Severity.WARNING), self._comment(Severity.WARNING)],
+            open_threads=[self._thread("⚠️ Warning")],
+        )
+        assert wt.confidence_score.score == 3
+        assert wt.confidence_score.label == "Needs review"
+        assert "3 warnings" in wt.confidence_score.reason
+        assert "1 still open from an earlier review" in wt.confidence_score.reason
+
+    def test_open_nitpick_and_suggestion_do_not_move_score(self):
+        wt = self._wt()
+        _clamp_confidence_to_findings(
+            wt,
+            [],
+            open_threads=[
+                self._thread("\U0001f4ac Nitpick"),
+                self._thread("\U0001f4a1 Suggestion", line=2),
+            ],
+        )
+        assert wt.confidence_score.score == 5
+        assert wt.confidence_score.label == "No issues to flag"
+
+    def test_unreadable_badge_is_ignored(self):
+        from mira.models import BotThreadRecord
+
+        wt = self._wt()
+        hand_written = BotThreadRecord(
+            thread_id="t", path="x.py", line=1, body="hand-written note", is_resolved=False
+        )
+        _clamp_confidence_to_findings(wt, [], open_threads=[hand_written])
+        assert wt.confidence_score.score == 5
+
+    def test_low_score_left_alone(self):
+        wt = self._wt(score=2, label="Major concerns", reason="original")
+        _clamp_confidence_to_findings(wt, [], open_threads=[self._thread("⚠️ Warning")])
+        assert wt.confidence_score.score == 2
+        assert wt.confidence_score.label == "Major concerns"
+        assert wt.confidence_score.reason == "original"
+
+    def test_outdated_thread_is_ignored(self):
+        from mira.models import BotThreadRecord
+
+        wt = self._wt()
+        outdated = BotThreadRecord(
+            thread_id="t",
+            path="x.py",
+            line=1,
+            body="**Note**\n\U0001f6d1 Blocker \u2014 must fix before merge\n\n**Title**\n\nbody",
+            is_resolved=False,
+            is_outdated=True,
+        )
+        _clamp_confidence_to_findings(wt, [], open_threads=[outdated])
+        assert wt.confidence_score.score == 5
+        assert wt.confidence_score.label == "No issues to flag"
+
+
+class TestOpenThreadKeyIssues:
+    def _thread(self, path, line, title="Old finding"):
+        from mira.models import BotThreadRecord
+
+        return BotThreadRecord(
+            thread_id="t",
+            path=path,
+            line=line,
+            body=f"**Note**\n⚠️ Warning\n\n**{title}**\n\nbody",
+            is_resolved=False,
+        )
+
+    def test_appends_open_threads_after_this_rounds_issues(self):
+        from mira.core.engine import _with_open_thread_issues
+
+        mine = [KeyIssue(issue="New", path="a.py", line=3)]
+        merged = _with_open_thread_issues(mine, [self._thread("b.py", 7)])
+        assert merged == [
+            mine[0],
+            KeyIssue(issue="Still open from an earlier review: Old finding", path="b.py", line=7),
+        ]
+        assert mine == [KeyIssue(issue="New", path="a.py", line=3)]
+
+    def test_skips_threads_already_named_at_that_place(self):
+        from mira.core.engine import _with_open_thread_issues
+
+        mine = [KeyIssue(issue="New", path="b.py", line=7)]
+        assert _with_open_thread_issues(mine, [self._thread("b.py", 7)]) == mine
+
+    def test_untitled_thread_points_at_the_thread(self):
+        from mira.core.engine import _with_open_thread_issues
+        from mira.models import BotThreadRecord
+
+        bare = BotThreadRecord(thread_id="t", path="c.py", line=2, body="", is_resolved=False)
+        merged = _with_open_thread_issues([], [bare])
+        assert merged == [
+            KeyIssue(
+                issue="Still open from an earlier review: see the open thread", path="c.py", line=2
+            )
+        ]
+
+    def test_outdated_thread_is_skipped(self):
+        from mira.core.engine import _with_open_thread_issues
+        from mira.models import BotThreadRecord
+
+        outdated = BotThreadRecord(
+            thread_id="t",
+            path="b.py",
+            line=7,
+            body="**Note**\n\u26a0\ufe0f Warning\n\n**Old finding**\n\nbody",
+            is_resolved=False,
+            is_outdated=True,
+        )
+        assert _with_open_thread_issues([], [outdated]) == []

@@ -30,7 +30,12 @@ from mira.core.passes import (
     self_critique,
 )
 from mira.core.priority import rank_files
-from mira.core.threads import resolve_verified_threads, short_thread_description
+from mira.core.threads import (
+    resolve_verified_threads,
+    short_thread_description,
+    thread_severity,
+    thread_title,
+)
 from mira.exceptions import MiraError, ResponseParseError, StructuredOutputError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
@@ -49,6 +54,7 @@ from mira.models import (
     PR_SUMMARY_END,
     PR_SUMMARY_START,
     WALKTHROUGH_MARKER,
+    BotThreadRecord,
     ChunkFailure,
     FileChangeType,
     KeyIssue,
@@ -215,6 +221,7 @@ def _clamp_confidence_to_findings(
     total_chunks: int = 0,
     security_failed: bool = False,
     mention: str = "@miracodeai",
+    open_threads: list[BotThreadRecord] | None = None,
 ) -> None:
     """Tighten the walkthrough confidence score based on actual review findings.
 
@@ -236,21 +243,36 @@ def _clamp_confidence_to_findings(
         filtering or self-critique removed, so this rule may *raise* a score.
         A score ≤ 2 is left alone: its concerns live in the reason (design or
         risk), not in line comments, and must not be rewritten away.
+
+    ``open_threads`` are the bot's still-unresolved threads from earlier
+    rounds. The score is the verdict on the whole PR, and a round-2 review
+    posts comments only on the latest push, so an open blocker from round 1
+    counts like a blocker found now, open warnings add to the warning count,
+    and a push with nothing new to say still scores at most 4 while a warning
+    from an earlier review is open. Open suggestions and nitpicks do not move
+    the score; a thread whose severity badge cannot be read is ignored, as is
+    an outdated one, whose code has changed since it was filed.
     """
     cs = walkthrough.confidence_score
     if cs is None:
         return
 
-    blockers = sum(1 for c in comments if c.severity == Severity.BLOCKER)
-    warnings = sum(1 for c in comments if c.severity == Severity.WARNING)
+    open_severities = [thread_severity(t.body) for t in open_threads or [] if not t.is_outdated]
+    open_blockers = sum(1 for s in open_severities if s == Severity.BLOCKER)
+    open_warnings = sum(1 for s in open_severities if s == Severity.WARNING)
+    blockers = sum(1 for c in comments if c.severity == Severity.BLOCKER) + open_blockers
+    warnings = sum(1 for c in comments if c.severity == Severity.WARNING) + open_warnings
     original = cs.score
+
+    def _still_open(count: int) -> str:
+        return f" ({count} still open from an earlier review)" if count else ""
 
     if blockers > 0 and cs.score > 2:
         cs.score = 2
         cs.label = "Do not merge"
         cs.reason = (
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
-            "that must be fixed before merge."
+            f"that must be fixed before merge{_still_open(open_blockers)}."
         )
     elif (failed_chunks > 0 or security_failed) and cs.score > 2:
         cs.score = 3
@@ -259,9 +281,20 @@ def _clamp_confidence_to_findings(
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
         cs.label = "Needs review"
-        cs.reason = f"Found {warnings} warnings that need attention before merge."
+        cs.reason = (
+            f"Found {warnings} warnings that need attention before merge"
+            f"{_still_open(open_warnings)}."
+        )
     elif not comments and cs.score >= 3:
-        if unverified:
+        if open_warnings:
+            cs.score = min(cs.score, 4)
+            cs.label = "Earlier findings still open"
+            cs.reason = (
+                f"No new issues in this push; {open_warnings} "
+                f"warning{'s' if open_warnings != 1 else ''} from an earlier review "
+                f"{'are' if open_warnings != 1 else 'is'} still open."
+            )
+        elif unverified:
             cs.score = 4
             cs.label = "No confirmed issues"
             cs.reason = "No confirmed issues; possible issues are listed below for a manual check."
@@ -272,12 +305,40 @@ def _clamp_confidence_to_findings(
 
     if cs.score != original:
         logger.info(
-            "Clamped walkthrough confidence from %d to %d (%d blocker(s), %d warning(s))",
+            "Clamped walkthrough confidence from %d to %d "
+            "(%d blocker(s), %d warning(s), %d open thread(s))",
             original,
             cs.score,
             blockers,
             warnings,
+            len(open_severities),
         )
+
+
+def _with_open_thread_issues(
+    key_issues: list[KeyIssue],
+    open_threads: list[BotThreadRecord],
+) -> list[KeyIssue]:
+    """Append still-open threads from earlier reviews to this round's key issues.
+
+    Round 2+ reviews only the latest push, so its key issues cover that push
+    alone; the walkthrough should still show everything outstanding on the
+    PR. A thread already named by a key issue at the same place is not
+    repeated, and an outdated thread (its code has changed since) is skipped.
+    Returns a new list; the review's own key issues are untouched (the review
+    summary posted alongside lists only this round's).
+    """
+    merged = list(key_issues)
+    covered = {(ki.path, ki.line) for ki in key_issues}
+    for t in open_threads:
+        if t.is_outdated or (t.path, t.line) in covered:
+            continue
+        title = thread_title(t.body) or "see the open thread"
+        merged.append(
+            KeyIssue(issue=f"Still open from an earlier review: {title}", path=t.path, line=t.line)
+        )
+        covered.add((t.path, t.line))
+    return merged
 
 
 # Paths excluded from the dedicated security pass — see core/passes.py.
@@ -663,14 +724,22 @@ class ReviewEngine:
         if result is None:
             return ""
         parts: list[str] = []
-        if result.reviewed_files:
+        if result.incremental_since and result.pr_file_count:
+            parts.append(
+                f"{result.pr_file_count} file{'s' if result.pr_file_count != 1 else ''} in PR"
+            )
+        if result.reviewed_files and result.incremental_since:
+            parts.append(f"{result.reviewed_files} reviewed in this push")
+        elif result.reviewed_files:
             parts.append(
                 f"{result.reviewed_files} file{'s' if result.reviewed_files != 1 else ''} reviewed"
             )
         if result.comments:
             stats = _format_stats_breakdown(build_review_stats(result.comments))
+            new = "new " if result.incremental_since else ""
             parts.append(
-                f"{len(result.comments)} comment{'s' if len(result.comments) != 1 else ''}{stats}"
+                f"{len(result.comments)} {new}comment{'s' if len(result.comments) != 1 else ''}"
+                f"{stats}"
             )
         if result.failed_chunks:
             parts.append(
@@ -872,6 +941,10 @@ class ReviewEngine:
                 logger.warning("Failed to post walkthrough placeholder: %s", exc)
 
         _walkthrough_result: list[WalkthroughResult | None] = [None]
+        # Set below when round 2+ reviews an incremental diff; read by the
+        # streaming callback and the final walkthrough so both say so.
+        incremental_since = ""
+        pr_file_count = 0
 
         async def _on_walkthrough_ready(wt: WalkthroughResult | None) -> None:
             if self.dry_run or wt is None or placeholder_id is None:
@@ -880,6 +953,8 @@ class ReviewEngine:
                 markdown = wt.to_markdown(
                     bot_name=self.bot_name or "miracodeai",
                     in_progress=True,
+                    incremental_since=incremental_since,
+                    pr_file_count=pr_file_count,
                 )
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
                 _walkthrough_result[0] = wt
@@ -893,6 +968,13 @@ class ReviewEngine:
         review_round = 1
         is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
+        # Threads from earlier rounds nobody has resolved. The walkthrough is
+        # the verdict on the whole PR, so they count in its score, its key
+        # issues and its footer alongside what this round finds. Outdated
+        # threads (the code they point at has since changed) are left out, and
+        # so is a review-rest run, which continues round 1: its threads were
+        # filed minutes ago by the same review, not left open from an earlier one.
+        open_threads: list[BotThreadRecord] = []
         try:
             if self.bot_name and self.provider is not None:
                 all_bot_threads = await self.provider.get_all_bot_threads(
@@ -901,6 +983,11 @@ class ReviewEngine:
                 )
                 if all_bot_threads and not is_review_rest:
                     review_round = 2
+                open_threads = (
+                    []
+                    if is_review_rest
+                    else [t for t in all_bot_threads if not t.is_resolved and not t.is_outdated]
+                )
                 resolved_thread_dicts = [
                     {
                         "path": t.path,
@@ -938,6 +1025,7 @@ class ReviewEngine:
                         # base branch brought in — not this PR's code. Review
                         # only the files the PR itself changes.
                         pr_paths = {f.path for f in parse_diff(full_diff_text).files}
+                        pr_file_count = len(pr_paths)
                         restricted = _restrict_diff_to_paths(incremental, pr_paths)
                         if len(restricted) != len(incremental):
                             logger.info(
@@ -958,6 +1046,7 @@ class ReviewEngine:
                             len(incremental),
                         )
                         diff_text = incremental
+                        incremental_since = last_sha
                     else:
                         logger.info(
                             "Round %d: no new commits since %s on PR %s, skipping review",
@@ -1000,7 +1089,10 @@ class ReviewEngine:
                 review_round=review_round,
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
+                walkthrough_diff_text=full_diff_text if incremental_since else None,
             )
+            result.incremental_since = incremental_since
+            result.pr_file_count = pr_file_count
         except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()
@@ -1028,6 +1120,8 @@ class ReviewEngine:
                             bot_name=self.bot_name or "miracodeai",
                             in_progress=False,
                             failure_notice=self._format_failure_notice(exc),
+                            incremental_since=incremental_since,
+                            pr_file_count=pr_file_count,
                         )
                     else:
                         failure_body = (
@@ -1088,6 +1182,7 @@ class ReviewEngine:
                 total_chunks=result.total_chunks,
                 security_failed=bool(result.security_failures),
                 mention=self._mention(),
+                open_threads=open_threads,
             )
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
@@ -1155,11 +1250,12 @@ class ReviewEngine:
                     markdown = result.walkthrough.to_markdown(
                         bot_name=self.bot_name,
                         review_stats=stats,
-                        existing_issues=len(unresolved_threads),
+                        existing_issues=len(open_threads),
                         blast_radius=cross_repo_blast,
                         reviewed_files=result.reviewed_files,
                         total_comments=len(result.comments),
-                        key_issues=result.key_issues or None,
+                        key_issues=_with_open_thread_issues(result.key_issues, open_threads)
+                        or None,
                         skipped_paths=result.skipped_paths or None,
                         total_paths=result.total_paths or None,
                         index_was_empty=getattr(self, "_index_was_empty", False),
@@ -1175,6 +1271,8 @@ class ReviewEngine:
                             if all_chunks_failed
                             else None
                         ),
+                        incremental_since=result.incremental_since,
+                        pr_file_count=result.pr_file_count,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -1402,10 +1500,18 @@ class ReviewEngine:
         review_round: int = 1,
         resolved_threads: list[dict] | None = None,
         team_conventions: str = "",
+        walkthrough_diff_text: str | None = None,
     ) -> ReviewResult:
         """Core review pipeline.
 
         Runs walkthrough and review in parallel where possible.
+
+        ``diff_text`` is what gets reviewed. ``walkthrough_diff_text``, when
+        given, is what the walkthrough describes instead: a round-2+ review
+        passes the incremental diff as the first and the whole PR diff as the
+        second, so inline findings stay on the latest push while the
+        walkthrough comment, which is rewritten in place, keeps describing the
+        PR as it stands.
 
         If ``on_walkthrough_ready`` is provided, it is invoked as a fire-and-
         forget task the moment the walkthrough LLM call resolves — allowing
@@ -1469,12 +1575,36 @@ class ReviewEngine:
 
         filtered = selected
 
+        # The walkthrough prompt carries only paths, change types and hunk
+        # headers, so describing the whole PR stays cheap on a large one. The
+        # same size caps as the reviewed diff apply so a first and a later
+        # round describe the same set of files.
+        walkthrough_files = filtered
+        if walkthrough_diff_text is not None:
+            try:
+                wt_filtered = filter_files(
+                    parse_diff(walkthrough_diff_text).files, self.config.filter
+                )
+                wt_selected, _wt_skipped = _select_files_by_priority(
+                    wt_filtered,
+                    max_total_size=self.config.review.max_diff_size,
+                    max_per_file_size=self.config.review.max_file_size,
+                )
+                if wt_selected:
+                    walkthrough_files = wt_selected
+            except Exception as exc:
+                logger.warning(
+                    "Could not parse the whole PR diff for the walkthrough; "
+                    "describing the reviewed diff instead: %s",
+                    exc,
+                )
+
         async def _generate_walkthrough() -> WalkthroughResult | None:
             if not self.config.review.walkthrough:
                 return None
             try:
                 wt_messages = build_walkthrough_prompt(
-                    files=filtered,
+                    files=walkthrough_files,
                     config=self.config,
                     pr_title=pr_title,
                     pr_description=pr_description,
