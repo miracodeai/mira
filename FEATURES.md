@@ -7,6 +7,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - AI-powered inline PR comments with severity and confidence scoring
 - PR walkthroughs / summaries with file coverage, comment breakdown, and per-severity stats
 - Streaming walkthrough: placeholder posts within ~1s, narrative within ~10s, full review within a minute
+- Incremental re-reviews: a push to an already-reviewed PR gets inline findings on its new commits only, while the walkthrough, confidence score and list of still-open threads keep describing the whole PR
 - Multi-file reasoning across a diff
 - Parallel chunk review (`asyncio.gather` with configurable concurrency)
 - Cross-chunk and cross-file deduplication (Jaccard similarity on titles + bodies)
