@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-from mira.config import MiraConfig
+from mira.config import LLMConfig, MiraConfig
 from mira.dashboard import models_config
 from mira.index import indexer
 from mira.index.store import FileSummary, IndexStore
@@ -49,7 +49,7 @@ class Fetcher:
 
 
 class Model:
-    config = SimpleNamespace(model="synthetic-model")
+    config = LLMConfig(model="synthetic-model")
 
     async def complete(self, messages, **kwargs):
         return json.dumps(
