@@ -16,6 +16,11 @@ jobs:
   evals:
     uses: ./.github/workflows/evals.yml
     secrets: inherit
+    # A called workflow may only use permissions its caller grants; the
+    # smoke eval reads this repository's merged PRs through the API.
+    permissions:
+      contents: read
+      pull-requests: read
 
   build-and-push:
     needs: evals # ← only builds/pushes if the eval gate is green

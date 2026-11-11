@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import nullcontext
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
@@ -30,7 +31,7 @@ from mira.dashboard.api import (
     logger,
     router,
 )
-from mira.index.store import IndexStore
+from mira.index.store import IndexingSuperseded, IndexStore
 
 
 async def _sync_platform_repos(
@@ -53,33 +54,53 @@ async def _register_and_index_repo(platform: str, env_token: str, body: BaseMode
         raise HTTPException(status_code=400, detail="project must be 'owner/repo'")
 
     _api._app_db.register_repo(owner, repo, platform=platform)
-    _api._app_db.set_repo_status(owner, repo, "indexing", platform=platform)
 
     async def _index() -> None:
-        from mira.index.indexer import index_repo
+        from mira.index.indexer import IndexingRecoveryPending, index_repo
         from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
         store = None
+        run = None
         try:
-            store = IndexStore.open(owner, repo, platform=platform)
+            store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
+            run = store.claim_index_run()
+            with store.index_write(run):
+                _api._app_db.set_repo_status(owner, repo, "indexing", platform=platform)
             await index_repo(
-                owner=owner, repo=repo, store=store, fetcher=make_fetcher(platform, token)
-            )
-            # index_repo returns files re-indexed this run, not the store total.
-            total_files = len(store.all_paths())
-            _api._app_db.set_repo_status(
-                owner,
-                repo,
-                "ready",
-                files_indexed=total_files,
-                bump_last_indexed=True,
+                owner=owner,
+                repo=repo,
+                store=store,
+                fetcher=make_fetcher(platform, token),
+                run=run,
                 platform=platform,
             )
-        except EmptyRepoError as empty:
-            _api._app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
+            with store.index_write(run):
+                _api._app_db.set_repo_status(
+                    owner,
+                    repo,
+                    "ready",
+                    files_indexed=len(store.all_paths()),
+                    bump_last_indexed=True,
+                    platform=platform,
+                )
+        except IndexingSuperseded:
+            logger.info("Indexing superseded for %s/%s", owner, repo)
         except Exception as exc:
-            logger.exception("%s indexing failed for %s/%s", platform.title(), owner, repo)
-            _api._app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform=platform)
+            try:
+                with store.index_write(run) if store is not None and run else nullcontext():
+                    if isinstance(exc, IndexingRecoveryPending):
+                        status = "indexing"
+                    else:
+                        status = "empty" if isinstance(exc, EmptyRepoError) else "failed"
+                    _api._app_db.set_repo_status(
+                        owner, repo, status, error=str(exc), platform=platform
+                    )
+                    if status == "failed":
+                        logger.exception(
+                            "%s indexing failed for %s/%s", platform.title(), owner, repo
+                        )
+            except IndexingSuperseded:
+                logger.info("Indexing superseded for %s/%s", owner, repo)
         finally:
             if store is not None:
                 store.close()
@@ -314,14 +335,11 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     _api._app_db.set_setting("indexing_model", body.indexing_model.strip())
     _api._app_db.set_setting("review_model", body.review_model.strip())
     _api._app_db.set_setting("security_model", body.security_model.strip())
-    # Clear "off" to "" rather than persisting the literal — "off" is the
-    # default, and a stored value would shadow a mira.yaml
-    # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
-    # reads back as unset so the config fallback chain works.
-    if body.review_thinking_mode and body.review_thinking_mode != "off":
-        _api._app_db.set_setting("review_thinking_mode", body.review_thinking_mode)
-    else:
-        _api._app_db.set_setting("review_thinking_mode", "")
+    # Stored as chosen, "off" included: the form shows the resolved mode, so
+    # whatever comes back is the admin's decision and must win over the
+    # config default ("medium"). "" (not None — the column is NOT NULL) clears
+    # the override so the config fallback chain applies again.
+    _api._app_db.set_setting("review_thinking_mode", body.review_thinking_mode or "")
 
     # Clear "chat" (default) to "" so a stored value never shadows mira.yaml config overrides.
     if body.api_style and body.api_style != "chat":

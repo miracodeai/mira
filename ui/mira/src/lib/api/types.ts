@@ -29,6 +29,11 @@ export interface FileModel {
   loc?: number
 }
 
+export interface BaseBranchPolicy {
+  mode: "inherit" | "override" | "disable"
+  branches: string[]
+}
+
 export interface RepoDetail {
   owner: string
   repo: string
@@ -39,6 +44,7 @@ export interface RepoDetail {
   external_refs_count: number
   lines_count: number
   last_indexed: string | null
+  base_branch_policy?: BaseBranchPolicy | null
 }
 
 export interface ImportEdge {

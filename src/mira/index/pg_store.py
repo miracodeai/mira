@@ -10,8 +10,10 @@ import logging
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
+from contextvars import ContextVar
 from typing import Any
+from uuid import uuid4
 
 from mira.index._package_search import PackageGroups
 from mira.index._store_shared import _StoreSharedMixin
@@ -21,6 +23,8 @@ from mira.index.store import (
     ExternalRef,
     FeedbackEventRow,
     FileSummary,
+    IndexingSuperseded,
+    IndexRun,
     IndexStore,
     LearnedRuleRow,
     ManifestPackageMigrationError,
@@ -34,6 +38,16 @@ from mira.index.store import (
 from mira.models import PRFingerprint
 
 logger = logging.getLogger(__name__)
+
+_INDEX_RUNS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS index_runs (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    token TEXT NOT NULL,
+    pending BOOLEAN NOT NULL,
+    PRIMARY KEY (owner, repo)
+);
+"""
 
 _PG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -251,6 +265,26 @@ CREATE INDEX IF NOT EXISTS idx_pg_vuln_severity
 _pg_conn = None
 _schema_initialized = False
 _lock = threading.Lock()
+_index_write_connection: ContextVar[tuple[PgIndexStore, Any] | None] = ContextVar(
+    "index_write_connection", default=None
+)
+
+
+def index_write_connection(url: str) -> Any | None:
+    """Return the guarded connection for a dashboard write on the same database."""
+    scoped = _index_write_connection.get()
+    return scoped[1] if scoped is not None and scoped[0]._url == url else None
+
+
+@contextmanager
+def _index_transaction(url: str) -> Iterator[Any]:
+    from mira.db.postgres import connect
+
+    # Use a dedicated connection so no shared-cursor retry or commit can
+    # detach the ownership check from the writes it protects.
+    with connect(url) as conn, conn.transaction():
+        conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        yield conn
 
 
 def _drop_pg_conn() -> None:
@@ -620,6 +654,54 @@ class PgIndexStore(_StoreSharedMixin):
         self._url = url
         _get_conn(url)  # eager connect + schema init
 
+    def claim_index_run(self) -> IndexRun:
+        if _index_write_connection.get() is not None:
+            raise RuntimeError("Cannot claim an index run inside another transaction")
+        token = uuid4().hex
+        key = (self._owner, self._repo)
+        with _index_transaction(self._url) as conn:
+            # An existing installation can start multiple workers at once.
+            if conn.execute("SELECT to_regclass('index_runs')").fetchone()[0] is None:
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext('mira.index_runs'), 371)")
+                conn.execute(_INDEX_RUNS_SCHEMA)
+            conn.execute(
+                "INSERT INTO index_runs (owner, repo, token, pending) VALUES (%s, %s, %s, FALSE) "
+                "ON CONFLICT (owner, repo) DO NOTHING",
+                (*key, token),
+            )
+            (pending,) = conn.execute(
+                "SELECT pending FROM index_runs WHERE owner=%s AND repo=%s FOR UPDATE", key
+            ).fetchone()
+            conn.execute(
+                "UPDATE index_runs SET token=%s, pending=TRUE WHERE owner=%s AND repo=%s",
+                (token, *key),
+            )
+        return IndexRun(token, pending)
+
+    @contextmanager
+    def index_write(self, run: IndexRun) -> Iterator[None]:
+        if _index_write_connection.get() is not None:
+            raise RuntimeError("Nested index write")
+        with _index_transaction(self._url) as conn:
+            row = conn.execute(
+                "SELECT token FROM index_runs WHERE owner=%s AND repo=%s FOR UPDATE",
+                (self._owner, self._repo),
+            ).fetchone()
+            if row != (run.token,):
+                raise IndexingSuperseded
+            context = _index_write_connection.set((self, conn))
+            try:
+                yield
+            finally:
+                _index_write_connection.reset(context)
+
+    def finish_index_run(self, run: IndexRun) -> None:
+        with self.index_write(run), self._cursor() as cur:
+            cur.execute(
+                "UPDATE index_runs SET pending=FALSE WHERE owner=%s AND repo=%s",
+                (self._owner, self._repo),
+            )
+
     def _refresh_conn(self) -> Any:
         """Drop the shared module connection and bind a fresh handle."""
         _drop_pg_conn()
@@ -630,6 +712,11 @@ class PgIndexStore(_StoreSharedMixin):
         """Cursor on the current shared connection; reconnects once on idle drop."""
         from mira.db.postgres import ReconnectingCursor
 
+        scoped = _index_write_connection.get()
+        if scoped is not None and scoped[0] is self:
+            with scoped[1].cursor() as cur:
+                yield cur
+            return
         with ReconnectingCursor(
             _get_conn(self._url).cursor(), on_reconnect=self._refresh_conn
         ) as cur:
@@ -639,7 +726,9 @@ class PgIndexStore(_StoreSharedMixin):
         # Always commit the current shared connection — a reconnect (from this
         # or any other store instance) closes the old handle, so caching one
         # per instance would commit on a dead connection.
-        _get_conn(self._url).commit()
+        scoped = _index_write_connection.get()
+        if scoped is None or scoped[0] is not self:
+            _get_conn(self._url).commit()
 
     def _exec(self, sql: str, params: tuple = ()):
         """Execute a query and return the cursor."""
@@ -1577,6 +1666,13 @@ class PgIndexStore(_StoreSharedMixin):
         )
         if existing:
             # Preserve the existing approval status across re-synthesis.
+            if existing[1] == "rejected":
+                # An admin rejected this rule: leave their decision, and the
+                # text they rejected, untouched rather than re-describing it
+                # under the same verdict.
+                rejected = self.get_learned_rule(existing[0])
+                if rejected is not None:
+                    return rejected
             with self._cursor() as cur:
                 cur.execute(
                     "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
@@ -1756,8 +1852,6 @@ class PgIndexStore(_StoreSharedMixin):
         file_path: str,
         packages: list[dict],
     ) -> int:
-        from mira.db.postgres import connect
-
         now = time.time()
         rows = [
             (
@@ -1777,9 +1871,13 @@ class PgIndexStore(_StoreSharedMixin):
         # exact identities in memory and serialize replacements of the same
         # file. The hash is only a lock key: collisions serialize two files.
         lock_key = json.dumps(["package_manifests", self._owner, self._repo, file_path])
-        with connect(self._url) as conn, conn.transaction(), conn.cursor() as cur:
-            # A waiter must see the previous writer's commit after it gets the lock.
-            cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        scoped = _index_write_connection.get()
+        transaction = (
+            nullcontext(scoped[1])
+            if scoped is not None and scoped[0] is self
+            else _index_transaction(self._url)
+        )
+        with transaction as conn, conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
             cur.execute(
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",

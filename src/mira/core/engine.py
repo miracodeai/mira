@@ -30,7 +30,12 @@ from mira.core.passes import (
     self_critique,
 )
 from mira.core.priority import rank_files
-from mira.core.threads import resolve_verified_threads, short_thread_description
+from mira.core.threads import (
+    resolve_verified_threads,
+    short_thread_description,
+    thread_severity,
+    thread_title,
+)
 from mira.exceptions import MiraError, ResponseParseError, StructuredOutputError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
@@ -49,6 +54,7 @@ from mira.models import (
     PR_SUMMARY_END,
     PR_SUMMARY_START,
     WALKTHROUGH_MARKER,
+    BotThreadRecord,
     ChunkFailure,
     FileChangeType,
     KeyIssue,
@@ -110,8 +116,14 @@ def _incomplete_summary(
     failures: list[ChunkFailure],
     total_chunks: int,
     original_summary: str,
+    mention: str = "@miracodeai",
 ) -> str:
-    """Prefix the review summary with an explicit incomplete notice."""
+    """Prefix the review summary with an explicit incomplete notice.
+
+    ``mention`` is how the bot is addressed on this platform; commands are
+    only picked up when the comment mentions it, so a bare ``review-rest``
+    would do nothing.
+    """
     if failures and len(failures) >= total_chunks:
         lead = (
             f"Review incomplete: all {total_chunks} chunks failed. "
@@ -122,7 +134,7 @@ def _incomplete_summary(
             f"Review incomplete: {len(failures)} of {total_chunks} chunks failed. "
             "No findings were returned for those files."
         )
-    lead += " Comment `review-rest` to retry the failed files."
+    lead += f" Comment `{mention} review-rest` to retry the failed files."
     original = (original_summary or "").strip()
     if original and "no issues found" not in original.lower():
         return f"{lead}\n\n{original}"
@@ -158,10 +170,58 @@ def compose_pr_description(current_body: str, summary_block: str, mode: str) -> 
     return summary_block
 
 
+# Walkthrough submissions per review before giving up: the first call plus
+# two corrective retries.
+_WALKTHROUGH_ATTEMPTS = 3
+
+
+def _source_ref(pr_info: PRInfo) -> str:
+    """The ref to fetch PR source at: the head commit, falling back to the branch.
+
+    The head branch of a pull request from a fork does not exist in the base
+    repository, and the branch of a merged PR is often deleted, so fetching
+    files or the tree by branch name 404s for both and every `read_file` and
+    `grep_repo` the reviewer makes fails. The head commit is reachable in the
+    base repository for any PR, open or merged.
+    """
+    return pr_info.head_sha or pr_info.head_branch
+
+
+def _incomplete_reason(
+    failed_chunks: int,
+    total_chunks: int,
+    security_failed: bool,
+    mention: str = "@miracodeai",
+) -> str:
+    """Verdict reason for a review that did not finish every pass."""
+    all_failed = failed_chunks > 0 and total_chunks > 0 and failed_chunks >= total_chunks
+    if all_failed:
+        return (
+            "The review could not complete for any part of the diff, so no findings "
+            f"were produced. Comment `{mention} review-rest` to retry."
+        )
+    if failed_chunks and security_failed:
+        what = f"{failed_chunks} of {total_chunks} review chunks and the security pass failed"
+    elif failed_chunks:
+        what = f"{failed_chunks} of {total_chunks} review chunks failed"
+    else:
+        what = "The security pass did not complete"
+    return (
+        f"{what}, so findings may be missing. "
+        f"Comment `{mention} review-rest` to retry the failed files."
+    )
+
+
 def _clamp_confidence_to_findings(
     walkthrough: WalkthroughResult,
     comments: list[ReviewComment],
     unverified: int = 0,
+    *,
+    failed_chunks: int = 0,
+    total_chunks: int = 0,
+    security_failed: bool = False,
+    mention: str = "@miracodeai",
+    open_threads: list[BotThreadRecord] | None = None,
 ) -> None:
     """Tighten the walkthrough confidence score based on actual review findings.
 
@@ -172,6 +232,9 @@ def _clamp_confidence_to_findings(
 
     Rubric (1=major concerns, 5=safe to merge):
       - ≥1 blocker → score ≤ 2
+      - a failed review chunk or security pass (and no blocker) → score ≤ 3,
+        "Review incomplete": findings may be missing, so the verdict must not
+        read as a clean bill of health however little was posted
       - ≥3 warnings (and no blocker) → score ≤ 3
       - no comments posted and score ≥ 3 → recomputed from what posted:
         5/5 "No issues to flag", or 4/5 "No confirmed issues" when
@@ -180,28 +243,58 @@ def _clamp_confidence_to_findings(
         filtering or self-critique removed, so this rule may *raise* a score.
         A score ≤ 2 is left alone: its concerns live in the reason (design or
         risk), not in line comments, and must not be rewritten away.
+
+    ``open_threads`` are the bot's still-unresolved threads from earlier
+    rounds. The score is the verdict on the whole PR, and a round-2 review
+    posts comments only on the latest push, so an open blocker from round 1
+    counts like a blocker found now, open warnings add to the warning count,
+    and a push with nothing new to say still scores at most 4 while a warning
+    from an earlier review is open. Open suggestions and nitpicks do not move
+    the score; a thread whose severity badge cannot be read is ignored, as is
+    an outdated one, whose code has changed since it was filed.
     """
     cs = walkthrough.confidence_score
     if cs is None:
         return
 
-    blockers = sum(1 for c in comments if c.severity == Severity.BLOCKER)
-    warnings = sum(1 for c in comments if c.severity == Severity.WARNING)
+    open_severities = [thread_severity(t.body) for t in open_threads or [] if not t.is_outdated]
+    open_blockers = sum(1 for s in open_severities if s == Severity.BLOCKER)
+    open_warnings = sum(1 for s in open_severities if s == Severity.WARNING)
+    blockers = sum(1 for c in comments if c.severity == Severity.BLOCKER) + open_blockers
+    warnings = sum(1 for c in comments if c.severity == Severity.WARNING) + open_warnings
     original = cs.score
+
+    def _still_open(count: int) -> str:
+        return f" ({count} still open from an earlier review)" if count else ""
 
     if blockers > 0 and cs.score > 2:
         cs.score = 2
         cs.label = "Do not merge"
         cs.reason = (
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
-            "that must be fixed before merge."
+            f"that must be fixed before merge{_still_open(open_blockers)}."
         )
+    elif (failed_chunks > 0 or security_failed) and cs.score > 2:
+        cs.score = 3
+        cs.label = "Review incomplete"
+        cs.reason = _incomplete_reason(failed_chunks, total_chunks, security_failed, mention)
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
         cs.label = "Needs review"
-        cs.reason = f"Found {warnings} warnings that need attention before merge."
+        cs.reason = (
+            f"Found {warnings} warnings that need attention before merge"
+            f"{_still_open(open_warnings)}."
+        )
     elif not comments and cs.score >= 3:
-        if unverified:
+        if open_warnings:
+            cs.score = min(cs.score, 4)
+            cs.label = "Earlier findings still open"
+            cs.reason = (
+                f"No new issues in this push; {open_warnings} "
+                f"warning{'s' if open_warnings != 1 else ''} from an earlier review "
+                f"{'are' if open_warnings != 1 else 'is'} still open."
+            )
+        elif unverified:
             cs.score = 4
             cs.label = "No confirmed issues"
             cs.reason = "No confirmed issues; possible issues are listed below for a manual check."
@@ -212,12 +305,40 @@ def _clamp_confidence_to_findings(
 
     if cs.score != original:
         logger.info(
-            "Clamped walkthrough confidence from %d to %d (%d blocker(s), %d warning(s))",
+            "Clamped walkthrough confidence from %d to %d "
+            "(%d blocker(s), %d warning(s), %d open thread(s))",
             original,
             cs.score,
             blockers,
             warnings,
+            len(open_severities),
         )
+
+
+def _with_open_thread_issues(
+    key_issues: list[KeyIssue],
+    open_threads: list[BotThreadRecord],
+) -> list[KeyIssue]:
+    """Append still-open threads from earlier reviews to this round's key issues.
+
+    Round 2+ reviews only the latest push, so its key issues cover that push
+    alone; the walkthrough should still show everything outstanding on the
+    PR. A thread already named by a key issue at the same place is not
+    repeated, and an outdated thread (its code has changed since) is skipped.
+    Returns a new list; the review's own key issues are untouched (the review
+    summary posted alongside lists only this round's).
+    """
+    merged = list(key_issues)
+    covered = {(ki.path, ki.line) for ki in key_issues}
+    for t in open_threads:
+        if t.is_outdated or (t.path, t.line) in covered:
+            continue
+        title = thread_title(t.body) or "see the open thread"
+        merged.append(
+            KeyIssue(issue=f"Still open from an earlier review: {title}", path=t.path, line=t.line)
+        )
+        covered.add((t.path, t.line))
+    return merged
 
 
 # Paths excluded from the dedicated security pass — see core/passes.py.
@@ -540,7 +661,47 @@ class ReviewEngine:
             "Review finished, but the walkthrough summary could not be "
             "generated. Findings (if any) were posted as PR/file comments.",
         ),
+        "review_failed": (
+            "failure",
+            "Code Review Failed",
+            "The review could not complete for any part of the diff, so no findings "
+            "were posted. Comment `{mention} review-rest` to retry.",
+        ),
+        "incomplete": (
+            "neutral",
+            "Code Review Incomplete",
+            "Part of the diff could not be reviewed, so findings may be missing. "
+            "Comment `{mention} review-rest` to retry the failed files.",
+        ),
     }
+
+    def _mention(self) -> str:
+        """How a comment has to address the bot for a command to be picked up."""
+        return f"@{(self.bot_name or 'miracodeai').removesuffix('[bot]')}"
+
+    def _check_status_key(self, result: ReviewResult) -> str:
+        """Pick the check-run conclusion from what the review actually did.
+
+        Failed chunks outrank a missing walkthrough: a review that posted
+        nothing because every chunk failed must not conclude as success,
+        which is what a reader takes "Code Review Complete" to mean.
+        """
+        failed = len(result.failed_chunks)
+        if failed and result.total_chunks and failed >= result.total_chunks:
+            return "review_failed"
+        if failed or result.security_failures:
+            return "incomplete"
+        # Neutral only when a walkthrough was enabled AND generation was
+        # genuinely attempted but produced nothing (e.g. the LLM call failed).
+        # A disabled walkthrough, or a review skipped before any generation
+        # (no files, all files filtered, docs-only, no-new-commit re-reviews),
+        # finishes as success.
+        walkthrough_missing = (
+            self.config.review.walkthrough
+            and result.skipped_reason is None
+            and result.walkthrough is None
+        )
+        return "neutral" if walkthrough_missing else "success"
 
     async def _start_check(self, pr_info: PRInfo) -> int | None:
         """Best-effort: start a check run for the head commit; never fails a review."""
@@ -563,15 +724,30 @@ class ReviewEngine:
         if result is None:
             return ""
         parts: list[str] = []
-        if result.reviewed_files:
+        if result.incremental_since and result.pr_file_count:
+            parts.append(
+                f"{result.pr_file_count} file{'s' if result.pr_file_count != 1 else ''} in PR"
+            )
+        if result.reviewed_files and result.incremental_since:
+            parts.append(f"{result.reviewed_files} reviewed in this push")
+        elif result.reviewed_files:
             parts.append(
                 f"{result.reviewed_files} file{'s' if result.reviewed_files != 1 else ''} reviewed"
             )
         if result.comments:
             stats = _format_stats_breakdown(build_review_stats(result.comments))
+            new = "new " if result.incremental_since else ""
             parts.append(
-                f"{len(result.comments)} comment{'s' if len(result.comments) != 1 else ''}{stats}"
+                f"{len(result.comments)} {new}comment{'s' if len(result.comments) != 1 else ''}"
+                f"{stats}"
             )
+        if result.failed_chunks:
+            parts.append(
+                f"{len(result.failed_chunks)} of {result.total_chunks} "
+                f"chunk{'s' if result.total_chunks != 1 else ''} failed"
+            )
+        if result.security_failures:
+            parts.append("security pass failed")
         return " · ".join(parts)
 
     async def _finish_check(
@@ -587,7 +763,7 @@ class ReviewEngine:
                 run_id,
                 conclusion,
                 title=title,
-                summary=summary,
+                summary=summary.format(mention=self._mention()),
                 details=self._check_details(result),
             )
         except Exception as exc:
@@ -604,8 +780,7 @@ class ReviewEngine:
             f"**Message:** {message}"
         )
 
-    @staticmethod
-    def _format_chunk_failure_notice(failures: list[ChunkFailure]) -> str:
+    def _format_chunk_failure_notice(self, failures: list[ChunkFailure]) -> str:
         """User-safe notice for a review where every chunk failed."""
         paths = sorted({path for failure in failures for path in failure.paths if path})
         shown = paths[:8]
@@ -620,7 +795,7 @@ class ReviewEngine:
             f"**Failed chunks:** {len(failures)}\n"
             f"**Files:** {path_note or 'all selected files'}\n"
             f"**Reason:** {', '.join(reasons) or 'structured output failed'}\n\n"
-            "Comment `review-rest` to retry the failed files."
+            f"Comment `{self._mention()} review-rest` to retry the failed files."
         )
 
     async def _detect_overlaps_safe(
@@ -715,18 +890,7 @@ class ReviewEngine:
         except BaseException:
             await self._finish_check(pr_info, run_id, "failure", None)
             raise
-        # Neutral only when a walkthrough was enabled AND generation was
-        # genuinely attempted but produced nothing (e.g. the LLM call failed).
-        # A disabled walkthrough, or a review skipped before any generation
-        # (no files, all files filtered, docs-only, no-new-commit re-reviews),
-        # finishes as success.
-        walkthrough_missing = (
-            self.config.review.walkthrough
-            and result.skipped_reason is None
-            and result.walkthrough is None
-        )
-        status_key = "neutral" if walkthrough_missing else "success"
-        await self._finish_check(pr_info, run_id, status_key, result)
+        await self._finish_check(pr_info, run_id, self._check_status_key(result), result)
         return result
 
     async def _review_pr(self, pr_info: PRInfo) -> ReviewResult:
@@ -777,6 +941,10 @@ class ReviewEngine:
                 logger.warning("Failed to post walkthrough placeholder: %s", exc)
 
         _walkthrough_result: list[WalkthroughResult | None] = [None]
+        # Set below when round 2+ reviews an incremental diff; read by the
+        # streaming callback and the final walkthrough so both say so.
+        incremental_since = ""
+        pr_file_count = 0
 
         async def _on_walkthrough_ready(wt: WalkthroughResult | None) -> None:
             if self.dry_run or wt is None or placeholder_id is None:
@@ -785,6 +953,8 @@ class ReviewEngine:
                 markdown = wt.to_markdown(
                     bot_name=self.bot_name or "miracodeai",
                     in_progress=True,
+                    incremental_since=incremental_since,
+                    pr_file_count=pr_file_count,
                 )
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
                 _walkthrough_result[0] = wt
@@ -798,6 +968,13 @@ class ReviewEngine:
         review_round = 1
         is_review_rest = getattr(self, "_review_only_paths", None) is not None
         resolved_thread_dicts: list[dict] = []
+        # Threads from earlier rounds nobody has resolved. The walkthrough is
+        # the verdict on the whole PR, so they count in its score, its key
+        # issues and its footer alongside what this round finds. Outdated
+        # threads (the code they point at has since changed) are left out, and
+        # so is a review-rest run, which continues round 1: its threads were
+        # filed minutes ago by the same review, not left open from an earlier one.
+        open_threads: list[BotThreadRecord] = []
         try:
             if self.bot_name and self.provider is not None:
                 all_bot_threads = await self.provider.get_all_bot_threads(
@@ -806,6 +983,11 @@ class ReviewEngine:
                 )
                 if all_bot_threads and not is_review_rest:
                     review_round = 2
+                open_threads = (
+                    []
+                    if is_review_rest
+                    else [t for t in all_bot_threads if not t.is_resolved and not t.is_outdated]
+                )
                 resolved_thread_dicts = [
                     {
                         "path": t.path,
@@ -843,6 +1025,7 @@ class ReviewEngine:
                         # base branch brought in — not this PR's code. Review
                         # only the files the PR itself changes.
                         pr_paths = {f.path for f in parse_diff(full_diff_text).files}
+                        pr_file_count = len(pr_paths)
                         restricted = _restrict_diff_to_paths(incremental, pr_paths)
                         if len(restricted) != len(incremental):
                             logger.info(
@@ -863,6 +1046,7 @@ class ReviewEngine:
                             len(incremental),
                         )
                         diff_text = incremental
+                        incremental_since = last_sha
                     else:
                         logger.info(
                             "Round %d: no new commits since %s on PR %s, skipping review",
@@ -905,7 +1089,10 @@ class ReviewEngine:
                 review_round=review_round,
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
+                walkthrough_diff_text=full_diff_text if incremental_since else None,
             )
+            result.incremental_since = incremental_since
+            result.pr_file_count = pr_file_count
         except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()
@@ -933,6 +1120,8 @@ class ReviewEngine:
                             bot_name=self.bot_name or "miracodeai",
                             in_progress=False,
                             failure_notice=self._format_failure_notice(exc),
+                            incremental_since=incremental_since,
+                            pr_file_count=pr_file_count,
                         )
                     else:
                         failure_body = (
@@ -985,7 +1174,16 @@ class ReviewEngine:
             unverified = (
                 result.unverified_findings if self.config.review.show_unverified_findings else []
             )
-            _clamp_confidence_to_findings(result.walkthrough, result.comments, len(unverified))
+            _clamp_confidence_to_findings(
+                result.walkthrough,
+                result.comments,
+                len(unverified),
+                failed_chunks=len(result.failed_chunks),
+                total_chunks=result.total_chunks,
+                security_failed=bool(result.security_failures),
+                mention=self._mention(),
+                open_threads=open_threads,
+            )
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:
@@ -1052,11 +1250,12 @@ class ReviewEngine:
                     markdown = result.walkthrough.to_markdown(
                         bot_name=self.bot_name,
                         review_stats=stats,
-                        existing_issues=len(unresolved_threads),
+                        existing_issues=len(open_threads),
                         blast_radius=cross_repo_blast,
                         reviewed_files=result.reviewed_files,
                         total_comments=len(result.comments),
-                        key_issues=result.key_issues or None,
+                        key_issues=_with_open_thread_issues(result.key_issues, open_threads)
+                        or None,
                         skipped_paths=result.skipped_paths or None,
                         total_paths=result.total_paths or None,
                         index_was_empty=getattr(self, "_index_was_empty", False),
@@ -1072,6 +1271,8 @@ class ReviewEngine:
                             if all_chunks_failed
                             else None
                         ),
+                        incremental_since=result.incremental_since,
+                        pr_file_count=result.pr_file_count,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -1299,10 +1500,18 @@ class ReviewEngine:
         review_round: int = 1,
         resolved_threads: list[dict] | None = None,
         team_conventions: str = "",
+        walkthrough_diff_text: str | None = None,
     ) -> ReviewResult:
         """Core review pipeline.
 
         Runs walkthrough and review in parallel where possible.
+
+        ``diff_text`` is what gets reviewed. ``walkthrough_diff_text``, when
+        given, is what the walkthrough describes instead: a round-2+ review
+        passes the incremental diff as the first and the whole PR diff as the
+        second, so inline findings stay on the latest push while the
+        walkthrough comment, which is rewritten in place, keeps describing the
+        PR as it stands.
 
         If ``on_walkthrough_ready`` is provided, it is invoked as a fire-and-
         forget task the moment the walkthrough LLM call resolves — allowing
@@ -1366,35 +1575,75 @@ class ReviewEngine:
 
         filtered = selected
 
+        # The walkthrough prompt carries only paths, change types and hunk
+        # headers, so describing the whole PR stays cheap on a large one. The
+        # same size caps as the reviewed diff apply so a first and a later
+        # round describe the same set of files.
+        walkthrough_files = filtered
+        if walkthrough_diff_text is not None:
+            try:
+                wt_filtered = filter_files(
+                    parse_diff(walkthrough_diff_text).files, self.config.filter
+                )
+                wt_selected, _wt_skipped = _select_files_by_priority(
+                    wt_filtered,
+                    max_total_size=self.config.review.max_diff_size,
+                    max_per_file_size=self.config.review.max_file_size,
+                )
+                if wt_selected:
+                    walkthrough_files = wt_selected
+            except Exception as exc:
+                logger.warning(
+                    "Could not parse the whole PR diff for the walkthrough; "
+                    "describing the reviewed diff instead: %s",
+                    exc,
+                )
+
         async def _generate_walkthrough() -> WalkthroughResult | None:
             if not self.config.review.walkthrough:
                 return None
             try:
                 wt_messages = build_walkthrough_prompt(
-                    files=filtered,
+                    files=walkthrough_files,
                     config=self.config,
                     pr_title=pr_title,
                     pr_description=pr_description,
                 )
-                wt_raw = await self.llm.walkthrough(wt_messages)
-                try:
-                    wt_parsed = parse_walkthrough_response(wt_raw)
-                except ResponseParseError as exc:
-                    logger.warning("Invalid walkthrough response; retrying once: %s", exc)
-                    wt_messages = [
-                        *wt_messages,
-                        {
-                            "role": "user",
-                            "content": (
-                                "The previous walkthrough response was invalid. "
-                                "Submit the walkthrough again with a non-empty summary "
-                                "and change_groups using the declared JSON schema. "
-                                "Do not include tool-call XML in any field."
-                            ),
-                        },
-                    ]
+                # Models occasionally submit the tool call without the summary
+                # (Sonnet 5 did so on about one call in six on real PRs), so a
+                # bad submission gets corrective retries that name what was
+                # wrong. The bounded excerpt is what makes a "not generated"
+                # walkthrough diagnosable from the server log alone.
+                attempt = 0
+                while True:
                     wt_raw = await self.llm.walkthrough(wt_messages)
-                    wt_parsed = parse_walkthrough_response(wt_raw)
+                    try:
+                        wt_parsed = parse_walkthrough_response(wt_raw)
+                        break
+                    except ResponseParseError as exc:
+                        attempt += 1
+                        logger.warning(
+                            "Invalid walkthrough response (attempt %d of %d): %s (response=%s)",
+                            attempt,
+                            _WALKTHROUGH_ATTEMPTS,
+                            exc,
+                            _response_excerpt(wt_raw),
+                        )
+                        if attempt >= _WALKTHROUGH_ATTEMPTS:
+                            raise
+                        wt_messages = [
+                            *wt_messages,
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"The previous walkthrough response was invalid: {exc}. "
+                                    "Call `submit_walkthrough` again with every field filled: "
+                                    "a non-empty `summary` (2-4 sentences), `change_groups`, "
+                                    "`confidence_score` and `effort`, using the declared JSON "
+                                    "schema. Do not include tool-call XML in any field."
+                                ),
+                            },
+                        ]
                 if not self.config.review.walkthrough_sequence_diagram:
                     wt_parsed.sequence_diagram = None
                 return convert_to_walkthrough_result(wt_parsed)
@@ -1414,7 +1663,7 @@ class ReviewEngine:
                         from mira.index.context import ProviderSourceFetcher
 
                         source_fetcher = ProviderSourceFetcher(
-                            self.provider, pr_info, pr_info.head_branch
+                            self.provider, pr_info, _source_ref(pr_info)
                         )
                     changed_paths = [f.path for f in filtered]
                     ctx = await build_code_context(
@@ -1443,7 +1692,7 @@ class ReviewEngine:
                         if hasattr(self.provider, "get_repo_tree"):
                             try:
                                 tree_paths = set(
-                                    await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
+                                    await self.provider.get_repo_tree(pr_info, _source_ref(pr_info))
                                 )
                             except Exception as exc:
                                 logger.debug("Repo tree fetch failed: %s", exc)
@@ -1882,7 +2131,7 @@ class ReviewEngine:
                     from mira.index.context import ProviderSourceFetcher
 
                     pr_source_fetcher = ProviderSourceFetcher(
-                        self.provider, pr_info, pr_info.head_branch
+                        self.provider, pr_info, _source_ref(pr_info)
                     )
         dependency_task = _asyncio.create_task(
             dependency_review_pass(
@@ -2044,6 +2293,7 @@ class ReviewEngine:
                     chunk_failures,
                     len(chunks),
                     original_summary,
+                    self._mention(),
                 )
             else:
                 # Regenerate from the FINAL filed outputs so summary prose can't

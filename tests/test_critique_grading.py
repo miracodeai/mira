@@ -264,18 +264,21 @@ class TestEvidenceGradedCritique:
 
     @pytest.mark.asyncio
     async def test_audit_records_missing_verdict(self, monkeypatch):
-        comments = [_comment(title="no verdict for me")]
+        # The critic graded one draft and skipped the other: the skipped one is
+        # dropped and audited. (A reply with no verdicts at all is a failed
+        # critic and keeps every draft — see test_critic_unreadable_verdicts.)
+        comments = [_comment(title="no verdict for me"), _comment(title="graded")]
         from mira.llm import provider as provider_mod
 
         async def fake(self, messages, tools, temperature=None):
-            return json.dumps({"verdicts": []})
+            return json.dumps({"verdicts": [{"index": 1, "evidence": "proven"}]})
 
         monkeypatch.setattr(provider_mod.LLMProvider, "complete_with_tools", fake)
 
         audit: list[dict] = []
         kept = await self_critique(AsyncMock(), comments, audit=audit)
 
-        assert kept == []
+        assert [c.title for c in kept] == ["graded"]
         assert audit[0]["reason"].startswith("no-verdict:")
 
 

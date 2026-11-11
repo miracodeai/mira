@@ -230,11 +230,21 @@ class WalkthroughResult:
         failed_chunks: list[ChunkFailure] | None = None,
         total_chunks: int = 0,
         security_failures: list[ChunkFailure] | None = None,
+        incremental_since: str = "",
+        pr_file_count: int = 0,
     ) -> str:
         """Render as a markdown PR comment.
 
         ``unverified_findings`` are draft findings the self-critique graded
         "plausible" but did not post; they are listed as not-verified hints.
+
+        ``incremental_since`` is the commit a round-2+ review diffed from. The
+        walkthrough itself describes the whole PR on every round, but inline
+        findings and ``reviewed_files`` cover only the commits pushed since
+        then, so the footer then reads "25 files in PR · 5 reviewed in this
+        push · 1 new comment", with ``pr_file_count`` the number of files in
+        the whole PR. A bare "5 files reviewed" on a 25-file PR read as if 20
+        files had been skipped.
         """
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
@@ -382,14 +392,20 @@ class WalkthroughResult:
             parts.append("*\u23f3 Code review in progress\u2026*")
         else:
             stats_parts: list[str] = []
-            if reviewed_files:
+            if incremental_since and pr_file_count:
+                stats_parts.append(f"{pr_file_count} file{'s' if pr_file_count != 1 else ''} in PR")
+            if reviewed_files and incremental_since:
+                stats_parts.append(f"{reviewed_files} reviewed in this push")
+            elif reviewed_files:
                 stats_parts.append(
                     f"{reviewed_files} file{'s' if reviewed_files != 1 else ''} reviewed"
                 )
             if total_comments:
                 comment_detail = _format_stats_breakdown(review_stats) if review_stats else ""
+                new = "new " if incremental_since else ""
                 stats_parts.append(
-                    f"{total_comments} comment{'s' if total_comments != 1 else ''}{comment_detail}"
+                    f"{total_comments} {new}comment{'s' if total_comments != 1 else ''}"
+                    f"{comment_detail}"
                 )
             if existing_issues:
                 stats_parts.append(
@@ -497,6 +513,12 @@ class ReviewResult:
     # Draft findings self-critique graded "plausible" but did not post. Shown
     # in the walkthrough only with review.show_unverified_findings.
     unverified_findings: list[ReviewComment] = field(default_factory=list)
+    # Round 2+ reviews the diff from the last reviewed commit; this is that
+    # commit (empty for a full review) and the file count of the whole PR, so
+    # the walkthrough footer and check run can say "25 files in PR · 5 reviewed
+    # in this push" instead of a bare count that reads as the whole PR.
+    incremental_since: str = ""
+    pr_file_count: int = 0
 
 
 @dataclass

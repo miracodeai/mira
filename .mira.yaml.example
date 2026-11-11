@@ -10,7 +10,15 @@ llm:
   # Fallback model if primary fails
   fallback_model: "openai/gpt-4o-mini"
   temperature: 0.2
-  max_tokens: 4096
+  # Output budget per call. Thinking tokens count against it on most
+  # providers; an endpoint that rejects the budget is retried at 4096.
+  max_tokens: 16384
+
+  # Thinking mode for the review and security passes: "off", "low", "medium",
+  # "high", "xhigh" or "max". Unset means "medium", which the published
+  # benchmark ran with; "off" disables thinking, including on models that
+  # think by default such as DeepSeek v4.1 flash.
+  # review_reasoning_effort: "medium"
 
   # ── AWS Bedrock configuration (uncomment to use) ──
   # provider: "bedrock"
@@ -54,6 +62,19 @@ filter:
   # blocked_authors:
   #   - app/renovate
   #   - app/dependabot
+  # Auto-review only PRs whose destination (base) branch matches one of
+  # these globs — e.g. ["main", "release/*"]. Empty = review every branch.
+  # Individual repos can replace this per repo (see below) or from the
+  # dashboard's per-repo Review Policy tab. Manual @bot commands are not
+  # affected by this list.
+  # allowed_base_branches:
+  #   - main
+  #   - release/*
+  # Per-repo replacement for allowed_base_branches, keyed "owner/repo"
+  # (case-insensitive). An empty list disables auto-review for that repo.
+  # allowed_base_branch_overrides:
+  #   org/website: ["main"]
+  #   org/mobile: ["develop", "release/*"]
   # Skip deleted files
   exclude_deleted: true
   # Maximum number of files to review
