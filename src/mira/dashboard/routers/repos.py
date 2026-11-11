@@ -36,7 +36,7 @@ from mira.dashboard.api import (
     logger,
     router,
 )
-from mira.index.store import IndexingSuperseded, IndexStore
+from mira.index.store import IndexingSuperseded, IndexStore, PackageManifestRow
 
 
 def _parse_base_branch_policy(raw: str) -> RepoBaseBranchPolicy | None:
@@ -406,22 +406,33 @@ def get_packages(owner: str, repo: str) -> list[PackageModel]:
         rows = store.list_manifest_packages()
 
     # Dedupe by (kind, name), preferring lockfile rows.
-    by_key: dict[tuple[str, str], PackageModel] = {}
+    by_key: dict[tuple[str, str], PackageManifestRow] = {}
     for r in rows:
-        model = PackageModel(
+        key = (r.kind, r.name.lower())
+        existing = by_key.get(key)
+        if (
+            existing is None
+            or (_is_lockfile_path(r.file_path) and not _is_lockfile_path(existing.file_path))
+            # Prefer the last encountered version within one npm lockfile
+            # while the dashboard still shows one row per package.
+            or (
+                r.kind == "npm"
+                and r.name == existing.name
+                and r.file_path == existing.file_path
+                and r.id > existing.id
+            )
+        ):
+            by_key[key] = r
+    return [
+        PackageModel(
             name=r.name,
             kind=r.kind,
             version=r.version,
             file_path=r.file_path,
             is_dev=r.is_dev,
         )
-        key = (r.kind, r.name.lower())
-        existing = by_key.get(key)
-        if existing is None or (
-            _is_lockfile_path(r.file_path) and not _is_lockfile_path(existing.file_path)
-        ):
-            by_key[key] = model
-    return sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
+        for r in sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
+    ]
 
 
 @router.post("/api/repos/{owner:path}/{repo}/index")

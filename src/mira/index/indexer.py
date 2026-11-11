@@ -769,7 +769,7 @@ async def _index_conventions(
 def _store_manifest_file(store: IndexStore, path: str, content: str) -> int:
     """Parse one manifest and replace its package rows. An empty parse still
     replaces, so stale entries for the path are dropped. Returns package count."""
-    packages = parse_manifest(path, content)
+    packages = parse_manifest(path, content, for_inventory=True)
     store.replace_manifest_packages(
         path,
         [
@@ -779,6 +779,7 @@ def _store_manifest_file(store: IndexStore, path: str, content: str) -> int:
                 "version": pkg.version,
                 "file_path": pkg.file_path,
                 "is_dev": pkg.is_dev,
+                "scan_eligible": pkg.scan_eligible,
             }
             for pkg in packages
         ],

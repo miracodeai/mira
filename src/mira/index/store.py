@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -192,7 +193,8 @@ CREATE TABLE IF NOT EXISTS package_manifests (
     file_path TEXT NOT NULL DEFAULT '',
     is_dev INTEGER NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0,
-    UNIQUE(name, kind, file_path)
+    scan_eligible INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(name, kind, version, file_path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pkg_manifest_name ON package_manifests(name);
@@ -358,6 +360,7 @@ class PackageManifestRow:
     file_path: str
     is_dev: bool = False
     updated_at: float = 0.0
+    scan_eligible: bool = True
 
 
 @dataclass
@@ -381,6 +384,30 @@ class BlastRadiusEntry:
     summary: str
     affected_symbols: list[str]
     depth: int
+
+
+def _manifest_packages_for_write(
+    file_path: str, packages: list[dict], *, replace_order: bool = False
+) -> list[dict]:
+    """Retain npm lockfile versions and preserve last-value semantics elsewhere."""
+    npm_lockfile = file_path.rsplit("/", 1)[-1] == "package-lock.json"
+    rows: dict[tuple[str, str, str], dict] = {}
+    for pkg in packages:
+        if pkg["file_path"] != file_path:
+            raise ValueError("Manifest package belongs to a different file")
+        kind = pkg["kind"]
+        keep_versions = npm_lockfile and kind == "npm"
+        version = pkg["version"] if keep_versions else ""
+        key = (kind, pkg["name"], version)
+        previous = rows.pop(key, None) if replace_order or keep_versions else rows.get(key)
+        if version and previous is not None and previous.get("scan_eligible", True):
+            pkg = {**pkg, "scan_eligible": True}
+        rows[key] = pkg
+    return list(rows.values())
+
+
+class ManifestPackageMigrationError(RuntimeError):
+    """Package identity validation or migration could not complete safely."""
 
 
 @dataclass(frozen=True)
@@ -433,6 +460,117 @@ class IndexStore(_StoreSharedMixin):
                 "ALTER TABLE learned_rules ADD COLUMN created_by TEXT NOT NULL DEFAULT ''"
             )
         self._conn.commit()
+        try:
+            self._migrate_manifest_package_version_identity()
+        except Exception as exc:
+            self._conn.close()
+            if isinstance(exc, ManifestPackageMigrationError):
+                raise
+            raise ManifestPackageMigrationError(
+                f"Package manifest migration failed: {exc}"
+            ) from exc
+
+    def _migrate_manifest_package_version_identity(self) -> None:
+        def has_legacy_identity(table: str, *, allow_legacy: bool = True) -> bool:
+            legacy = ("name", "kind", "file_path")
+            current = ("name", "kind", "version", "file_path")
+            expected = {legacy, current} if allow_legacy else {current}
+            identities: set[tuple] = set()
+            indexes = self._conn.execute("SELECT * FROM pragma_index_list(?)", (table,)).fetchall()
+            for index in indexes:
+                if not index[2]:
+                    continue
+                keys = self._conn.execute(
+                    'SELECT name, coll FROM pragma_index_xinfo(?) WHERE "key"=1 ORDER BY seqno',
+                    (index[1],),
+                ).fetchall()
+                columns = tuple(row[0] for row in keys)
+                if index[3] == "pk" and columns == ("id",):
+                    continue
+                if (
+                    index[3] != "u"
+                    or index[4]
+                    or columns not in expected
+                    or any(collation != "BINARY" for _, collation in keys)
+                ):
+                    raise ManifestPackageMigrationError("Unsupported package manifest uniqueness")
+                identities.add(columns)
+            if not identities:
+                raise ManifestPackageMigrationError("Unsupported package manifest identity schema")
+            return legacy in identities
+
+        if not has_legacy_identity("package_manifests"):
+            return
+        if self._conn.in_transaction:
+            raise ManifestPackageMigrationError(
+                "Package manifest migration must run outside a transaction"
+            )
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                if not has_legacy_identity("package_manifests"):
+                    return
+                schema = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='package_manifests'"
+                ).fetchone()[0]
+                schema, count = re.subn(
+                    r"UNIQUE\s*\(\s*name\s*,\s*kind\s*,\s*file_path\s*\)",
+                    "UNIQUE(name, kind, version, file_path)",
+                    schema,
+                    flags=re.IGNORECASE,
+                )
+                if count != 1:
+                    raise ManifestPackageMigrationError(
+                        "Unsupported package manifest identity schema"
+                    )
+                schema, count = re.subn(
+                    r'^(CREATE TABLE\s+)(?:"package_manifests"|package_manifests)(?=\s*\()',
+                    r"\1package_manifests_version_identity",
+                    schema,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                if count != 1:
+                    raise ManifestPackageMigrationError("Unsupported package manifest table schema")
+                objects = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE tbl_name='package_manifests' "
+                    "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+                ).fetchall()
+                sequence = self._conn.execute(
+                    "SELECT seq FROM sqlite_sequence WHERE name='package_manifests'"
+                ).fetchone()
+                self._conn.execute(schema)
+                has_legacy_identity("package_manifests_version_identity", allow_legacy=False)
+                self._conn.execute(
+                    "INSERT INTO package_manifests_version_identity SELECT * FROM package_manifests"
+                )
+                self._conn.execute("DROP TABLE package_manifests")
+                self._conn.execute(
+                    "ALTER TABLE package_manifests_version_identity RENAME TO package_manifests"
+                )
+                self._conn.execute(
+                    "ALTER TABLE package_manifests ADD COLUMN scan_eligible "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+                for (sql,) in objects:
+                    self._conn.execute(sql)
+                if sequence is not None:
+                    updated = self._conn.execute(
+                        "UPDATE sqlite_sequence SET seq=MAX(seq, ?) WHERE name='package_manifests'",
+                        sequence,
+                    )
+                    if not updated.rowcount:
+                        self._conn.execute(
+                            "INSERT INTO sqlite_sequence(name, seq) VALUES ('package_manifests', ?)",
+                            sequence,
+                        )
+                if self._conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise ManifestPackageMigrationError(
+                        "Package manifest migration violates foreign keys"
+                    )
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
 
     @classmethod
     def open(  # type: ignore[no-untyped-def]
@@ -452,6 +590,8 @@ class IndexStore(_StoreSharedMixin):
                 from mira.index.pg_store import PgIndexStore
 
                 return PgIndexStore(key_owner, repo, db_url)
+            except ManifestPackageMigrationError:
+                raise
             except Exception as exc:
                 if not allow_fallback:
                     raise
@@ -1530,34 +1670,35 @@ class IndexStore(_StoreSharedMixin):
         to exactly mirror the file. Returns the number of rows inserted.
         """
         now = time.time()
-        self._conn.execute(
-            "DELETE FROM package_manifests WHERE file_path = ?",
-            (file_path,),
-        )
-        if packages:
-            rows = [
-                (
-                    p["name"],
-                    p["kind"],
-                    p["version"],
-                    p["file_path"],
-                    1 if p.get("is_dev") else 0,
-                    now,
-                )
-                for p in packages
-            ]
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO package_manifests "
-                "(name, kind, version, file_path, is_dev, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                rows,
+        rows = [
+            (
+                p["name"],
+                p["kind"],
+                p["version"],
+                file_path,
+                int(bool(p.get("is_dev"))),
+                now,
+                int(p.get("scan_eligible", True)),
             )
-        self._commit_index_write()
+            for p in _manifest_packages_for_write(file_path, packages, replace_order=True)
+        ]
+        with nullcontext() if self._index_write_active else self._conn:
+            self._conn.execute(
+                "DELETE FROM package_manifests WHERE file_path = ?",
+                (file_path,),
+            )
+            if rows:
+                self._conn.executemany(
+                    "INSERT INTO package_manifests "
+                    "(name, kind, version, file_path, is_dev, updated_at, scan_eligible) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
         return len(packages)
 
     def list_manifest_packages(self) -> list[PackageManifestRow]:
         rows = self._conn.execute(
-            "SELECT id, name, kind, version, file_path, is_dev, updated_at "
+            "SELECT id, name, kind, version, file_path, is_dev, updated_at, scan_eligible "
             "FROM package_manifests ORDER BY name COLLATE NOCASE"
         ).fetchall()
         return [
@@ -1569,6 +1710,7 @@ class IndexStore(_StoreSharedMixin):
                 file_path=r[4],
                 is_dev=bool(r[5]),
                 updated_at=r[6],
+                scan_eligible=bool(r[7]),
             )
             for r in rows
         ]
