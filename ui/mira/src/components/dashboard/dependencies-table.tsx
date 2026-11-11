@@ -216,8 +216,8 @@ export function DependenciesTable({
           {(
             [
               ["all", "All", packages.length],
-              ["prod", "Prod", devCounts.prod],
-              ["dev", "Dev", devCounts.dev],
+              ["prod", "Has prod sources", devCounts.prod],
+              ["dev", "Has dev sources", devCounts.dev],
             ] as const
           ).map(([value, label, count]) => {
             const active = devFilter === value
