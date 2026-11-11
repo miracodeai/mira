@@ -1051,7 +1051,7 @@ async def index_diff(
                     if poll:
                         _queue_vulnerability_scan(owner, repo)
                     raise IndexingRecoveryPending(
-                        f"Missing {missing_count} file summaries during incremental indexing"
+                        f"Missing content or summaries for {missing_count} changed files"
                     )
         if poll:
             _queue_vulnerability_scan(owner, repo)
@@ -1105,8 +1105,10 @@ async def _index_diff(
 
     max_file_size = config.index.max_file_size
     file_pairs: list[tuple[str, str]] = []
+    unreadable: set[str] = set()
     for path, content in zip(to_index, contents, strict=False):
         if content is None:
+            unreadable.add(path)
             continue
         if max_file_size and len(content.encode("utf-8")) > max_file_size:
             continue
@@ -1151,8 +1153,8 @@ async def _index_diff(
         owner,
         repo,
     )
-    missing_count = len({path for path, _ in file_pairs} - summarized)
-    return indexed_count, bool(touched), missing_count
+    missing = {path for path, _ in file_pairs} - summarized
+    return indexed_count, bool(touched), len(missing | unreadable)
 
 
 async def _summarize_directories_selective(

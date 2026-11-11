@@ -110,11 +110,16 @@ async def test_delayed_removal_payload_uses_current_tree(index_store, monkeypatc
 
 
 @pytest.mark.parametrize(
-    "existing_file",
-    [True, False],
-    ids=["omitted-existing-file", "empty-batch-for-new-file"],
+    ("existing_file", "unreadable"),
+    [
+        pytest.param(True, False, id="omitted-existing-file"),
+        pytest.param(False, False, id="empty-batch-for-new-file"),
+        pytest.param(True, True, id="unreadable-existing-file"),
+    ],
 )
-async def test_next_push_retries_omitted_summary(index_store, monkeypatch, existing_file):
+async def test_next_push_retries_incomplete_file(
+    index_store, monkeypatch, existing_file, unreadable
+):
     files = current_files()
     omitted_path = "gone.py" if existing_file else "new.py"
     # A large new file gets its own batch, which can return no summaries at all.
@@ -131,7 +136,7 @@ async def test_next_push_retries_omitted_summary(index_store, monkeypatch, exist
     model = AsyncMock(side_effect=responses)
     monkeypatch.setattr(Model, "complete", model)
     status = index_handlers._get_app_db().set_repo_status
-    fetcher = Fetcher(files)
+    fetcher = Fetcher(current_files() if unreadable else files)
 
     await push(fetcher, [], list(files))
 
@@ -141,7 +146,7 @@ async def test_next_push_retries_omitted_summary(index_store, monkeypatch, exist
     status.assert_not_called()
 
     model.reset_mock()
-    await push(fetcher, [], ["keep.py"])
+    await push(Fetcher(files), [], ["keep.py"])
 
     retry_prompt = model.await_args_list[0].args[0][0]["content"]
     assert f"### {omitted_path}\n" in retry_prompt
