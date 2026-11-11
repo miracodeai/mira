@@ -160,6 +160,20 @@ class TestDockerfile:
         assert pkgs[0].version == "20.10-alpine"
         assert pkgs[0].kind == "docker"
 
+    @pytest.mark.parametrize(
+        ("image", "name", "version"),
+        [
+            ("registry.example:5000/team/app", "registry.example:5000/team/app", ""),
+            ("localhost:5000/team/sub/app:1.2", "localhost:5000/team/sub/app", "1.2"),
+            ("[2001:db8::1]:5000/team/app", "[2001:db8::1]:5000/team/app", ""),
+            ("team/app:1.2", "team/app", "1.2"),
+        ],
+    )
+    def test_registry_port_and_image_tag_are_distinct(self, image, name, version):
+        path = "images/Dockerfile"
+        (pkg,) = parse_manifest(path, f"FROM {image} AS base")
+        assert (pkg.name, pkg.version, pkg.kind, pkg.file_path) == (name, version, "docker", path)
+
     def test_multistage_from_as(self):
         content = "FROM python:3.11 AS builder\nFROM alpine:3.18\n"
         pkgs = parse_dockerfile(content, "Dockerfile")
