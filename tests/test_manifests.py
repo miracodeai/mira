@@ -7,6 +7,7 @@ import json
 import pytest
 
 from mira.index.manifests import (
+    ParsedPackage,
     _is_lockfile_path,
     is_manifest,
     parse_composer_json,
@@ -170,6 +171,23 @@ class TestDockerfile:
         pkgs = parse_dockerfile(content, "Dockerfile")
         assert pkgs[0].name == "scratch"
         assert pkgs[0].version == ""
+
+    def test_from_with_platform_options(self):
+        content = (
+            "FROM --platform=linux/amd64 python:3.12 AS builder\n"
+            "  from\t--platform=$BUILDPLATFORM alpine\n"
+            "FROM --platform=${TARGETPLATFORM} scratch AS empty\n"
+        )
+        path = "images/Dockerfile"
+        assert parse_manifest(path, content) == [
+            ParsedPackage("python", "docker", "3.12", path),
+            ParsedPackage("alpine", "docker", "", path),
+            ParsedPackage("scratch", "docker", "", path),
+        ]
+
+    def test_platform_option_without_image_is_ignored(self):
+        content = "FROM --platform=linux/amd64\nFROM --platform=$BUILDPLATFORM AS builder\n"
+        assert parse_manifest("Dockerfile", content) == []
 
 
 class TestComposerJson:

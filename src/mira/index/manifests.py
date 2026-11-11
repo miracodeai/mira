@@ -259,7 +259,9 @@ def parse_go_mod(content: str, file_path: str) -> list[ParsedPackage]:
 
 # ── Dockerfile ──
 
-_DOCKER_FROM = re.compile(r"^\s*FROM\s+([^\s]+)(?:\s+AS\s+\S+)?\s*$", re.IGNORECASE)
+_DOCKER_FROM = re.compile(
+    r"^\s*FROM\s+(?:--platform=\S+\s+)?(?!-)(\S+)(?:\s+AS\s+\S+)?\s*$", re.IGNORECASE
+)
 
 
 def parse_dockerfile(content: str, file_path: str) -> list[ParsedPackage]:
