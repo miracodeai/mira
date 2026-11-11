@@ -122,6 +122,8 @@ class TestGetPrInfo:
     @pytest.mark.asyncio
     async def test_maps_iid_and_branches(self):
         def handler(method, url, **kw):
+            assert method == "GET"
+            assert url.endswith("/projects/g%2Fp/merge_requests/7")
             return _FakeResp(
                 json_data={
                     "title": "Add feature",
@@ -130,6 +132,11 @@ class TestGetPrInfo:
                     "source_branch": "feat",
                     "web_url": "https://gitlab.com/g/p/-/merge_requests/7",
                     "sha": "deadbeef",
+                    "author": {
+                        "username": "example-author",
+                        "name": "Example Display Name",
+                        "avatar_url": "https://example.invalid/avatar.png",
+                    },
                 }
             )
 
@@ -141,6 +148,42 @@ class TestGetPrInfo:
         assert info.base_branch == "main"
         assert info.head_branch == "feat"
         assert info.head_sha == "deadbeef"
+        assert info.author == "example-author"
+        assert info.author_avatar_url == "https://example.invalid/avatar.png"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("fields", "expected_username"),
+        [
+            pytest.param({}, "", id="missing-author"),
+            pytest.param({"author": None}, "", id="null-author"),
+            pytest.param({"author": {}}, "", id="empty-author"),
+            pytest.param({"author": "invalid"}, "", id="non-object-author"),
+            pytest.param(
+                {"author": {"username": "example-author"}}, "example-author", id="no-avatar"
+            ),
+            pytest.param(
+                {"author": {"username": "example-author", "avatar_url": None}},
+                "example-author",
+                id="null-avatar",
+            ),
+            pytest.param(
+                {"author": {"username": ["invalid"], "avatar_url": {"invalid": True}}},
+                "",
+                id="non-string-fields",
+            ),
+        ],
+    )
+    async def test_defaults_incomplete_author_metadata(self, fields, expected_username):
+        def handler(method, url, **kw):
+            return _FakeResp(json_data={"title": "Example MR", **fields})
+
+        with _patch(handler):
+            info = await GitLabProvider("tok").get_pr_info("g/p!7")
+
+        assert info.title == "Example MR"
+        assert info.author == expected_username
+        assert info.author_avatar_url == ""
 
 
 class TestPostReview:

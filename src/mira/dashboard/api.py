@@ -960,6 +960,8 @@ def get_contributor(login: str, request: Request, period: str = "") -> Contribut
     q = {"reviews": 0, "blockers": 0, "warnings": 0, "suggestions": 0}
     accepted = rejected = 0
     for repo_record in _app_db.list_repos():
+        if repo_record.platform != contributor.provider:
+            continue
         try:
             store = IndexStore.open(
                 repo_record.owner, repo_record.repo, platform=repo_record.platform
