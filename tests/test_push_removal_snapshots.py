@@ -109,6 +109,68 @@ async def test_delayed_removal_payload_uses_current_tree(index_store, monkeypatc
     assert fetcher.refs == [CURRENT, CURRENT]
 
 
+@pytest.mark.parametrize(
+    "existing_file",
+    [True, False],
+    ids=["omitted-existing-file", "empty-batch-for-new-file"],
+)
+async def test_next_push_retries_omitted_summary(index_store, monkeypatch, existing_file):
+    files = current_files()
+    omitted_path = "gone.py" if existing_file else "new.py"
+    # A large new file gets its own batch, which can return no summaries at all.
+    files[omitted_path] = "value = 2\n" + "# padding\n" * (80 if existing_file else 600)
+    old_summary = index_store.get_summary(omitted_path)
+    responses = [
+        '{"files":[{"path":"keep.py","summary":"updated keep"}]}',
+        '{"summary":"Updated root"}',
+        json.dumps({"files": [{"path": omitted_path, "summary": "recovered file"}]}),
+        '{"directories":[{"path":"(root)","summary":"Reconciled root"}]}',
+    ]
+    if not existing_file:
+        responses.insert(0, '{"files":[]}')
+    model = AsyncMock(side_effect=responses)
+    monkeypatch.setattr(Model, "complete", model)
+    status = index_handlers._get_app_db().set_repo_status
+    fetcher = Fetcher(files)
+
+    await push(fetcher, [], list(files))
+
+    successful = index_store.get_summary("keep.py")
+    assert successful.summary == "updated keep"
+    assert index_store.get_summary(omitted_path) == old_summary
+    status.assert_not_called()
+
+    model.reset_mock()
+    await push(fetcher, [], ["keep.py"])
+
+    retry_prompt = model.await_args_list[0].args[0][0]["content"]
+    assert f"### {omitted_path}\n" in retry_prompt
+    assert "### keep.py\n" not in retry_prompt
+    assert index_store.get_summary("keep.py") == successful
+    assert index_store.get_summary(omitted_path).summary == "recovered file"
+    status.assert_called_once_with(
+        "example", "repo", "ready", files_indexed=2, bump_last_indexed=True, platform="gitlab"
+    )
+    assert not index_store.claim_index_run().needs_reconciliation
+
+
+async def test_skipped_files_do_not_leave_push_recovery_pending(index_store, monkeypatch):
+    config = MiraConfig()
+    config.index.max_file_size = 1000
+    monkeypatch.setattr(index_handlers, "load_config", lambda: config)
+    files = {**current_files(), "image.svg": "<svg/>", "oversized.py": "# padding\n" * 200}
+
+    await push(Fetcher(files), [], list(files))
+
+    assert index_store.get_summary("keep.py").summary == "current"
+    assert index_store.get_summary("image.svg") is None
+    assert index_store.get_summary("oversized.py") is None
+    assert not index_store.claim_index_run().needs_reconciliation
+    index_handlers._get_app_db().set_repo_status.assert_called_once_with(
+        "example", "repo", "ready", files_indexed=2, bump_last_indexed=True, platform="gitlab"
+    )
+
+
 @pytest.mark.parametrize("removed_count", [1, 51])
 async def test_incomplete_tree_indexes_changes_and_keeps_recovery_pending(
     index_store, monkeypatch, removed_count

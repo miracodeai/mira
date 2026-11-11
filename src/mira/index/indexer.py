@@ -1034,7 +1034,7 @@ async def index_diff(
                 )
                 poll = True
             else:
-                count, poll = await _index_diff(
+                count, poll, missing_count = await _index_diff(
                     owner,
                     repo,
                     config,
@@ -1046,6 +1046,13 @@ async def index_diff(
                     changed_paths,
                     None if changes_only else removed_paths,
                 )
+                if missing_count and not changes_only:
+                    # Manifest writes are independent of file summaries and already committed.
+                    if poll:
+                        _queue_vulnerability_scan(owner, repo)
+                    raise IndexingRecoveryPending(
+                        f"Missing {missing_count} file summaries during incremental indexing"
+                    )
         if poll:
             _queue_vulnerability_scan(owner, repo)
         return count
@@ -1065,7 +1072,7 @@ async def _index_diff(
     run: IndexRun,
     changed_paths: list[str] | None,
     removed_paths: list[str] | None,
-) -> tuple[int, bool]:
+) -> tuple[int, bool, int]:
     # Remove deleted files
     if removed_paths:
         with store.index_write(run):
@@ -1087,7 +1094,7 @@ async def _index_diff(
     # Filter to indexable files
     to_index = [p for p in changed_paths or [] if _should_index(p, config.filter.exclude_patterns)]
     if not to_index:
-        return 0, bool(touched)
+        return 0, bool(touched), 0
 
     # Fetch content
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
@@ -1108,6 +1115,7 @@ async def _index_diff(
     # Summarize changed files
     llm_sem = asyncio.Semaphore(config.index.llm_concurrency)
     indexed_count = 0
+    summarized: set[str] = set()
 
     if file_pairs:
         batches = _build_batches(file_pairs)
@@ -1122,6 +1130,7 @@ async def _index_diff(
                         summary = _build_file_summary(path, content, data)
                         store.upsert_summary(summary)
                 indexed_count += len(results)
+                summarized.update(path for path, _, _ in results)
 
     # Re-generate directory summaries for affected parent dirs
     affected_dirs: set[str] = set()
@@ -1142,7 +1151,8 @@ async def _index_diff(
         owner,
         repo,
     )
-    return indexed_count, bool(touched)
+    missing_count = len({path for path, _ in file_pairs} - summarized)
+    return indexed_count, bool(touched), missing_count
 
 
 async def _summarize_directories_selective(
