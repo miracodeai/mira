@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 
 from mira.config import MiraConfig
@@ -84,9 +85,9 @@ def current_files():
     return {"keep.py": "def current():\n    return 2\n" + "# padding\n" * 80}
 
 
-async def push(fetcher, removed):
+async def push(fetcher, removed, changed=None):
     await index_handlers.run_incremental_index(
-        "example", "repo", fetcher, [], removed, "main", platform="gitlab"
+        "example", "repo", fetcher, changed or [], removed, "main", platform="gitlab"
     )
 
 
@@ -108,10 +109,51 @@ async def test_delayed_removal_payload_uses_current_tree(index_store, monkeypatc
     assert fetcher.refs == [CURRENT, CURRENT]
 
 
-async def test_incomplete_tree_preserves_index_and_keeps_recovery_pending(index_store):
-    with pytest.raises(IncompleteTreeError, match="Incomplete synthetic tree"):
-        await push(Fetcher(None), ["keep.py"])
+@pytest.mark.parametrize("removed_count", [1, 51])
+async def test_incomplete_tree_indexes_changes_and_keeps_recovery_pending(
+    index_store, monkeypatch, removed_count
+):
+    fetcher = Fetcher(current_files())
+    fetcher.repo_tree = AsyncMock(side_effect=IncompleteTreeError("Incomplete synthetic tree"))
+    removed = ["gone.py", *(f"removed-{n}.py" for n in range(removed_count - 1))]
+    await push(fetcher, removed, ["keep.py"])
     assert index_store.all_paths() == {"keep.py", "gone.py"}
+    assert index_store.get_summary("keep.py").summary == "current"
+    assert fetcher.refs == [CURRENT]
+    assert index_store.claim_index_run().needs_reconciliation
+    index_handlers._get_app_db().set_repo_status.assert_not_called()
+
+    # A subsequent changed-only push still makes progress while the tree is unavailable.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Model,
+            "complete",
+            AsyncMock(return_value='{"files":[{"path":"keep.py","summary":"later"}]}'),
+        )
+        await push(fetcher, [], ["keep.py"])
+    assert index_store.get_summary("keep.py").summary == "later"
+    assert index_store.all_paths() == {"keep.py", "gone.py"}
+    assert index_store.claim_index_run().needs_reconciliation
+    index_handlers._get_app_db().set_repo_status.assert_not_called()
+
+    # When tree acquisition works again, recovery removes the absent path.
+    await push(Fetcher(current_files()), [], ["keep.py"])
+    assert index_store.all_paths() == {"keep.py"}
+    assert not index_store.claim_index_run().needs_reconciliation
+
+
+async def test_branch_lookup_http_error_still_indexes_changed_files(index_store):
+    request = httpx.Request("GET", "https://provider.example.invalid/branch")
+    fetcher = Fetcher(current_files())
+    fetcher.branch_head = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "Unavailable", request=request, response=httpx.Response(503, request=request)
+        )
+    )
+    await push(fetcher, ["gone.py"], ["keep.py"])
+    assert index_store.all_paths() == {"keep.py", "gone.py"}
+    assert index_store.get_summary("keep.py").summary == "current"
+    assert fetcher.refs == ["main"]
     assert index_store.claim_index_run().needs_reconciliation
 
 
