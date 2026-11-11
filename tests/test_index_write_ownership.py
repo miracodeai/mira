@@ -6,13 +6,12 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from threading import Barrier
-from types import SimpleNamespace
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 import pytest
 
-from mira.config import MiraConfig
+from mira.config import LLMConfig, MiraConfig
 from mira.index import pg_store
 from mira.index.indexer import IndexingRecoveryPending, index_diff, index_repo
 from mira.index.pg_store import PgIndexStore
@@ -88,7 +87,7 @@ class Fetcher:
 
 
 class Model:
-    config = SimpleNamespace(model="synthetic-offline-model")
+    config = LLMConfig(model="synthetic-offline-model")
 
     def __init__(self, version, paths, pause=None, *, directory_pause=None):
         self.version = version
