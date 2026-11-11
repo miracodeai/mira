@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from mira.config import load_config
 from mira.index.indexer import IndexingRecoveryPending, index_diff, index_repo
 from mira.index.store import IndexingSuperseded, IndexStore
 from mira.llm import create_llm
+from mira.platforms.fetch import RepoFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def _get_app_db():
 async def run_incremental_index(
     owner: str,
     repo: str,
-    fetcher: Any,
+    fetcher: RepoFetcher,
     changed_paths: list[str],
     removed_paths: list[str],
     default_branch: str,
@@ -46,6 +46,11 @@ async def run_incremental_index(
     try:
         run = store.claim_index_run()
         total_affected = len(changed_paths) + len(removed_paths)
+        ref = default_branch
+        if removed_paths:
+            # A delayed delivery can describe an older tree. Resolve the current
+            # head after claiming so a newer run can fence this snapshot's writes.
+            ref = await fetcher.branch_head(owner, repo, default_branch)
         if total_affected > _INCREMENTAL_FILE_CAP:
             logger.info(
                 "Push to %s/%s touched %d files (cap=%d), running full re-index",
@@ -60,12 +65,18 @@ async def run_incremental_index(
                 config=config,
                 store=store,
                 llm=llm,
-                branch=default_branch,
+                branch=ref,
                 fetcher=fetcher,
                 run=run,
                 platform=platform,
             )
         else:
+            if removed_paths and not run.needs_reconciliation:
+                tree = set(await fetcher.repo_tree(owner, repo, ref))
+                candidates = set(removed_paths)
+                removed = candidates - tree
+                changed_paths = sorted((set(changed_paths) | (candidates & tree)) - removed)
+                removed_paths = sorted(removed)
             count = await index_diff(
                 owner=owner,
                 repo=repo,
@@ -74,7 +85,7 @@ async def run_incremental_index(
                 llm=llm,
                 changed_paths=changed_paths,
                 removed_paths=removed_paths,
-                branch=default_branch,
+                branch=ref,
                 fetcher=fetcher,
                 run=run,
                 platform=platform,

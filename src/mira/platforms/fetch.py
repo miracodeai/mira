@@ -90,8 +90,28 @@ def _bitbucket_tree_paths(entries: object) -> tuple[list[str], set[str]]:
     return files, paths
 
 
+async def _fetch_branch(url: str, headers: dict[str, str]) -> object:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise IncompleteTreeError("Invalid branch response JSON") from exc
+
+
+def _branch_sha(data: object, *keys: str) -> str:
+    for key in keys:
+        data = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(data, str) or not _COMMIT_HASH.fullmatch(data) or data == "0" * 40:
+        raise IncompleteTreeError("Branch response did not identify an immutable snapshot")
+    return data
+
+
 class RepoFetcher(Protocol):
     async def default_branch(self, owner: str, repo: str) -> str: ...
+
+    async def branch_head(self, owner: str, repo: str, branch: str) -> str: ...
 
     async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]: ...
 
@@ -159,6 +179,7 @@ class GitHubRepoFetcher:
     def __init__(self, token: str, api_url: str = "https://api.github.com") -> None:
         self._token = token
         self._api = api_url.rstrip("/")
+        self._snapshot_trees: dict[tuple[str, str, str], str] = {}
 
     def _headers(self, accept: str = "application/vnd.github+json") -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}", "Accept": accept}
@@ -174,8 +195,19 @@ class GitHubRepoFetcher:
             logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
             return "main"
 
+    async def branch_head(self, owner: str, repo: str, branch: str) -> str:
+        url = f"{self._api}/repos/{owner}/{repo}/branches/{quote(branch, safe='')}"
+        data = await _fetch_branch(url, self._headers())
+        commit = _branch_sha(data, "commit", "sha")
+        # Content endpoints take the commit SHA. GitHub's tree API takes the tree SHA.
+        self._snapshot_trees[owner, repo, commit] = _branch_sha(
+            data, "commit", "commit", "tree", "sha"
+        )
+        return commit
+
     async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
-        url = f"{self._api}/repos/{owner}/{repo}/git/trees/{quote(branch, safe='')}?recursive=1"
+        tree_ref = self._snapshot_trees.get((owner, repo, branch), branch)
+        url = f"{self._api}/repos/{owner}/{repo}/git/trees/{quote(tree_ref, safe='')}?recursive=1"
         async with httpx.AsyncClient() as client:
             resp = await client.get(url, headers=self._headers(), timeout=30)
             # GitHub returns 409 (and sometimes 404) for an empty repo.
@@ -269,6 +301,10 @@ class GitLabRepoFetcher:
         except Exception as exc:
             logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
             return "main"
+
+    async def branch_head(self, owner: str, repo: str, branch: str) -> str:
+        url = f"{self._project(owner, repo)}/repository/branches/{quote(branch, safe='')}"
+        return _branch_sha(await _fetch_branch(url, self._headers()), "commit", "id")
 
     async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
         # Keyset pagination via the Link header; recursive lists the whole tree.
@@ -407,6 +443,10 @@ class ForgejoRepoFetcher:
             logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
             return "main"
 
+    async def branch_head(self, owner: str, repo: str, branch: str) -> str:
+        url = f"{self._repo(owner, repo)}/branches/{quote(branch, safe='')}"
+        return _branch_sha(await _fetch_branch(url, self._headers()), "commit", "id")
+
     async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
         url = f"{self._repo(owner, repo)}/git/trees/{quote(branch, safe='')}?recursive=true&per_page=100"
         paths: list[str] = []
@@ -534,6 +574,10 @@ class BitbucketRepoFetcher:
         except Exception as exc:
             logger.warning("Failed to fetch default branch for %s/%s: %s", owner, repo, exc)
             return "main"
+
+    async def branch_head(self, owner: str, repo: str, branch: str) -> str:
+        url = f"{self._repo(owner, repo)}/refs/branches/{quote(branch, safe='')}?fields=target.hash"
+        return _branch_sha(await _fetch_branch(url, self._headers()), "target", "hash")
 
     async def _commit_for(self, owner: str, repo: str, ref: str) -> str:
         """Resolve a branch or tag to its commit hash.
