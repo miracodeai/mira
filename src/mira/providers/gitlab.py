@@ -151,6 +151,11 @@ class GitLabProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to fetch MR info: {e}") from e
+        author = mr.get("author")
+        if not isinstance(author, dict):
+            author = {}
+        username = author.get("username")
+        avatar_url = author.get("avatar_url")
         return PRInfo(
             title=mr.get("title") or "",
             description=mr.get("description") or "",
@@ -161,6 +166,8 @@ class GitLabProvider(BaseProvider):
             owner=owner,
             repo=repo,
             head_sha=mr.get("sha") or "",
+            author=username if isinstance(username, str) else "",
+            author_avatar_url=avatar_url if isinstance(avatar_url, str) else "",
             platform="gitlab",
         )
 

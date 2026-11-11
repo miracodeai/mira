@@ -909,8 +909,11 @@ async def refresh_contributors_repo(
 
 @router.get("/api/contributors/{login}", response_model=ContributorDetailModel)
 def get_contributor(login: str, request: Request, period: str = "") -> ContributorDetailModel:
-    """One contributor's aggregated stats, 365-day heatmap, per-repo breakdown,
-    and Mira review-quality signal (the quality fan-out mirrors /api/stats). Admin only."""
+    """A GitHub contributor's stats, 365-day heatmap, and per-repo breakdown.
+
+    Review quality is aggregated across GitHub repositories for this login.
+    Admin only.
+    """
     _require_admin(request)
     contributor = _app_db.get_contributor_by_login("github", login)
     if contributor is None:
@@ -960,6 +963,8 @@ def get_contributor(login: str, request: Request, period: str = "") -> Contribut
     q = {"reviews": 0, "blockers": 0, "warnings": 0, "suggestions": 0}
     accepted = rejected = 0
     for repo_record in _app_db.list_repos():
+        if repo_record.platform != contributor.provider:
+            continue
         try:
             store = IndexStore.open(
                 repo_record.owner, repo_record.repo, platform=repo_record.platform
