@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -410,12 +410,14 @@ async def index_repo(
     run: IndexRun | None = None,
     reset: bool = False,
     platform: str = "github",
+    tree_paths: list[str] | None = None,
 ) -> int:
     """Index a full repository. Returns number of files indexed.
 
     Args:
         full: If True, re-index all files regardless of content hash.
         branch: Branch to index from.
+        tree_paths: Complete tree already fetched for the supplied branch or revision.
         cancel_check: Optional zero-arg callable returning True to request
             early termination. Checked between summarization batches. Raises
             ``IndexingCancelled`` on cancel so callers can distinguish a
@@ -450,6 +452,7 @@ async def index_repo(
                 reset=reset,
                 cancel_check=cancel_check,
                 platform=platform,
+                tree_paths=tree_paths,
             )
         _queue_vulnerability_scan(owner, repo)
         return count
@@ -472,13 +475,15 @@ async def _index_repo(
     reset: bool = False,
     cancel_check: Callable[[], bool] | None = None,
     platform: str = "github",
+    tree_paths: list[str] | None = None,
 ) -> int:
     # Auto-detect default branch if not specified
     if branch is None:
         branch = await fetcher.default_branch(owner, repo)
 
     # Fetch repo tree
-    tree_paths = await fetcher.repo_tree(owner, repo, branch)
+    if tree_paths is None:
+        tree_paths = await fetcher.repo_tree(owner, repo, branch)
     indexable = [p for p in tree_paths if _should_index(p, config.filter.exclude_patterns)]
     logger.info(
         "Found %d indexable files in %s/%s (out of %d total)",
@@ -1000,8 +1005,13 @@ async def index_diff(
     *,
     run: IndexRun | None = None,
     platform: str = "github",
+    changes_only: bool = False,
 ) -> int:
-    """Incremental index for changed files. Returns number of files re-indexed."""
+    """Index a diff and return the number of files re-indexed.
+
+    With changes_only, apply changed paths under the write guard and leave
+    reconciliation pending. Use this when a complete tree is unavailable.
+    """
     if config is None:
         config = load_config()
     if llm is None:
@@ -1016,8 +1026,8 @@ async def index_diff(
 
     try:
         run = run if run is not None else store.claim_index_run()
-        with _complete_index_run(store, run):
-            if run.needs_reconciliation:
+        with nullcontext() if changes_only else _complete_index_run(store, run):
+            if run.needs_reconciliation and not changes_only:
                 logger.info("Reconciling unfinished index for %s/%s", owner, repo)
                 count = await _index_repo(
                     owner, repo, config, store, llm, fetcher, branch, run, platform=platform
@@ -1034,7 +1044,7 @@ async def index_diff(
                     branch,
                     run,
                     changed_paths,
-                    removed_paths,
+                    None if changes_only else removed_paths,
                 )
         if poll:
             _queue_vulnerability_scan(owner, repo)

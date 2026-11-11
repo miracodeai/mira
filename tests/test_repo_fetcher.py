@@ -12,6 +12,7 @@ import pytest
 
 from mira.platforms import fetch
 from mira.platforms.fetch import (
+    BitbucketRepoFetcher,
     EmptyRepoError,
     ForgejoRepoFetcher,
     GitHubRepoFetcher,
@@ -20,6 +21,62 @@ from mira.platforms.fetch import (
     _strip_tarball,
     make_fetcher,
 )
+
+
+@pytest.mark.parametrize(
+    ("fetcher_type", "suffix", "payload"),
+    [
+        (
+            GitHubRepoFetcher,
+            b"/branches/release%2Fstable",
+            {"commit": {"sha": "a" * 40, "commit": {"tree": {"sha": "b" * 40}}}},
+        ),
+        (GitLabRepoFetcher, b"/repository/branches/release%2Fstable", {"commit": {"id": "a" * 40}}),
+        (ForgejoRepoFetcher, b"/branches/release%2Fstable", {"commit": {"id": "a" * 40}}),
+        (
+            BitbucketRepoFetcher,
+            b"/refs/branches/release%2Fstable?fields=target.hash",
+            {"target": {"hash": "a" * 40}},
+        ),
+    ],
+)
+async def test_branch_head_pins_an_encoded_branch(monkeypatch, fetcher_type, suffix, payload):
+    requests = []
+
+    def serve(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, json=payload)
+        return httpx.Response(
+            200, json={"truncated": False, "tree": [{"type": "blob", "path": "keep.py"}]}
+        )
+
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: client_type(transport=httpx.MockTransport(serve), **kwargs),
+    )
+    fetcher = fetcher_type("synthetic", "https://provider.example.invalid/api")
+    commit = await fetcher.branch_head("example", "repo", "release/stable")
+    assert commit == "a" * 40
+    assert requests[0].url.raw_path.endswith(suffix)
+    if fetcher_type is GitHubRepoFetcher:
+        assert await fetcher.repo_tree("example", "repo", commit) == ["keep.py"]
+        assert requests[1].url.path.endswith("/git/trees/" + "b" * 40)
+
+
+@pytest.mark.parametrize("commit", [None, "main", "0" * 40])
+async def test_branch_head_rejects_unusable_sha(monkeypatch, commit):
+    client_type = httpx.AsyncClient
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"commit": {"id": commit}})
+    )
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: client_type(transport=transport, **kwargs)
+    )
+    with pytest.raises(IncompleteTreeError, match="immutable snapshot"):
+        await GitLabRepoFetcher("synthetic").branch_head("example", "repo", "main")
 
 
 def _make_targz(prefix: str, files: dict[str, str]) -> bytes:
