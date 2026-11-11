@@ -195,6 +195,20 @@ filter:
 
 → Full schema and every key: [Configuration docs](https://docs.miracode.ai/configuration).
 
+For code-index summaries over an OpenAI-compatible Chat or Responses endpoint,
+`llm.indexing_temperature` defaults to `0.0`. Set it to `omit` to leave the
+temperature field out of requests, or to a finite nonnegative number supported
+by your endpoint. The dashboard's **Indexing Temperature** setting overrides
+config; **Inherit deployment config** clears that override. This does not change
+reviewer temperature defaults or reasoning effort. Existing reasoning policy may
+still omit a numeric temperature. Bedrock uses `0.0` for index summaries.
+Codex CLI manages sampling itself.
+
+```yaml
+llm:
+  indexing_temperature: omit
+```
+
 ## Development
 
 ```bash

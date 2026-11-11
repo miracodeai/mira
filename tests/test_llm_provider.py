@@ -12,6 +12,7 @@ import pytest
 
 from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
+from mira.llm import create_llm
 from mira.llm.provider import LLMProvider
 from mira.llm.utils import _JSON_HINT
 
@@ -75,6 +76,272 @@ class TestLLMProviderInit:
         assert provider.config.model == "anthropic/claude-sonnet-4-6"
         assert provider.total_prompt_tokens == 0
         assert provider.total_completion_tokens == 0
+
+
+class TestPerCallTemperatureOmission:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("retry_kind", ["reasoning_rejected", "budget_exhausted"])
+    @pytest.mark.parametrize("omit_temperature", [False, True])
+    async def test_chat_retry_preserves_temperature_policy(
+        self, monkeypatch, retry_kind, omit_temperature
+    ):
+        provider = LLMProvider(
+            LLMConfig(model="test-model", api_key_env="", reasoning_effort="low", max_tokens=4096)
+        )
+        provider.profile = {
+            **provider.profile,
+            "reasoning_on_payload": {"thinking": {"type": "enabled"}},
+            "reasoning_off_payload": {"thinking": {"type": "disabled"}, "temperature": 0.7},
+        }
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                if retry_kind == "reasoning_rejected":
+                    return httpx.Response(400, json={"error": "reasoning unsupported"})
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                        "usage": {
+                            "completion_tokens": 4096,
+                            "completion_tokens_details": {"reasoning_tokens": 4000},
+                        },
+                    },
+                )
+            return httpx.Response(200, json=_make_response_json("ok"))
+
+        client_class = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs),
+        )
+        assert (
+            await provider.complete(
+                [{"role": "user", "content": "Hello"}],
+                temperature=0.3,
+                omit_temperature=omit_temperature,
+            )
+            == "ok"
+        )
+        initial, retried = requests
+        assert initial["reasoning_effort"] == "low"
+        assert "temperature" not in initial
+        assert "reasoning_effort" not in retried
+        assert retried["thinking"] == {"type": "disabled"}
+        if omit_temperature:
+            assert "temperature" not in retried
+        else:
+            assert retried["temperature"] == (0.3 if retry_kind == "reasoning_rejected" else 0.7)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_style", ["chat", "responses"])
+    @pytest.mark.parametrize("effort", [None, "off", "low"])
+    async def test_profile_cannot_reinsert_explicitly_omitted_temperature(
+        self, tmp_path, monkeypatch, api_style, effort
+    ):
+        from mira.llm import provider_profiles
+
+        off_payload = (
+            {"thinking": {"type": "disabled"}}
+            if api_style == "chat"
+            else {"reasoning": {"effort": "none"}}
+        )
+        off_key = (
+            "reasoning_off_payload" if api_style == "chat" else "reasoning_off_payload_responses"
+        )
+        profile_path = tmp_path / "providers.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "fixture": {
+                        "base_url": "https://fixture.invalid/v1",
+                        off_key: {**off_payload, "temperature": 0.7},
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv("MIRA_PROVIDERS_JSON_PATH", str(profile_path))
+        seen = []
+
+        def respond(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "ok"}],
+                        }
+                    ],
+                },
+            )
+
+        client_class = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kw: client_class(transport=httpx.MockTransport(respond), **kw),
+        )
+        provider_profiles._load.cache_clear()
+        try:
+            config = LLMConfig(
+                model="test-model",
+                base_url="https://fixture.invalid/v1",
+                api_key_env="",
+                api_style=api_style,
+                reasoning_effort=effort,
+            )
+            provider = create_llm(config)
+            await provider.complete([{"role": "user", "content": "Hello"}], omit_temperature=True)
+            await provider.complete([{"role": "user", "content": "Hello"}], temperature=0.3)
+            assert "temperature" not in seen[0]
+            if effort == "low":
+                assert all("temperature" not in body for body in seen)
+                for body in seen:
+                    assert (
+                        body.get("reasoning_effort") == "low"
+                        if api_style == "chat"
+                        else body.get("reasoning") == {"effort": "low"}
+                    )
+            else:
+                assert all(all(body.get(k) == v for k, v in off_payload.items()) for body in seen)
+                assert seen[1]["temperature"] == 0.7
+            assert config.reasoning_effort == effort
+        finally:
+            provider_profiles._load.cache_clear()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_style", ["chat", "responses"])
+    @pytest.mark.parametrize("effort", [None, "low"])
+    async def test_omission_does_not_leak_into_other_calls_or_change_effort(
+        self, monkeypatch, api_style, effort
+    ):
+        seen = []
+
+        def respond(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "ok"}],
+                        }
+                    ],
+                },
+            )
+
+        client_class = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kw: client_class(transport=httpx.MockTransport(respond), **kw),
+        )
+        config = LLMConfig(
+            model="test-model",
+            api_style=api_style,
+            api_key_env="",
+            reasoning_effort=effort,
+            indexing_temperature="omit",
+        )
+        provider = create_llm(config)
+        messages = [{"role": "user", "content": "Hello"}]
+        await provider.complete(messages, omit_temperature=True)
+        await provider.complete(messages)
+        await provider.complete(messages, temperature=0.3)
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_review",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        await provider.complete_with_tools(messages, tools)
+        await provider.complete_agentic(messages, tools)
+        assert "temperature" not in seen[0]
+        if effort:
+            for body in seen:
+                assert "temperature" not in body
+                assert (
+                    body.get("reasoning_effort") == "low"
+                    if api_style == "chat"
+                    else body.get("reasoning") == {"effort": "low"}
+                )
+        else:
+            assert [body["temperature"] for body in seen[1:]] == [0.2, 0.3, 0.2, 0.2]
+        assert config.temperature == 0.2
+        assert config.reasoning_effort == effort
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_style", ["chat", "responses"])
+    @pytest.mark.parametrize("status", [400, 503])
+    async def test_omission_survives_existing_retry_and_fallback_rules(
+        self, monkeypatch, api_style, status
+    ):
+        seen = []
+
+        def respond(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            if body["model"] == "primary":
+                return httpx.Response(status, json={"error": {"message": "synthetic failure"}})
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "ok"}],
+                        }
+                    ],
+                },
+            )
+
+        client_class = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kw: client_class(transport=httpx.MockTransport(respond), **kw),
+        )
+        provider = create_llm(
+            LLMConfig(
+                model="primary",
+                fallback_model="backup",
+                api_style=api_style,
+                api_key_env="",
+                max_retries=2,
+                retry_min_wait=0,
+                retry_max_wait=0,
+            )
+        )
+        if status == 400:
+            with pytest.raises(NonRetriableLLMError):
+                await provider.complete(
+                    [{"role": "user", "content": "Hello"}], omit_temperature=True
+                )
+            assert [body["model"] for body in seen] == ["primary"]
+        else:
+            assert (
+                await provider.complete(
+                    [{"role": "user", "content": "Hello"}], omit_temperature=True
+                )
+                == "ok"
+            )
+            assert [body["model"] for body in seen] == ["primary", "primary", "backup"]
+        assert all("temperature" not in body for body in seen)
 
 
 class TestComplete:

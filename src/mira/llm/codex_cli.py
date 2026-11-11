@@ -283,6 +283,8 @@ class CodexCLIProvider:
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         prompt = self._messages_prompt(messages)
         if json_mode:

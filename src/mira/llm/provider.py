@@ -50,6 +50,8 @@ class LLMProvider(OpenAICompatibleProvider):
         json_mode: bool,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         """Make a single LLM call with retries against the /chat/completions endpoint.
 
@@ -74,6 +76,8 @@ class LLMProvider(OpenAICompatibleProvider):
         self._cap_output_budget(body)
         self._apply_reasoning(body)
         self._apply_prompt_caching(body)
+        if omit_temperature:
+            body.pop("temperature", None)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
@@ -87,9 +91,12 @@ class LLMProvider(OpenAICompatibleProvider):
                 and "reasoning" in resp.text.lower()
             ):
                 self._drop_rejected_reasoning(body, body["model"])
-                body["temperature"] = (
-                    temperature if temperature is not None else self.config.temperature
-                )
+                if omit_temperature:
+                    body.pop("temperature", None)
+                else:
+                    body["temperature"] = (
+                        temperature if temperature is not None else self.config.temperature
+                    )
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
@@ -99,6 +106,8 @@ class LLMProvider(OpenAICompatibleProvider):
             # the config default is raised when the model ran out of room.
             retry_body = self._budget_exhausted_retry(body, data) if max_tokens is None else None
             if retry_body is not None:
+                if omit_temperature:
+                    retry_body.pop("temperature", None)
                 self._account_usage(data)
                 resp = await client.post(
                     self._chat_url(), headers=self._build_headers(), json=retry_body

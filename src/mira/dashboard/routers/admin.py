@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import nullcontext
 
@@ -215,9 +216,13 @@ async def get_models() -> ModelsResponse:
         get_review_thinking_mode,
         get_security_model,
         resolve_api_style,
+        resolve_indexing_temperature,
     )
 
     config = load_config()
+    indexing_temperature, temperature_source = resolve_indexing_temperature(
+        config.llm, _api._app_db.get_setting("indexing_temperature")
+    )
     db_indexing = _api._app_db.get_setting("indexing_model")
     db_review = _api._app_db.get_setting("review_model")
     db_security = _api._app_db.get_setting("security_model")
@@ -234,6 +239,9 @@ async def get_models() -> ModelsResponse:
 
     return ModelsResponse(
         indexing_model=indexing,
+        indexing_temperature=indexing_temperature,
+        indexing_temperature_source=temperature_source,
+        config_indexing_temperature=config.llm.indexing_temperature,
         review_model=review,
         security_model=security,
         backend=backend,
@@ -335,6 +343,12 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     _api._app_db.set_setting("indexing_model", body.indexing_model.strip())
     _api._app_db.set_setting("review_model", body.review_model.strip())
     _api._app_db.set_setting("security_model", body.security_model.strip())
+    # Older clients omit this field; null explicitly clears the override.
+    if "indexing_temperature" in body.model_fields_set:
+        _api._app_db.set_setting(
+            "indexing_temperature",
+            "" if body.indexing_temperature is None else json.dumps(body.indexing_temperature),
+        )
     # Stored as chosen, "off" included: the form shows the resolved mode, so
     # whatever comes back is the admin's decision and must win over the
     # config default ("medium"). "" (not None — the column is NOT NULL) clears

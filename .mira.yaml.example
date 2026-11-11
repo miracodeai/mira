@@ -10,6 +10,11 @@ llm:
   # Fallback model if primary fails
   fallback_model: "openai/gpt-4o-mini"
   temperature: 0.2
+  # Code-index summaries over Chat/Responses only: 0.0 (default), omit, or a
+  # finite nonnegative number supported by your endpoint. Reviewer defaults
+  # and requested reasoning effort stay unchanged. Dashboard overrides win.
+  # indexing_temperature: 0.0
+
   # Output budget per call. Thinking tokens count against it on most
   # providers; an endpoint that rejects the budget is retried at 4096.
   max_tokens: 16384
