@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from click.testing import CliRunner
 
 from mira.cli import main
 from mira.core.git_snapshot import GitSnapshot
+from mira.exceptions import MiraError
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -156,6 +158,37 @@ async def test_snapshot_reads_only_regular_files_from_captured_head(checkout: Pa
     assert "NEW_HEAD" not in snapshot.diff()
     for path in ("link.py", "untracked.py", "../outside.py", str(checkout / "src/caller.py")):
         assert await snapshot.fetch(path) is None
+
+
+@pytest.mark.parametrize("content", [b"source\n", b"binary\0data"])
+async def test_snapshot_reuses_blob_reads(
+    checkout: Path, monkeypatch: pytest.MonkeyPatch, content: bytes
+):
+    (checkout / "sample.py").write_bytes(content)
+    _git(checkout, "add", "sample.py")
+    _git(checkout, "commit", "-m", "Add sample file")
+    snapshot = GitSnapshot("main")
+    git = MagicMock(wraps=snapshot._git)
+    monkeypatch.setattr(snapshot, "_git", git)
+
+    expected = None if b"\0" in content else content.decode()
+    assert await asyncio.gather(snapshot.fetch("sample.py"), snapshot.fetch("sample.py")) == [
+        expected,
+        expected,
+    ]
+    assert await snapshot.fetch("sample.py") == expected
+    git.assert_called_once()
+
+
+async def test_snapshot_retries_failed_blob_read(checkout: Path, monkeypatch: pytest.MonkeyPatch):
+    snapshot = GitSnapshot("main")
+    git = MagicMock(side_effect=[MiraError("Git read failed"), b"source\n"])
+    monkeypatch.setattr(snapshot, "_git", git)
+
+    with pytest.raises(MiraError, match="Git read failed"):
+        await snapshot.fetch("src/caller.py")
+    assert await snapshot.fetch("src/caller.py") == "source\n"
+    assert git.call_count == 2
 
 
 @pytest.mark.parametrize("other_mode", [["--stdin"], ["--pr", "https://example.invalid/pull/1"]])

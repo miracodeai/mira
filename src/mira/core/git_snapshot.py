@@ -23,6 +23,7 @@ class GitSnapshot:
         self._base = self._git("merge-base", base.decode().strip(), self._head).decode().strip()
 
         self._blobs: dict[str, str] = {}
+        self._reads: dict[str, asyncio.Task[str | None]] = {}
         for entry in self._git("ls-tree", "--full-tree", "-rlz", self._head).split(b"\0"):
             if not entry:
                 continue
@@ -76,7 +77,18 @@ class GitSnapshot:
         oid = self._blobs.get(path)
         if oid is None:
             return None
-        content = await asyncio.to_thread(self._git, "cat-file", "blob", oid)
+        read = self._reads.get(path)
+        if read is None:
+            read = self._reads[path] = asyncio.create_task(self._read_blob(path, oid))
+        # A cancelled chunk should not cancel the read for other chunks.
+        return await asyncio.shield(read)
+
+    async def _read_blob(self, path: str, oid: str) -> str | None:
+        try:
+            content = await asyncio.to_thread(self._git, "cat-file", "blob", oid)
+        except MiraError:
+            self._reads.pop(path, None)
+            raise
         if b"\0" in content:
             return None
         return content.decode("utf-8", errors="replace")
