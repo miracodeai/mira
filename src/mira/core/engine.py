@@ -1817,9 +1817,9 @@ class ReviewEngine:
         )
 
         checked_calls: list[CheckedCall] = []
-        if verify_python and len(chunks) > 1:
+        if verify_python and (local_snapshot is not None or len(chunks) > 1):
             if local_snapshot is not None:
-                python_source = local_snapshot, set(repo_tree)
+                python_source = local_snapshot, local_snapshot.tree_paths()
             if python_source is not None:
                 # Keep the checker on lines visible to the ordinary reviewer.
                 full_files = {f.path: f for f in expanded}
@@ -1832,7 +1832,17 @@ class ReviewEngine:
                 fetcher, tree_paths = python_source
                 try:
                     checked_calls = await _asyncio.wait_for(
-                        check_python_calls(diff_text, chunk_by_path, tree_paths, fetcher),
+                        check_python_calls(
+                            diff_text,
+                            chunk_by_path,
+                            tree_paths,
+                            fetcher,
+                            unchanged_importers=(
+                                local_snapshot.unchanged_importers
+                                if local_snapshot is not None
+                                else None
+                            ),
+                        ),
                         timeout=5,
                     )
                 except Exception as exc:

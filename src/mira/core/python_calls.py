@@ -1,4 +1,4 @@
-"""Verify introduced Python call-binding errors across review chunks."""
+"""Verify introduced argument-binding errors for explicit Python imports."""
 
 from __future__ import annotations
 
@@ -17,20 +17,33 @@ from unidiff.patch import PatchedFile
 from mira.models import ReviewComment, Severity
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
+
     from mira.index.context import SourceFetcher
 
 logger = logging.getLogger(__name__)
 SOURCE_PASS = "python-call"
-_MAX_FILES = 8
-_MAX_SOURCE_CHARS = 50_000
+_MAX_FILES = 12
+_MAX_SOURCE_CHARS = 128_000
 _MAX_PAIRS = 16
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_SCOPES = (
+    *_FUNCTIONS,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
 
 
 @dataclass
 class _Revision:
-    imports: dict[str, tuple[str, str | None]]
+    module: ast.Module
+    imports: dict[str, tuple[int, str, str | None]]
     functions: dict[str, ast.FunctionDef]
-    scopes: dict[tuple[str, int], symtable.SymbolTable]
+    scope: symtable.SymbolTable
 
 
 @dataclass
@@ -38,7 +51,24 @@ class _Change:
     before: _Revision
     head: _Revision
     added: set[int]
-    replaced: dict[int, int]
+    removed: set[int]
+    covered: set[int]
+    old_line: dict[int, int]
+
+
+@dataclass(frozen=True)
+class _Call:
+    scope: str
+    callee: str
+    name: str
+    node: ast.Call
+
+
+@dataclass(frozen=True)
+class _SignatureChange:
+    before: Signature
+    head: Signature
+    anchor: int
 
 
 @dataclass(frozen=True)
@@ -48,20 +78,28 @@ class CheckedCall:
     callee: str
     signature_line: int
     error: str | None
+    signature_anchor: bool = False
 
     def comment(self) -> ReviewComment | None:
         if self.error is None:
             return None
+        if self.signature_anchor:
+            path, line = self.callee, self.signature_line
+            evidence = f"The unchanged call at `{self.caller}:{self.line}`"
+            target = "this committed signature"
+        else:
+            path, line = self.caller, self.line
+            evidence = "The committed call"
+            target = f"the signature at `{self.callee}:{self.signature_line}`"
         return ReviewComment(
-            path=self.caller,
-            line=self.line,
+            path=path,
+            line=line,
             end_line=None,
             severity=Severity.BLOCKER,
             category="bug",
             title="Python call no longer binds to its signature",
             body=(
-                f"The committed call cannot bind to the signature at "
-                f"`{self.callee}:{self.signature_line}`: {self.error}. "
+                f"{evidence} cannot bind to {target}: {self.error}. "
                 "Update this call or preserve a compatible signature."
             ),
             confidence=1.0,
@@ -69,84 +107,116 @@ class CheckedCall:
         )
 
 
+def _walk_scope(nodes: list[ast.stmt]) -> Iterator[ast.AST]:
+    pending: list[ast.AST] = list(reversed(nodes))
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, _SCOPES):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
 def _revision(source: str) -> _Revision | None:
     module = ast.parse(source)
-    imports: dict[str, tuple[str, str | None]] = {}
+    imports: dict[str, tuple[int, str, str | None]] = {}
     functions: dict[str, ast.FunctionDef] = {}
-    entries: list[tuple[str, tuple[str, str | None]]]
-    for statement in module.body:
-        if isinstance(statement, ast.Import):
-            if any("." in alias.name and not alias.asname for alias in statement.names):
-                return None
-            entries = [
-                (alias.asname or alias.name, (alias.name, None)) for alias in statement.names
-            ]
-        elif isinstance(statement, ast.ImportFrom) and statement.module and statement.level <= 1:
-            if any(alias.name == "*" for alias in statement.names):
-                return None
-            module_name = "." * statement.level + statement.module
-            entries = [
-                (alias.asname or alias.name, (module_name, alias.name)) for alias in statement.names
-            ]
-        elif isinstance(statement, ast.FunctionDef) and not statement.decorator_list:
-            if statement.name in imports or statement.name in functions:
-                return None
-            functions[statement.name] = statement
-            continue
+    import_counts: dict[str, int] = {}
+    declarations: dict[str, int] = {}
+    written: set[str] = set()
+    for node in _walk_scope(module.body):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name == "*":
+                    return None
+                name = alias.asname or alias.name.split(".")[0]
+                import_counts[name] = import_counts.get(name, 0) + 1
+        elif isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
+            declarations[node.name] = declarations.get(node.name, 0) + 1
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            written.add(node.id)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            written.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            written.add(node.rest)
+
+    # Attribute and global writes make the affected binding ambiguous.
+    for node in ast.walk(module):
+        if isinstance(node, ast.Global):
+            written.update(node.names)
         elif (
-            isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Constant)
-            and isinstance(statement.value.value, str)
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
         ):
-            continue
-        else:
-            return None
-        for name, target in entries:
-            if name in imports or name in functions:
-                return None
-            imports[name] = target
-    # Mutating globals or module attributes invalidates this simple import model.
-    if any(
-        isinstance(node, (ast.Global, ast.Nonlocal))
-        or (isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load))
-        for node in ast.walk(module)
-    ):
-        return None
-    scopes = {
-        (scope.get_name(), scope.get_lineno()): scope
-        for scope in symtable.symtable(source, "", "exec").get_children()
-    }
-    return _Revision(imports, functions, scopes)
+            written.add(node.value.id)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"setattr", "delattr"}
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ):
+            written.add(node.args[0].id)
+
+    for node in module.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                name = alias.asname or alias.name
+                if import_counts.get(name) != 1 or name in written or name in declarations:
+                    continue
+                if isinstance(node, ast.Import):
+                    imports[name] = (0, alias.name, None)
+                elif node.module:
+                    imports[name] = (node.level, node.module, alias.name)
+        elif (
+            isinstance(node, ast.FunctionDef)
+            and not node.decorator_list
+            and node.name not in written
+            and node.name not in import_counts
+            and declarations[node.name] == 1
+        ):
+            functions[node.name] = node
+    return _Revision(module, imports, functions, symtable.symtable(source, "", "exec"))
 
 
 def _change(file: PatchedFile, source: str) -> _Change | None:
-    """Reconstruct the diff preimage only when its head lines match the pinned source."""
+    """Reconstruct the old side only when the diff matches the pinned head."""
     head_lines = source.splitlines(keepends=True)
     before_lines: list[str] = []
     added: set[int] = set()
-    replaced: dict[int, int] = {}
+    removed: set[int] = set()
+    covered: set[int] = set()
+    old_line: dict[int, int] = {}
     cursor = 0
+
+    def copy_context(end: int) -> None:
+        nonlocal cursor
+        for i in range(cursor, end):
+            old_line[i + 1] = len(before_lines) + 1
+            before_lines.append(head_lines[i])
+        cursor = end
+
     for hunk in file:
         start = hunk.target_start - 1 if hunk.target_length else hunk.target_start
         old_start = hunk.source_start - 1 if hunk.source_length else hunk.source_start
         if not cursor <= start <= len(head_lines):
             return None
-        before_lines.extend(head_lines[cursor:start])
+        copy_context(start)
         if len(before_lines) != old_start:
             return None
-        cursor = start
         removals: list[int] = []
         additions: list[int] = []
         for line in hunk:
             if line.is_context:
-                # Pair only one-for-one replacements. Insertions and rewritten
-                # blocks cannot establish which earlier call this one replaces.
-                if len(removals) == len(additions) == 1:
-                    replaced[additions[0]] = removals[0]
+                # Pair the start of a rewritten call even when its line count changes.
+                # The caller scope and imported symbol are checked separately.
+                if removals and additions:
+                    old_line[additions[0]] = removals[0]
                 removals.clear()
                 additions.clear()
             elif line.is_removed:
                 removals.append(len(before_lines) + 1)
+                removed.add(len(before_lines) + 1)
             elif line.is_added:
                 additions.append(cursor + 1)
                 added.add(cursor + 1)
@@ -155,46 +225,91 @@ def _change(file: PatchedFile, source: str) -> _Change | None:
             if line.is_context or line.is_added:
                 if cursor >= len(head_lines) or head_lines[cursor] != line.value:
                     return None
+                covered.add(cursor + 1)
+                if line.is_context:
+                    old_line[cursor + 1] = len(before_lines) + 1
                 cursor += 1
             if line.is_context or line.is_removed:
                 before_lines.append(line.value)
-        if len(removals) == len(additions) == 1:
-            replaced[additions[0]] = removals[0]
-    before_lines.extend(head_lines[cursor:])
+        if removals and additions:
+            old_line[additions[0]] = removals[0]
+    copy_context(len(head_lines))
     before = _revision("".join(before_lines))
     head = _revision(source)
-    return _Change(before, head, added, replaced) if before and head else None
+    return _Change(before, head, added, removed, covered, old_line) if before and head else None
 
 
-def _calls(revision: _Revision) -> dict[int, tuple[str, str, str, ast.Call]]:
-    calls = {}
-    for wrapper in revision.functions.values():
-        body = wrapper.body
-        if ast.get_docstring(wrapper) is not None:
-            body = body[1:]
-        if not body or not isinstance(body[0], (ast.Return, ast.Expr)):
-            continue
-        call = body[0].value
-        if not isinstance(call, ast.Call) or call.lineno != call.end_lineno:
-            continue
-        if len(body) > 1 and body[1].lineno == call.lineno:
-            continue
-        target = call.func
-        if isinstance(target, ast.Name):
-            name, attribute = target.id, None
-        elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-            name, attribute = target.value.id, target.attr
-        else:
-            continue
-        scope = revision.scopes[wrapper.name, wrapper.lineno]
-        if name not in revision.imports or not scope.lookup(name).is_global():
-            continue
-        module, imported = revision.imports[name]
-        if (attribute is None) == (imported is None):
-            continue
-        function = attribute or imported
-        if function is not None:
-            calls[call.lineno] = wrapper.name, module, function, call
+def _scoped_functions(
+    nodes: list[ast.stmt], table: symtable.SymbolTable, prefix: str = ""
+) -> Iterator[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, symtable.SymbolTable]]:
+    scopes = {(child.get_name(), child.get_lineno()): child for child in table.get_children()}
+    for node in nodes:
+        if isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
+            scope = scopes.get((node.name, node.lineno))
+            if scope is None:
+                continue
+            if isinstance(node, ast.ClassDef):
+                yield from _scoped_functions(node.body, scope, prefix + node.name + ".")
+            else:
+                yield prefix + node.name, node, scope
+
+
+def _target(
+    path: str,
+    binding: tuple[int, str, str | None],
+    attribute: str | None,
+    known_paths: set[str],
+) -> tuple[str, str] | None:
+    level, module, imported = binding
+    package = PurePosixPath(path).parent
+    if level > len(package.parts):
+        return None
+    root = package.parts[: len(package.parts) - level + 1] if level else ()
+    module_path = str(PurePosixPath(*root, *module.split(".")))
+    if attribute is not None and imported is not None:
+        # A package initializer could export an object in place of the submodule.
+        if f"{module_path}/__init__.py" in known_paths or f"{module_path}.py" in known_paths:
+            return None
+        module_path = f"{module_path}/{imported}"
+    elif (attribute is None) == (imported is None):
+        return None
+    name = attribute or imported
+    if name is None or f"{module_path}/__init__.py" in known_paths:
+        return None
+    sibling = package / module_path
+    if (
+        not level
+        and str(sibling) != module_path
+        and (f"{sibling}.py" in known_paths or f"{sibling}/__init__.py" in known_paths)
+    ):
+        return None
+    return f"{module_path}.py", name
+
+
+def _calls(revision: _Revision, path: str, known_paths: set[str]) -> dict[int, _Call]:
+    calls: dict[int, _Call] = {}
+    ambiguous = set()
+    for scope_name, wrapper, scope in _scoped_functions(revision.module.body, revision.scope):
+        for node in _walk_scope(wrapper.body):
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            if isinstance(target, ast.Name):
+                alias, attribute = target.id, None
+            elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                alias, attribute = target.value.id, target.attr
+            else:
+                continue
+            if alias not in revision.imports or not scope.lookup(alias).is_global():
+                continue
+            resolved = _target(path, revision.imports[alias], attribute, known_paths)
+            if resolved is None or node.lineno in ambiguous:
+                continue
+            if node.lineno in calls:
+                ambiguous.add(node.lineno)
+                del calls[node.lineno]
+                continue
+            calls[node.lineno] = _Call(scope_name, *resolved, node)
     return calls
 
 
@@ -225,12 +340,28 @@ def _signature(function: ast.FunctionDef) -> Signature | None:
     return Signature(params)
 
 
-def _literal_call(call: ast.Call) -> bool:
-    return (
-        all(isinstance(arg, ast.Constant) for arg in call.args)
-        and all(kw.arg is not None and isinstance(kw.value, ast.Constant) for kw in call.keywords)
-        and len({kw.arg for kw in call.keywords}) == len(call.keywords)
-    )
+def _signature_changes(changes: dict[str, _Change]) -> dict[tuple[str, str], _SignatureChange]:
+    signatures = {}
+    for path, change in changes.items():
+        for name, head in change.head.functions.items():
+            before = change.before.functions.get(name)
+            if before is None:
+                continue
+            head_span = set(range(head.lineno, max(head.lineno + 1, head.body[0].lineno)))
+            before_span = set(range(before.lineno, max(before.lineno + 1, before.body[0].lineno)))
+            anchors = (head_span & change.added) or (head_span & change.covered)
+            if not anchors or not (head_span & change.added or before_span & change.removed):
+                continue
+            old_signature, new_signature = _signature(before), _signature(head)
+            if (
+                old_signature is not None
+                and new_signature is not None
+                and old_signature != new_signature
+            ):
+                signatures[path, name] = _SignatureChange(
+                    old_signature, new_signature, max(anchors)
+                )
+    return signatures
 
 
 def _binding_error(signature: Signature, call: ast.Call) -> str | None:
@@ -244,19 +375,51 @@ def _binding_error(signature: Signature, call: ast.Call) -> str | None:
     return None
 
 
+def _check_call(
+    path: str,
+    line: int,
+    old: _Call,
+    new: _Call,
+    signatures: dict[tuple[str, str], _SignatureChange],
+    *,
+    unchanged: bool = False,
+) -> CheckedCall | None:
+    if (old.scope, old.callee, old.name) != (new.scope, new.callee, new.name):
+        return None
+    for call in (old.node, new.node):
+        keys = [kw.arg for kw in call.keywords]
+        if (
+            any(isinstance(a, ast.Starred) for a in call.args)
+            or None in keys
+            or len(set(keys)) != len(keys)
+        ):
+            return None
+    signature = signatures.get((new.callee, new.name))
+    if signature is None or _binding_error(signature.before, old.node) is not None:
+        return None
+    return CheckedCall(
+        path,
+        line,
+        new.callee,
+        signature.anchor,
+        _binding_error(signature.head, new.node),
+        signature_anchor=unchanged,
+    )
+
+
 async def check_python_calls(
     diff_text: str,
     chunk_by_path: dict[str, int],
     repo_paths: set[str],
     fetcher: SourceFetcher,
+    unchanged_importers: Callable[[list[str]], Awaitable[list[str]]] | None = None,
 ) -> list[CheckedCall]:
-    """Check changed, explicit imports between different review chunks."""
+    """Check changed calls across chunks and optionally search proven unchanged importers."""
     patch = PatchSet(diff_text)
-    known_paths = (
-        repo_paths
-        | {f.path for f in patch}
-        | {f.source_file.removeprefix("a/") for f in patch if f.is_rename}
-    )
+    changed_paths = {f.path for f in patch} | {
+        f.source_file.removeprefix("a/") for f in patch if f.is_rename
+    }
+    known_paths = repo_paths | changed_paths
     files = [
         f
         for f in patch
@@ -265,7 +428,8 @@ async def check_python_calls(
         and f.is_modified_file
         and not f.is_rename
     ]
-    if not 2 <= len(files) <= _MAX_FILES or len({chunk_by_path[f.path] for f in files}) < 2:
+    cross_chunk = len({chunk_by_path[f.path] for f in files}) >= 2
+    if not files or len(files) > _MAX_FILES or not (cross_chunk or unchanged_importers):
         return []
 
     async def load(file: PatchedFile) -> _Change | None:
@@ -282,50 +446,62 @@ async def check_python_calls(
         for file, change in zip(files, await asyncio.gather(*(load(f) for f in files)), strict=True)
         if change is not None
     }
+    signatures = _signature_changes(changes)
+    if not signatures:
+        return []
     checked = []
-    for path, change in changes.items():
-        old_calls = _calls(change.before)
-        for line, (wrapper, module, name, call) in _calls(change.head).items():
-            old = old_calls.get(change.replaced.get(line, 0))
-            if old is None or old[:3] != (wrapper, module, name):
-                continue
-            package = PurePosixPath(path).parent
-            if module.startswith("."):
-                if str(package) == "." or f"{package}/__init__.py" not in repo_paths:
-                    continue
-                module_path = str(package / module[1:].replace(".", "/"))
-            else:
-                module_path = module.replace(".", "/")
-                sibling = package / module_path
-                if str(sibling) != module_path and (
-                    f"{sibling}.py" in known_paths or f"{sibling}/__init__.py" in known_paths
+    if cross_chunk:
+        for path, change in changes.items():
+            old_calls = _calls(change.before, path, known_paths)
+            for line, new in _calls(change.head, path, known_paths).items():
+                old = old_calls.get(change.old_line.get(line, 0))
+                if (
+                    old is None
+                    or new.callee not in chunk_by_path
+                    or chunk_by_path[path] == chunk_by_path[new.callee]
                 ):
                     continue
-            callee = f"{module_path}.py"
-            if (
-                callee not in changes
-                or callee not in repo_paths
-                or f"{module_path}/__init__.py" in known_paths
-                or chunk_by_path[path] == chunk_by_path[callee]
-                or not (_literal_call(old[3]) and _literal_call(call))
-            ):
+                span = set(range(line, (new.node.end_lineno or line) + 1))
+                old_span = set(range(old.node.lineno, (old.node.end_lineno or old.node.lineno) + 1))
+                if not (span & change.added or old_span & change.removed):
+                    continue
+                anchors = span & change.covered
+                if anchors and (result := _check_call(path, min(anchors), old, new, signatures)):
+                    checked.append(result)
+                    if len(checked) >= _MAX_PAIRS:
+                        return checked
+
+    if unchanged_importers is not None:
+        modules = sorted({path.removesuffix(".py").replace("/", ".") for path, _ in signatures})
+        try:
+            importers = await unchanged_importers(modules)
+        except Exception as exc:
+            logger.debug("Unchanged Python importer lookup unavailable: %s", exc)
+            return checked
+        reported: set[tuple[str, int]] = set()
+        for path in importers:
+            if path in changed_paths or path not in repo_paths:
                 continue
-            target = changes[callee]
-            before = target.before.functions.get(name)
-            head = target.head.functions.get(name)
-            if before is None or head is None or head.lineno not in target.added:
+            try:
+                source = await fetcher.fetch(path)
+                revision = (
+                    _revision(source) if source and len(source) <= _MAX_SOURCE_CHARS else None
+                )
+            except Exception as exc:
+                logger.debug("Python importer %s skipped: %s", path, exc)
                 continue
-            before_signature, signature = _signature(before), _signature(head)
-            if (
-                before_signature is None
-                or signature is None
-                or before_signature == signature
-                or _binding_error(before_signature, old[3]) is not None
-            ):
+            if revision is None:
                 continue
-            checked.append(
-                CheckedCall(path, line, callee, head.lineno, _binding_error(signature, call))
-            )
-            if len(checked) == _MAX_PAIRS:
-                return checked
+            for line, call in _calls(revision, path, known_paths).items():
+                result = _check_call(path, line, call, call, signatures, unchanged=True)
+                if result is None:
+                    continue
+                anchor = result.callee, result.signature_line
+                if result.error and anchor in reported:
+                    continue
+                if result.error:
+                    reported.add(anchor)
+                checked.append(result)
+                if len(checked) >= _MAX_PAIRS:
+                    return checked
     return checked

@@ -240,6 +240,50 @@ async def test_snapshot_reads_only_regular_files_from_captured_head(checkout: Pa
         assert await snapshot.fetch(path) is None
 
 
+async def test_local_call_verification_finds_unchanged_importer(tmp_path, monkeypatch):
+    _git(tmp_path, "init", "--initial-branch=main", "--template=")
+    service = tmp_path / "service.py"
+    caller = tmp_path / "caller.py"
+    service.write_text("def greet(\n    name,\n    prefix,\n):\n    return name\n")
+    source = (
+        "from service import greet\n\n"
+        "class Caller:\n"
+        "    def run(self, name):\n"
+        "        result = greet(\n"
+        "            name, self.prefix,\n"
+        "        )\n"
+        "        return result\n"
+    )
+    caller.write_text(source)
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "Add caller")
+    _git(tmp_path, "switch", "-c", "change")
+    service.write_text("def greet(\n    name,\n):\n    return name\n")
+    _git(tmp_path, "commit", "-am", "Remove the prefix parameter")
+    monkeypatch.chdir(tmp_path)
+    snapshot = GitSnapshot("main")
+    caller.write_text(source.replace("name, self.prefix,", "name,"))
+    assert await snapshot.unchanged_importers(["service"]) == ["caller.py"]
+    assert await snapshot.unchanged_importers(["not_a_module"]) == []
+    assert _git(tmp_path, "diff", "--name-only", "main...HEAD") == "service.py"
+
+    config = MiraConfig()
+    config.review.python_call_verification = True
+    config.review.agentic_tools = config.review.security_pass = False
+    config.review.walkthrough = config.review.include_summary = False
+    model = MagicMock()
+    model.count_tokens.return_value = 400
+    model.review = AsyncMock(return_value='{"comments":[]}')
+    model.usage = {}
+    result = await ReviewEngine(config, model).review_diff(snapshot.diff(), local_snapshot=snapshot)
+
+    (finding,) = result.comments
+    assert (finding.path, finding.line) == ("service.py", 3)
+    assert "caller.py:5" in finding.body
+    assert "too many positional arguments" in finding.body
+    assert result.total_chunks == model.review.await_count == 1
+
+
 @pytest.mark.parametrize("content", [b"source\n", b"binary\0data"])
 async def test_snapshot_reuses_blob_reads(
     checkout: Path, monkeypatch: pytest.MonkeyPatch, content: bytes

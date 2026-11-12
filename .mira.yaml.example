@@ -122,8 +122,8 @@ commands:
 
 review:
   # Verify supported Python call-binding changes across chunks using committed
-  # source and explicit repository-root or sibling imports. Requires code_context.
-  # Other calls follow the ordinary review path.
+  # source and explicit imports. Local branch review also checks a bounded set
+  # of unchanged importers. Requires code_context.
   python_call_verification: false
   # Lines of context around hunks
   context_lines: 3

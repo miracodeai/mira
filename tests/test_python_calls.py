@@ -128,6 +128,48 @@ async def test_explicit_sibling_import():
     assert checked.comment() is not None
 
 
+@pytest.mark.parametrize(
+    ("has_initializer", "collapsed"),
+    [(False, False), (False, True), (True, False)],
+    ids=["namespace", "collapsed", "possible-reexport"],
+)
+async def test_multiline_submodule_call_with_keyword_values(has_initializer, collapsed):
+    caller, callee = "pkg/caller.py", "pkg/service.py"
+    before = (
+        "from pkg import service\n\n"
+        "class Caller:\n"
+        "    def run(self, value):\n"
+        "        result = service.greet(\n"
+        "            value,\n"
+        "        )\n"
+        "        return result\n"
+    )
+    if collapsed:
+        head = before.replace(
+            "service.greet(\n            value,\n        )",
+            "service.greet(value, prefix=self.prefix)",
+        )
+    else:
+        head = before.replace("            value,\n", "            value, prefix=self.prefix,\n")
+    before_service = "def greet(\n    name,\n    *,\n    prefix=None,\n):\n    return name\n"
+    head_service = before_service.replace("prefix=None", "prefix")
+    diff = _diff(caller, before, head) + _diff(callee, before_service, head_service)
+    fetcher = AsyncMock()
+    sources = {caller: head, callee: head_service}
+    fetcher.fetch.side_effect = sources.get
+    tree = set(sources)
+    if has_initializer:
+        tree.add("pkg/__init__.py")
+
+    checked = await check_python_calls(diff, {caller: 0, callee: 1}, tree, fetcher)
+    if has_initializer:
+        assert checked == []
+    else:
+        (call,) = checked
+        assert (call.caller, call.line, call.callee, call.signature_line) == (caller, 5, callee, 4)
+        assert call.comment() is None
+
+
 async def test_hosted_review_reads_python_at_head_sha(tmp_path, monkeypatch):
     monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
     head = _caller("greet('Grace')")
