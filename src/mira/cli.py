@@ -13,6 +13,7 @@ import click
 from mira import __version__
 from mira.config import load_config
 from mira.core.engine import ReviewEngine
+from mira.core.git_snapshot import GitSnapshot
 from mira.exceptions import MiraError
 from mira.llm import create_llm
 from mira.models import ReviewResult, Severity
@@ -128,6 +129,7 @@ def main() -> None:
 @main.command()
 @click.option("--pr", "pr_url", default=None, help="PR/MR URL (GitHub PR or GitLab MR)")
 @click.option("--stdin", "use_stdin", is_flag=True, help="Read diff from stdin")
+@click.option("--base", "base_ref", help="Review committed HEAD changes since this Git ref")
 @click.option("--model", envvar="MIRA_MODEL", default=None, help="LLM model to use")
 @click.option("--max-comments", envvar="MIRA_MAX_COMMENTS", type=int, default=None)
 @click.option("--confidence", envvar="MIRA_CONFIDENCE_THRESHOLD", type=float, default=None)
@@ -156,6 +158,7 @@ def main() -> None:
 def review(
     pr_url: str | None,
     use_stdin: bool,
+    base_ref: str | None,
     model: str | None,
     max_comments: int | None,
     confidence: float | None,
@@ -175,11 +178,14 @@ def review(
         stream=sys.stdout,
     )
 
-    if not pr_url and not use_stdin:
-        raise click.UsageError("Provide --pr <url> or --stdin")
+    if base_ref is not None and (pr_url or use_stdin):
+        raise click.UsageError("--base cannot be combined with --pr or --stdin")
+    if not pr_url and not use_stdin and base_ref is None:
+        raise click.UsageError("Provide --pr <url>, --stdin, or --base <ref>")
     if trust_execution_settings and config_path is None:
         raise click.UsageError("--trust-execution-settings requires --config")
 
+    use_dashboard = base_ref is None
     overrides: dict[str, object] = {}
     if model:
         overrides["llm.model"] = model
@@ -191,19 +197,22 @@ def review(
         overrides["review.walkthrough"] = False
 
     try:
+        snapshot = GitSnapshot(base_ref) if base_ref is not None else None
+        local_diff = snapshot.diff() if snapshot is not None else ""
         config = load_config(
             config_path,
             overrides,
             trust_execution_settings=trust_execution_settings,
+            use_dashboard=use_dashboard,
         )
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
     from mira.dashboard.models_config import llm_config_for
 
-    llm = create_llm(llm_config_for("review", config.llm))
-    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
-    security_llm = create_llm(llm_config_for("security", config.llm))
+    llm = create_llm(llm_config_for("review", config.llm, use_dashboard=use_dashboard))
+    indexing_llm = create_llm(llm_config_for("indexing", config.llm, use_dashboard=use_dashboard))
+    security_llm = create_llm(llm_config_for("security", config.llm, use_dashboard=use_dashboard))
 
     git_token = token or github_token
     github_provider = None
@@ -243,7 +252,9 @@ def review(
     )
 
     try:
-        if use_stdin:
+        if snapshot is not None:
+            result = asyncio.run(engine.review_diff(local_diff, local_snapshot=snapshot))
+        elif use_stdin:
             diff_text = sys.stdin.read()
             result = asyncio.run(engine.review_diff(diff_text))
         else:

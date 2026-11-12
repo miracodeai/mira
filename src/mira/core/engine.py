@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from mira.core.git_snapshot import GitSnapshot
     from mira.llm.base import LLMProviderProtocol
 
 from mira.analysis.severity import classify_severity
@@ -37,7 +38,7 @@ from mira.core.threads import (
     thread_title,
 )
 from mira.exceptions import MiraError, ResponseParseError, StructuredOutputError
-from mira.index.context import build_code_context
+from mira.index.context import SourceFetcher, build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
 from mira.llm.prompts.review import (
@@ -611,7 +612,7 @@ class ReviewEngine:
         # Only the latter drives the user-visible "your repo isn't indexed" nudge.
         self._jit_needed = False
         self._index_was_empty = False
-        self._agentic_source_fetcher: object | None = None
+        self._agentic_source_fetcher: SourceFetcher | None = None
         self._agentic_repo_tree: list[str] = []
 
     async def _post_placeholder_comment(self, pr_info: PRInfo) -> int | None:
@@ -1486,9 +1487,11 @@ class ReviewEngine:
 
         return result
 
-    async def review_diff(self, diff_text: str) -> ReviewResult:
-        """Review a diff from stdin — no provider needed."""
-        return await self._review_diff_internal(diff_text)
+    async def review_diff(
+        self, diff_text: str, *, local_snapshot: GitSnapshot | None = None
+    ) -> ReviewResult:
+        """Review a diff without a Git hosting provider."""
+        return await self._review_diff_internal(diff_text, local_snapshot=local_snapshot)
 
     async def _review_diff_internal(
         self,
@@ -1501,6 +1504,7 @@ class ReviewEngine:
         resolved_threads: list[dict] | None = None,
         team_conventions: str = "",
         walkthrough_diff_text: str | None = None,
+        local_snapshot: GitSnapshot | None = None,
     ) -> ReviewResult:
         """Core review pipeline.
 
@@ -1574,6 +1578,9 @@ class ReviewEngine:
         )
 
         filtered = selected
+
+        if local_snapshot is not None:
+            team_conventions = await local_snapshot.conventions()
 
         # The walkthrough prompt carries only paths, change types and hunk
         # headers, so describing the whole PR stays cheap on a large one. The
@@ -1652,7 +1659,7 @@ class ReviewEngine:
                 return None
 
         async def _build_context() -> str:
-            if not self.config.review.code_context:
+            if local_snapshot is not None or not self.config.review.code_context:
                 return ""
             try:
                 pr_info = getattr(self, "_pr_info", None)
@@ -1784,6 +1791,11 @@ class ReviewEngine:
             _build_context(),
             _fetch_file_history(),
         )
+        source_fetcher = self._agentic_source_fetcher
+        repo_tree = self._agentic_repo_tree
+        if local_snapshot is not None:
+            source_fetcher = local_snapshot if self.config.review.code_context else None
+            repo_tree = local_snapshot.paths()
 
         expanded = expand_context(filtered, self.config.review.context_lines)
 
@@ -1903,16 +1915,12 @@ class ReviewEngine:
                             parsed.summary or "",
                         )
 
-                    use_agentic = (
-                        self.config.review.agentic_tools
-                        and self._agentic_source_fetcher is not None
-                    )
-                    if use_agentic:
+                    if self.config.review.agentic_tools and source_fetcher is not None:
                         from mira.llm.agentic_tools import AgenticToolExecutor
 
                         executor = AgenticToolExecutor(
-                            source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
-                            repo_tree=list(self._agentic_repo_tree),
+                            source_fetcher=source_fetcher,
+                            repo_tree=list(repo_tree),
                             changed_paths=[f.path for f in filtered],
                         )
                         loop_result = await agentic_review_loop(
@@ -2080,14 +2088,14 @@ class ReviewEngine:
         if (
             self.config.review.security_agentic
             and self.config.review.agentic_tools
-            and self._agentic_source_fetcher is not None
+            and source_fetcher is not None
         ):
             from mira.llm.agentic_tools import AgenticToolExecutor
 
             def _security_executor_factory() -> AgenticToolExecutor:
                 return AgenticToolExecutor(
-                    source_fetcher=self._agentic_source_fetcher,
-                    repo_tree=list(self._agentic_repo_tree),
+                    source_fetcher=source_fetcher,
+                    repo_tree=list(repo_tree),
                     changed_paths=[f.path for f in filtered],
                 )
 

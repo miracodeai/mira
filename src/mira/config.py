@@ -503,6 +503,7 @@ def load_config(
     overrides: dict[str, Any] | None = None,
     *,
     trust_execution_settings: bool = False,
+    use_dashboard: bool = True,
 ) -> MiraConfig:
     """Load config, layering global defaults → per-repo `.mira.yaml` → overrides.
 
@@ -519,17 +520,17 @@ def load_config(
     """
     data: dict[str, Any] = _deep_merge({}, _global_defaults)
 
-    # Lazy import + broad except: this function runs in CLI / test contexts
-    # that have no DB attached. A DB error must never block a review.
-    try:
-        from mira.dashboard.api import _app_db
+    if use_dashboard:
+        # A DB error must never block a review.
+        try:
+            from mira.dashboard.api import _app_db
 
-        if _app_db is not None:
-            db_overrides = _app_db.get_global_review_overrides()
-            if db_overrides:
-                data = _deep_merge(data, db_overrides)
-    except Exception as _db_exc:  # noqa: BLE001
-        logger.debug("load_config: skipping DB overrides (%s)", _db_exc)
+            if _app_db is not None:
+                db_overrides = _app_db.get_global_review_overrides()
+                if db_overrides:
+                    data = _deep_merge(data, db_overrides)
+        except Exception as _db_exc:  # noqa: BLE001
+            logger.debug("load_config: skipping DB overrides (%s)", _db_exc)
 
     if config_path is not None:
         path = Path(config_path)
