@@ -69,12 +69,18 @@ export interface ExternalRefModel {
   description: string
 }
 
+export interface PackageVersionModel {
+  version: string
+  sources: { name: string; file_path: string; is_dev: boolean }[]
+}
+
 export interface PackageModel {
   name: string
   kind: string
   version: string
   file_path: string
   is_dev: boolean
+  versions?: PackageVersionModel[]
 }
 
 export interface PackageSearchHit {

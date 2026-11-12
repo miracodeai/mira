@@ -133,6 +133,46 @@ def test_dashboard_retains_previous_lockfile_representative(monkeypatch):
         store.close()
 
 
+def test_dashboard_returns_all_package_versions_with_manifest_sources(monkeypatch):
+    from mira.dashboard.routers import repos
+
+    store = IndexStore(":memory:")
+    try:
+        _store_manifest_file(
+            store,
+            "package-lock.json",
+            '{"packages":{"node_modules/example":{"version":"1.0.0"},'
+            '"node_modules/a/node_modules/example":{"version":"2.0.0"}}}',
+        )
+        _store_manifest_file(
+            store,
+            "tools/package-lock.json",
+            '{"packages":{"node_modules/Example":{"version":"1.0.0","dev":true}}}',
+        )
+        _store_manifest_file(store, "package.json", '{"dependencies":{"example":"^1.0.0"}}')
+        monkeypatch.setattr(repos, "_open_store", lambda *args: nullcontext(store))
+
+        (package,) = repos.get_packages("example", "app")
+
+        assert package.name == "example"
+        assert package.versions[0].version == package.version
+        assert {
+            version.version: [
+                (source.file_path, source.name, source.is_dev) for source in version.sources
+            ]
+            for version in package.versions
+        } == {
+            "1.0.0": [
+                ("package-lock.json", "example", False),
+                ("tools/package-lock.json", "Example", True),
+            ],
+            "2.0.0": [("package-lock.json", "example", False)],
+            "^1.0.0": [("package.json", "example", False)],
+        }
+    finally:
+        store.close()
+
+
 _SQLITE_LEGACY = """
 CREATE TABLE package_manifests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

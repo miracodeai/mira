@@ -668,12 +668,24 @@ class BlastRadiusResponse(BaseModel):
     cross_repo: list[CrossRepoBlastEntry]  # other repos that depend on this one
 
 
+class PackageVersionSourceModel(BaseModel):
+    name: str
+    file_path: str
+    is_dev: bool
+
+
+class PackageVersionModel(BaseModel):
+    version: str
+    sources: list[PackageVersionSourceModel]
+
+
 class PackageModel(BaseModel):
     name: str
     kind: str  # "npm" | "pip" | "docker" | "go" | "rust" | "composer"
     version: str
     file_path: str
     is_dev: bool = False
+    versions: list[PackageVersionModel] = Field(default_factory=list)
 
 
 class PackageSearchHit(BaseModel):

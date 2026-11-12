@@ -24,6 +24,8 @@ from mira.dashboard.api import (
     FileModel,
     ImportEdge,
     PackageModel,
+    PackageVersionModel,
+    PackageVersionSourceModel,
     RepoBaseBranchPolicy,
     RepoDetail,
     RepoListItem,
@@ -393,22 +395,23 @@ def get_external_refs(owner: str, repo: str) -> list[ExternalRefModel]:
 
 @router.get("/api/repos/{owner:path}/{repo}/packages", response_model=list[PackageModel])
 def get_packages(owner: str, repo: str) -> list[PackageModel]:
-    """List dependencies parsed from manifest and lockfile files.
+    """List dependencies with their indexed versions and manifest sources.
 
-    When the same package appears in both a manifest (e.g. `pyproject.toml`
-    declaring `>=1.30`) and a lockfile (e.g. `uv.lock` resolving to
-    `1.99.5`), the lockfile entry wins — its concrete version is what's
-    actually installed.
+    The representative fields continue to prefer lockfiles. The versions
+    list also includes the declarations and their source paths.
     """
     from mira.index.manifests import _is_lockfile_path
 
     with _open_store(owner, repo) as store:
         rows = store.list_manifest_packages()
 
-    # Dedupe by (kind, name), preferring lockfile rows.
     by_key: dict[tuple[str, str], PackageManifestRow] = {}
+    sources_by_version: dict[tuple[str, str], dict[str, set[tuple[str, str, bool]]]] = {}
     for r in rows:
         key = (r.kind, r.name.lower())
+        sources_by_version.setdefault(key, {}).setdefault(r.version, set()).add(
+            (r.file_path, r.name, r.is_dev)
+        )
         existing = by_key.get(key)
         if (
             existing is None
@@ -423,16 +426,32 @@ def get_packages(owner: str, repo: str) -> list[PackageModel]:
             )
         ):
             by_key[key] = r
-    return [
-        PackageModel(
-            name=r.name,
-            kind=r.kind,
-            version=r.version,
-            file_path=r.file_path,
-            is_dev=r.is_dev,
+    packages = []
+    for key, representative in sorted(by_key.items()):
+        sources = sources_by_version[key]
+        versions = [
+            PackageVersionModel(
+                version=version,
+                sources=[
+                    PackageVersionSourceModel(name=name, file_path=path, is_dev=is_dev)
+                    for path, name, is_dev in sorted(sources[version])
+                ],
+            )
+            for version in sorted(
+                sources, key=lambda value: (value != representative.version, value)
+            )
+        ]
+        packages.append(
+            PackageModel(
+                name=representative.name,
+                kind=representative.kind,
+                version=representative.version,
+                file_path=representative.file_path,
+                is_dev=representative.is_dev,
+                versions=versions,
+            )
         )
-        for r in sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
-    ]
+    return packages
 
 
 @router.post("/api/repos/{owner:path}/{repo}/index")
