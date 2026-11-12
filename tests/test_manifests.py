@@ -174,6 +174,14 @@ class TestDockerfile:
         (pkg,) = parse_manifest(path, f"FROM {image} AS base")
         assert (pkg.name, pkg.version, pkg.kind, pkg.file_path) == (name, version, "docker", path)
 
+    @pytest.mark.parametrize("name", ["ubuntu", "registry.example:5000/team/app:1.2"])
+    def test_digest_reference_is_kept_intact(self, name):
+        image = f"{name}@sha256:{'a' * 64}"
+        path = "images/Dockerfile"
+        assert parse_manifest(path, f"FROM {image} AS base") == [
+            ParsedPackage(image, "docker", "", path)
+        ]
+
     def test_multistage_from_as(self):
         content = "FROM python:3.11 AS builder\nFROM alpine:3.18\n"
         pkgs = parse_dockerfile(content, "Dockerfile")

@@ -274,7 +274,7 @@ def parse_dockerfile(content: str, file_path: str) -> list[ParsedPackage]:
         if not m:
             continue
         image = m.group(1)
-        if image.rfind(":") > image.rfind("/") and not image.startswith("$"):
+        if image.rfind(":") > image.rfind("/") and not image.startswith("$") and "@" not in image:
             name, _, tag = image.rpartition(":")
             out.append(
                 ParsedPackage(
