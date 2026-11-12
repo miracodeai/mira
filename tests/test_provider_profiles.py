@@ -24,6 +24,43 @@ class TestResolve:
         assert p["model_prefix"] == "strip"
         assert p["extra_headers"] == {}
         assert p["reasoning_effort_map"] == {}
+        assert p["reasoning_on_payload"] == {}
+        assert p["reasoning_off_payload"] == {}
+        assert p["reasoning_off_payload_responses"] == {}
+        assert p["max_tokens_field"] == "max_tokens"
+
+    def test_deepseek_profile_disables_thinking_when_off(self):
+        p = profiles.resolve("https://api.deepseek.com/v1")
+        assert p["name"] == "deepseek"
+        assert p["model_prefix"] == "strip"
+        assert p["reasoning_on_payload"] == {"thinking": {"type": "enabled"}}
+        assert p["reasoning_off_payload"] == {"thinking": {"type": "disabled"}}
+        assert p["reasoning_off_payload_responses"] == {"reasoning": {"effort": "none"}}
+        assert p["reasoning_effort_map"]["medium"] == "high"
+        assert p["reasoning_effort_map"]["xhigh"] == "high"
+        assert p["reasoning_effort_map"]["minimal"] == "low"
+        assert p["reasoning_effort_map"]["ultra"] == "max"
+
+    def test_deepseek_native_base_url_alias(self):
+        # DeepSeek's documented OpenAI base URL has no /v1 suffix; keep both.
+        p = profiles.resolve("https://api.deepseek.com")
+        assert p["name"] == "deepseek-native"
+        assert p["reasoning_on_payload"] == {"thinking": {"type": "enabled"}}
+        assert p["reasoning_off_payload"] == {"thinking": {"type": "disabled"}}
+
+    def test_openai_profile_uses_max_completion_tokens(self):
+        p = profiles.resolve("https://api.openai.com/v1")
+        assert p["name"] == "openai"
+        assert p["max_tokens_field"] == "max_completion_tokens"
+
+    def test_documented_level_remaps(self):
+        assert profiles.resolve("https://api.mistral.ai/v1")["reasoning_effort_map"] == {
+            "max": "xhigh"
+        }
+        assert profiles.resolve("https://api.cerebras.ai/v1")["reasoning_effort_map"] == {
+            "xhigh": "high",
+            "max": "high",
+        }
 
     def test_sparse_profile_fills_from_default(self, tmp_path, monkeypatch):
         # A profile with only base_url + api_key_env still resolves with every

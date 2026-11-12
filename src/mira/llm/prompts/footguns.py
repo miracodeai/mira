@@ -31,6 +31,12 @@ _FOOTGUNS: dict[str, list[str]] = {
         "Use `hashlib` for cache keys that must be stable.",
         "**Blanket `except Exception`** — swallows `KeyboardInterrupt`/`SystemExit` if you used "
         "bare `except:`, and hides bugs in normal control flow either way. Prefer specific exceptions.",
+        "**Truthiness check on a numeric value** — `if rate:` / `if count:` skips `0` and `0.0`, "
+        "so a legitimate zero (sample rate, limit, offset) is silently treated as missing. "
+        "Use `is not None` when zero is a valid value.",
+        "**Passing the wrong variable to a check** — a guard evaluated on the *outer* value "
+        "(`source`, `request`, `config`) while the code below uses a *derived* one "
+        "(`resolved_source`, `effective_config`); the check and the use must agree.",
     ],
     "javascript": [
         "**`forEach` with async callback** — `array.forEach(async x => await ...)` does NOT wait. "
@@ -58,6 +64,15 @@ _FOOTGUNS: dict[str, list[str]] = {
         "silently drops both errors and any follow-up steps after the first rejection.",
         "**`||` vs `??` for defaults** — `value || fallback` replaces `0`, `''`, and `false` with "
         "the fallback. Use `??` when only `null`/`undefined` should trigger the default.",
+        "**Destructuring the first element of a possibly-empty array** — `const [first] = arr ?? []` "
+        "yields `undefined` for `[]`, so `first.prop` throws; `?? []` only guards `null`, not emptiness.",
+        "**Lookup predicate compares a value to itself** — `items.find(x => x.id === id)` inside the "
+        "branch that already established `id` is absent (or where `id` *is* the thing being looked "
+        "up) can never match; the fallback path is dead and silently returns `undefined`.",
+        "**Interface gains a parameter but not every implementer does** — `save(record, ownerId)` "
+        "on the interface while one implementation still declares `save(record)`: TypeScript "
+        "allows fewer parameters, so the mismatch compiles and the new value is silently ignored "
+        "by that implementation.",
     ],
     "go": [
         "**Loop-variable capture** — `for _, v := range xs { go func() { use(v) }() }` captures "
@@ -79,6 +94,14 @@ _FOOTGUNS: dict[str, list[str]] = {
         "limit-reached sentinel) fails the whole operation instead of handling that case.",
         "**Early return before `defer`** — a return between acquiring a resource and the "
         "`defer x.Close()` line leaks the resource.",
+        "**Method returns a fresh value instead of the receiver** — `func (f *Fake) FromContext(ctx) "
+        "Logger { return NewFake() }` hands callers an object nobody else holds, so whatever they "
+        "record on it (log lines, options) is invisible to the test or caller that owns `f`.",
+        "**Nil guard dropped during a middleware/handler refactor** — the old code checked "
+        "`if req == nil` before touching `req.Context`; the new shared helper dereferences "
+        "`req` unconditionally, so a nil request that used to pass through now panics.",
+        "**Context field no longer logged** — a refactor that stops extracting the trace/span ID "
+        "(or request ID) from `ctx` into the log attributes silently breaks request tracing.",
     ],
     "java": [
         "**Boxed-int equality** — `Integer a = 1000; Integer b = 1000; a == b` is FALSE (outside "
@@ -96,6 +119,15 @@ _FOOTGUNS: dict[str, list[str]] = {
         "**Provider/factory lookup falling through to a default** — code that resolves a named "
         "provider (crypto, keystore, datasource) and silently falls back to the platform default "
         "when the lookup misses returns the WRONG provider rather than failing loudly.",
+        "**Sentinel value fed into arithmetic** — a length/index initialised to `-1` (meaning "
+        '"indefinite" or "unknown") and later used in `length - bytes.length` or as a loop '
+        "bound without a guard produces nonsense, typically an infinite or negative range.",
+        "**Encoder/builder output discarded** — an encoder or stream is created, written to, and "
+        "its result never used because the return statement builds a new one; the earlier work is "
+        "dead and usually means one of the two encodings is wrong.",
+        "**New abstract method on a public interface** — adding `abstract T foo();` to an "
+        "interface or abstract class that third parties implement breaks every external "
+        "implementer at compile time; look for a default implementation or a new sub-interface.",
     ],
     "ruby": [
         "**`||=` doesn't short-circuit on `false`** — `x ||= compute_default()` calls `compute_default` "
@@ -115,6 +147,12 @@ _FOOTGUNS: dict[str, list[str]] = {
         "**ActiveRecord callbacks on save paths** — `before_save`/`after_commit` hooks firing "
         "extra writes or external calls make innocent-looking `update`/`save!` calls have "
         "non-obvious side effects; flag new callbacks doing I/O.",
+        "**Case-sensitive lookup of an email, username, or domain** — `where(email: email)` "
+        "against a block/allow list lets `User@Example.com` slip past an entry for "
+        "`user@example.com`; normalise with `downcase` on both the stored and the queried value.",
+        "**Domain allow-list regex without a boundary** — `/@(#{domains})/` matches "
+        "`evil-example.com` and `example.com.attacker.tld`; anchor with `\\A` and `\\z` (or "
+        "`@(?:#{domains})\\z`) and escape the domain.",
     ],
 }
 
@@ -133,6 +171,15 @@ _UNIVERSAL: list[str] = [
     "a scoped-release construct (`with` / `defer` / try-finally) leaks when an exception or early "
     "return skips the close. Flag handles opened and never closed, and closes that only run on "
     "the happy path.",
+    "**Inverted condition on a flag** — `FLAG ? {a} : {}` where the old code (or the sibling "
+    "branch) used `!FLAG`, or a `requested_x` set under one branch while `x` is set under the "
+    "same branch; read both branches together and check they are mutually exclusive.",
+    "**Case-insensitive identifiers compared case-sensitively** — emails, usernames, hostnames and "
+    "header names are case-insensitive by spec; a block list, allow list, or dedupe keyed on the "
+    "raw string is bypassable by changing case.",
+    "**Removed behaviour in a refactor** — a guard, log field, trace ID, error wrap, or cache "
+    "invalidation present on the `-` lines and absent on the `+` lines (and not moved into the "
+    "callee) is a regression, however tidy the new code looks.",
 ]
 
 

@@ -40,6 +40,11 @@ register_provider("gitlab", GitLabProvider)
 from mira.providers.forgejo import ForgejoProvider  # noqa: E402
 
 register_provider("forgejo", ForgejoProvider)
+
 from mira.providers.origin import OriginProvider  # noqa: E402
 
 register_provider("origin", OriginProvider)
+
+from mira.providers.bitbucket import BitbucketProvider  # noqa: E402
+
+register_provider("bitbucket", BitbucketProvider)

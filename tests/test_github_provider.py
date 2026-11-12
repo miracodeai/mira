@@ -7,7 +7,8 @@ import importlib
 import os
 import time
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from dataclasses import replace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -22,6 +23,7 @@ from mira.providers.github import (
     GitHubProvider,
     _async_constant,
     _format_comment_body,
+    _normalize_permission,
     parse_pr_url,
 )
 
@@ -65,6 +67,49 @@ class TestGitHubProvider:
     def test_requires_token(self):
         with pytest.raises(ProviderError, match="token is required"):
             GitHubProvider(token="")
+
+
+class TestGetRepoPermission:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw", "normalized"),
+        [
+            ("admin", "write"),
+            ("maintain", "write"),
+            ("push", "write"),
+            ("write", "write"),
+            ("triage", "read"),
+            ("pull", "read"),
+            ("read", "read"),
+            ("none", "none"),
+            ("unexpected", None),
+        ],
+    )
+    async def test_normalizes_permission_levels(self, raw, normalized):
+        assert _normalize_permission(raw) == normalized
+
+    @pytest.mark.asyncio
+    async def test_fetches_collaborator_permission(self):
+        provider = GitHubProvider("token")
+        repo = MagicMock()
+        repo.get_collaborator_permission.return_value = "admin"
+        provider._make_client = MagicMock(
+            return_value=MagicMock(get_repo=MagicMock(return_value=repo))
+        )
+
+        assert await provider.get_repo_permission("o", "r", "alice") == "write"
+        repo.get_collaborator_permission.assert_called_once_with("alice")
+
+    @pytest.mark.asyncio
+    async def test_missing_collaborator_is_none(self):
+        provider = GitHubProvider("token")
+        repo = MagicMock()
+        repo.get_collaborator_permission.side_effect = GithubException(404, {}, {})
+        provider._make_client = MagicMock(
+            return_value=MagicMock(get_repo=MagicMock(return_value=repo))
+        )
+
+        assert await provider.get_repo_permission("o", "r", "alice") == "none"
 
 
 def _make_pr_info() -> PRInfo:
@@ -571,6 +616,133 @@ class TestPostComment:
             await provider.post_comment(pr_info, "Hello")
         assert call_count == 2
         mock_issue.create_comment.assert_called_once_with("Hello")
+
+
+class TestCheckRuns:
+    @pytest.mark.asyncio
+    async def test_start_creates_in_progress_run(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+        pr_info = replace(_make_pr_info(), head_sha="deadbeef")
+
+        mock_post = AsyncMock(
+            side_effect=lambda url, **_kwargs: httpx.Response(
+                201, json={"id": 42}, request=httpx.Request("POST", url)
+            )
+        )
+        with patch.object(httpx.AsyncClient, "post", mock_post):
+            run_id = await provider.start_check_run(
+                pr_info,
+                title="Code Review In Progress",
+                summary="Mira is analyzing your code changes…",
+                details_url=pr_info.url,
+            )
+
+        assert run_id == 42
+        args, kwargs = mock_post.call_args
+        assert args[0].endswith("/repos/o/r/check-runs")
+        body = kwargs["json"]
+        assert body["name"] == "Mira"
+        assert body["head_sha"] == "deadbeef"
+        assert body["status"] == "in_progress"
+        assert body["details_url"] == "https://github.com/o/r/pull/1"
+        assert body["output"]["title"] == "Code Review In Progress"
+        assert body["started_at"]
+        headers = kwargs["headers"]
+        assert headers["Authorization"] == "token test-token"
+        assert headers["Accept"] == "application/vnd.github+json"
+
+    @pytest.mark.asyncio
+    async def test_start_403_returns_none(self):
+        """A missing checks:write permission skips the run instead of retrying."""
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+        pr_info = replace(_make_pr_info(), head_sha="deadbeef")
+
+        mock_post = AsyncMock(
+            side_effect=lambda url, **_kwargs: httpx.Response(
+                403,
+                text="Resource not accessible by integration",
+                request=httpx.Request("POST", url),
+            )
+        )
+        with patch.object(httpx.AsyncClient, "post", mock_post):
+            run_id = await provider.start_check_run(pr_info, title="t")
+        assert run_id is None
+
+    @pytest.mark.asyncio
+    async def test_start_no_head_sha_performs_no_call(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+        pr_info = replace(_make_pr_info(), head_sha="")
+
+        with patch.object(httpx.AsyncClient, "post") as mock_post:
+            run_id = await provider.start_check_run(pr_info)
+        assert run_id is None
+        assert mock_post.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_finish_patches_run_to_completed(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+        pr_info = replace(_make_pr_info(), head_sha="deadbeef")
+
+        mock_patch = AsyncMock(
+            side_effect=lambda url, **_kwargs: httpx.Response(
+                200, json={"id": 42}, request=httpx.Request("PATCH", url)
+            )
+        )
+        with patch.object(httpx.AsyncClient, "patch", mock_patch):
+            await provider.finish_check_run(
+                pr_info,
+                42,
+                "success",
+                title="Code Review Complete",
+                summary="Review finished successfully.",
+                details="2 files reviewed · 1 comment",
+            )
+
+        args, kwargs = mock_patch.call_args
+        assert args[0].endswith("/repos/o/r/check-runs/42")
+        body = kwargs["json"]
+        assert body["status"] == "completed"
+        assert body["conclusion"] == "success"
+        assert body["completed_at"]
+        assert body["output"]["title"] == "Code Review Complete"
+        # The DETAILS section on GitHub is output.text.
+        assert body["output"]["text"] == "2 files reviewed · 1 comment"
+
+    @pytest.mark.asyncio
+    async def test_finish_raises_provider_error_on_404(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+        pr_info = replace(_make_pr_info(), head_sha="deadbeef")
+
+        mock_patch = AsyncMock(
+            side_effect=lambda url, **_kwargs: httpx.Response(
+                404, text="Not Found", request=httpx.Request("PATCH", url)
+            )
+        )
+        with (
+            patch.object(httpx.AsyncClient, "patch", mock_patch),
+            pytest.raises(ProviderError, match="404"),
+        ):
+            await provider.finish_check_run(pr_info, 42, "success")
+
+    @pytest.mark.asyncio
+    async def test_finish_wraps_transport_errors(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+        pr_info = replace(_make_pr_info(), head_sha="deadbeef")
+
+        async def _boom(self, url, **kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        with (
+            patch.object(httpx.AsyncClient, "patch", _boom),
+            pytest.raises(ProviderError, match="failed"),
+        ):
+            await provider.finish_check_run(pr_info, 42, "success")
 
 
 class TestFindBotComment:
@@ -1691,3 +1863,74 @@ class TestEnterpriseAPIURL:
             assert mod._GITHUB_API_URL == "https://api.github.com"
             gh = mod.GitHubProvider("tok")._make_client("tok")
             assert gh.requester.base_url == "https://api.github.com"
+
+
+class TestPRDescription:
+    """get_pr_description/update_pr_description must build the client like every
+    other method does (_resolve_token + _make_client). Using a non-existent
+    self._github made both fail with "Failed to fetch PR description:
+    'GitHubProvider' object has no attribute '_github'", which is what broke
+    review.pr_summary on GitHub."""
+
+    @pytest.mark.asyncio
+    async def test_get_pr_description_uses_a_client(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+
+        mock_pr = MagicMock()
+        mock_pr.body = "the description"
+        mock_repo = MagicMock()
+        mock_repo.get_pull.return_value = mock_pr
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            body = await provider.get_pr_description(_make_pr_info())
+
+        assert body == "the description"
+        mock_gh.get_repo.assert_called_once_with("o/r")
+
+    @pytest.mark.asyncio
+    async def test_get_pr_description_empty_body_is_empty_string(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+
+        mock_pr = MagicMock()
+        mock_pr.body = None
+        mock_repo = MagicMock()
+        mock_repo.get_pull.return_value = mock_pr
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            assert await provider.get_pr_description(_make_pr_info()) == ""
+
+    @pytest.mark.asyncio
+    async def test_update_pr_description_uses_a_client(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+
+        mock_pr = MagicMock()
+        mock_repo = MagicMock()
+        mock_repo.get_pull.return_value = mock_pr
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+
+        with patch("mira.providers.github.Github", return_value=mock_gh):
+            await provider.update_pr_description(_make_pr_info(), "new body")
+
+        mock_pr.edit.assert_called_once_with(body="new body")
+
+    @pytest.mark.asyncio
+    async def test_get_pr_description_failure_is_a_provider_error(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token_supplier = _async_constant("test-token")
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.side_effect = GithubException(404, "not found", None)
+
+        with (
+            patch("mira.providers.github.Github", return_value=mock_gh),
+            pytest.raises(ProviderError, match="Failed to fetch PR description"),
+        ):
+            await provider.get_pr_description(_make_pr_info())

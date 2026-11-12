@@ -23,30 +23,47 @@ from mira.security.osv import (
 
 
 def _prefer_resolved(rows: list[dict]) -> list[dict]:
-    """Dedupe by (owner, repo, ecosystem, name) preferring lockfile entries.
+    """Prefer lockfile rows per package, keeping distinct resolved npm versions.
 
     Manifests record version *constraints* like ``>=1.30`` — sending those
     to OSV produces false positives because OSV interprets them as concrete
     versions and matches against everything in that range. Lockfiles record
     the *resolved* version, which is what we actually want to scan against.
     """
-    by_key: dict[tuple[str, str, str, str], dict] = {}
+
+    def identity(row: dict) -> tuple[str, str, str, str]:
+        return row["owner"], row["repo"], row["kind"], row["name"].lower()
+
+    locked_npm = {
+        identity(r)
+        for r in rows
+        if r["kind"] == "npm" and _is_lockfile_path(r.get("file_path", ""))
+    }
+    by_key: dict[tuple[str, str, str, str], list[dict]] = {}
     for r in rows:
         # Case-insensitive on name — PyPI normalises `PyJWT`/`pyjwt`/`PyJwt`
         # to the same package, so a manifest row spelled `PyJWT` should
         # collapse with the lockfile row spelled `pyjwt`.
-        key = (r["owner"], r["repo"], r["kind"], r["name"].lower())
+        key = identity(r)
+        if not r.get("scan_eligible", True):
+            continue
+        if key in locked_npm and not _is_lockfile_path(r.get("file_path", "")):
+            continue
         existing = by_key.get(key)
         if existing is None:
-            by_key[key] = r
+            by_key[key] = [r]
+            continue
+        if r["kind"] == "npm":
+            if key in locked_npm and all(prior["version"] != r["version"] for prior in existing):
+                existing.append(r)
             continue
         # Prefer the row coming from a lockfile path. If both or neither are
         # lockfile rows, keep the first one.
         if _is_lockfile_path(r.get("file_path", "")) and not _is_lockfile_path(
-            existing.get("file_path", "")
+            existing[0].get("file_path", "")
         ):
-            by_key[key] = r
-    return list(by_key.values())
+            by_key[key] = [r]
+    return [r for group in by_key.values() for r in group]
 
 
 logger = logging.getLogger(__name__)
@@ -70,15 +87,15 @@ async def poll_org_wide() -> dict[str, int]:
         list_packages_org_wide,
     )
 
-    rows = list_packages_org_wide(db_url)
-    if not rows:
+    inventory = list_packages_org_wide(db_url)
+    if not inventory:
         logger.debug("Vuln poller: no packages to scan")
         return {}
 
     # Per (owner, repo, ecosystem, name), prefer the lockfile entry (resolved
     # version) over the manifest entry (constraint like ">=1.30") so OSV
     # gets accurate concrete versions to match against.
-    rows = _prefer_resolved(rows)
+    rows = _prefer_resolved(inventory)
 
     # Build OSV queries — dedupe by (ecosystem, name, version) so we don't
     # hit the API multiple times for the same tuple appearing in many repos.
@@ -101,7 +118,15 @@ async def poll_org_wide() -> dict[str, int]:
         if not eco:
             continue
         for owner, repo in repos:
-            active_per_repo[(owner, repo)].add((name, eco, version))
+            active_per_repo[(owner, repo)].add((name, kind, version))
+
+    # An unscanned inventory row gives no evidence that an existing advisory
+    # is stale. Keep it active while it remains in the inventory.
+    for row in inventory:
+        if not row.get("scan_eligible", True):
+            active = active_per_repo.get((row["owner"], row["repo"]))
+            if active is not None:
+                active.add((row["name"], row["kind"], row["version"]))
 
     for (owner, repo), active in active_per_repo.items():
         try:
@@ -124,6 +149,13 @@ async def poll_org_wide() -> dict[str, int]:
         results = await query_batch(batch)
         all_results.update(results)
 
+    missing_results = len(unique_packages.keys() - all_results.keys())
+    if missing_results:
+        logger.warning(
+            "Vuln poll incomplete: preserving alerts for %d packages without scan results",
+            missing_results,
+        )
+
     # Persist per-(repo, package) so each repo's vulnerabilities row stays
     # accurate even if the same package version appears in multiple repos.
     severity_counts: dict[str, int] = defaultdict(int)
@@ -131,7 +163,9 @@ async def poll_org_wide() -> dict[str, int]:
 
     for key, repos in unique_packages.items():
         ecosystem, name, version = key
-        vulns = all_results.get(key, [])
+        if key not in all_results:
+            continue
+        vulns = all_results[key]
         vuln_dicts = [
             {
                 "cve_id": v.cve_id,
@@ -157,7 +191,7 @@ async def poll_org_wide() -> dict[str, int]:
             ", ".join(f"{n} {sev}" for sev, n in sorted(counts.items())),
             len(repos_processed),
         )
-    else:
+    elif not missing_results:
         logger.info("Vuln poll: no open vulnerabilities found")
 
     return counts
@@ -189,6 +223,7 @@ async def poll_repo(owner: str, repo: str) -> dict[str, int]:
                 "name": p.name,
                 "version": p.version,
                 "file_path": p.file_path,
+                "scan_eligible": p.scan_eligible,
             }
             for p in pkgs
         ]
@@ -204,21 +239,28 @@ async def poll_repo(owner: str, repo: str) -> dict[str, int]:
 
     # GC vulnerability rows whose (name, ecosystem, version) is no longer in
     # this repo's dep set — covers the manifest→lockfile transition.
-    active = {
-        (r["name"], osv_ecosystem(r["kind"]) or "", r["version"])
-        for r in deduped
-        if osv_ecosystem(r["kind"])
-    }
+    active = {(r["name"], r["kind"], r["version"]) for r in deduped if osv_ecosystem(r["kind"])}
+    active.update((p.name, p.kind, p.version) for p in pkgs if not p.scan_eligible)
     store.prune_stale_vulnerabilities(active)
 
     results = await query_batch(queries)
+    missing_results = sum((q.ecosystem, q.name, q.version) not in results for q in queries)
+    if missing_results:
+        logger.warning(
+            "Vuln poll incomplete for %s/%s: preserving alerts for %d queries without results",
+            owner,
+            repo,
+            missing_results,
+        )
 
     severity_counts: dict[str, int] = defaultdict(int)
     for r in deduped:
         if not osv_ecosystem(r["kind"]):
             continue
         key = (r["kind"], r["name"], r["version"])
-        vulns = results.get(key, [])
+        if key not in results:
+            continue
+        vulns = results[key]
         vuln_dicts = [
             {
                 "cve_id": v.cve_id,

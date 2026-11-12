@@ -710,6 +710,134 @@ class TestApplyReasoning:
         # Temperature should NOT be popped when reasoning is off
         assert "temperature" in body
 
+    @pytest.mark.asyncio
+    async def test_deepseek_on_maps_effort_levels(self):
+        cfg = LLMConfig(
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/v1",
+            api_style="responses",
+            reasoning_effort="xhigh",
+        )
+        provider = ResponsesProvider(cfg)
+        body = {"model": "deepseek-v4-pro"}
+        provider._apply_reasoning(body)
+        assert body["reasoning"] == {"effort": "high"}
+        assert "reasoning_effort" not in body
+        assert "thinking" not in body
+
+    @pytest.mark.asyncio
+    async def test_deepseek_off_sends_explicit_disable(self):
+        cfg = LLMConfig(
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/v1",
+            api_style="responses",
+        )
+        provider = ResponsesProvider(cfg)
+        mock_resp = _mock_httpx_response(_make_resp_text("done"), 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
+
+        body = mock_client.post.call_args[1]["json"]
+        assert body["reasoning"] == {"effort": "none"}
+
+    @pytest.mark.asyncio
+    async def test_deepseek_reasoning_rejection_reapplies_off(self):
+        cfg = LLMConfig(
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/v1",
+            api_style="responses",
+            reasoning_effort="high",
+        )
+        provider = ResponsesProvider(cfg)
+        err_resp = _mock_httpx_response({"error": "reasoning unsupported"}, 400)
+        ok_resp = _mock_httpx_response(_make_resp_text("done"), 200)
+        mock_client = _mock_client(None, extra_posts=[err_resp, ok_resp])
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "do_thing", "parameters": {"type": "object"}},
+            }
+        ]
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete_agentic([{"role": "user", "content": "test"}], tools=tools)
+
+        second_body = mock_client.post.call_args_list[1][1]["json"]
+        assert second_body["reasoning"] == {"effort": "none"}
+
+
+class TestReasoningItems:
+    def test_response_message_keeps_reasoning_item_and_provider_id(self):
+        from mira.llm.responses import _response_message
+
+        data = {
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "content": [{"type": "reasoning_text", "text": "thinking"}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{}",
+                },
+            ]
+        }
+        result = _response_message(data)
+        assert result["reasoning_items"] == [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "content": [{"type": "reasoning_text", "text": "thinking"}],
+            }
+        ]
+        assert result["tool_calls"][0]["id"] == "call_1"
+        assert result["tool_calls"][0]["provider_id"] == "fc_1"
+
+    def test_responses_input_replays_reasoning_items(self):
+        from mira.llm.responses import _responses_input
+
+        reasoning = {
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "cipher",
+        }
+        messages = [
+            {"role": "user", "content": "review"},
+            {
+                "role": "assistant",
+                "content": "checking",
+                "reasoning_items": [reasoning],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "provider_id": "fc_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        ]
+
+        items = _responses_input(messages)
+        assert items[1] == reasoning
+        assert items[2] == {
+            "type": "message",
+            "role": "assistant",
+            "content": "checking",
+        }
+        assert items[3]["type"] == "function_call"
+        assert items[3]["id"] == "fc_1"
+        assert items[3]["call_id"] == "call_1"
+        assert items[4]["type"] == "function_call_output"
+        assert items[4]["call_id"] == "call_1"
+
 
 class TestResponseMessage:
     def test_tool_calls_only_yields_none_content(self):

@@ -31,10 +31,10 @@ Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https
 - **Learns from your context** — Mira synthesizes rules from your merged PRs: rejected comments and human review patterns become team rules that shape future reviews.
 - **You set the rules** — Define custom and org-wide review rules in plain language, per-repo via `.mira.yaml` or from the dashboard.
 - **Privacy first** — Self-hosted by default. Diffs, indexes, review history, and CVE data live in your SQLite or Postgres, on infra you own. No phone-home, no required telemetry, no "is this used for training?"
-- **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — and Mira is the fastest tool on the public [Code Review Bench](#benchmark).
+- **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — Mira has the best precision of any top-tier tool on the public [Code Review Bench](#benchmark), on a model that costs cents per review.
 - **Catches PRs stepping on each other** — While reviewing, Mira checks the repo's other open PRs and flags merge-conflict risk and duplicate effort right in the walkthrough.
 - **Indexed, cross-file context** — A full-repo code index gives the model real project context, not just the diff — plus org-wide package search and hourly OSV.dev CVE scanning across every repo.
-- **GitHub, GitLab, and Forgejo** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline, with full feature parity across GitHub, GitLab, and Forgejo (incl. Codeberg). A Bitbucket adapter is next; the engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
+- **GitHub, GitLab, Forgejo, and Bitbucket Cloud** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline across GitHub, GitLab, Forgejo (incl. Codeberg), and Bitbucket Cloud. The engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
 - **Self-host on day one** — Docker image with Railway / Fly.io / Render configs, SQLite or Postgres. Every feature included.
 
 ## Dashboard
@@ -59,28 +59,44 @@ If your engineering team needs answers like *"which of our repos are exposed to 
 
 ## Benchmark
 
-Mira is **the fastest tool measured** on the public [Code Review Bench](https://codereview.withmartian.com/?mode=offline), and the only one on the speed/quality Pareto frontier: every tool that scores higher on F1 takes **5–14× longer per PR**.
+On the **full 50-PR offline set** of the public [Martian Code Review Bench](https://github.com/withmartian/code-review-benchmark/tree/e616e849755441da38f18bf3adba2c9583b03803/offline), Mira running an inexpensive model (**DeepSeek v4.1 flash**) ranks **first on F1 of 23 published reviewers** and posts the fewest unmatched comments of any tool above 50% recall. Run on 6 November 2026.
 
-![Median review time per PR, Mira vs every published competitor](.github/assets/benchmark-frontier.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/benchmark-f1-dark.svg">
+  <img alt="F1 per code reviewer on all 50 pull requests; Mira ranks first" src=".github/assets/benchmark-f1-light.svg" width="760">
+</picture>
 
-Plotted against every published competitor on the same subset, Mira sits in the upper-left corner: everything to the right is slower; everything above it pays 5–14× the wall time for the extra F1.
+| Reviewer | Precision | Recall | F1 | TP / FP / FN |
+|---|---:|---:|---:|---|
+| **Mira · DeepSeek v4.1 flash** | **75.0%** | 55.1% | **63.5** | 87 / 29 / 71 |
+| Cubic v2 | 56.5% | 60.8% | 58.5 | 96 / 74 / 62 |
+| Qodo Extended v2 | 56.2% | 57.0% | 56.6 | 90 / 70 / 68 |
+| Augment | 52.4% | 61.4% | 56.6 | 97 / 88 / 61 |
+| Devin | 67.3% | 41.8% | 51.6 | 66 / 32 / 92 |
+| Qodo v2 | 47.1% | 56.3% | 51.3 | 89 / 100 / 69 |
+| Cursor Bugbot | 54.3% | 44.3% | 48.8 | 70 / 59 / 88 |
+| GitLab Duo | 47.5% | 48.1% | 47.8 | 76 / 84 / 82 |
+| Greptile v4.1 | 46.9% | 48.1% | 47.5 | 76 / 86 / 82 |
+| GitHub Copilot v2 | 34.3% | 62.0% | 44.1 | 98 / 188 / 60 |
+| CodeRabbit | 33.8% | 58.2% | 42.8 | 92 / 180 / 66 |
+| Claude Code | 36.5% | 41.1% | 38.7 | 65 / 113 / 93 |
 
-![Speed vs quality: Mira on the Pareto frontier](.github/assets/benchmark-by-language.svg)
+The full ranking of all 23 reviewers, per-PR results, head commits and settings are in [`benchmark-results.json`](.github/assets/benchmark-results.json).
 
-Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.6.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/benchmark-pr-dark.svg">
+  <img alt="Precision against recall for every reviewer; Mira has the highest precision of any tool above 50% recall" src=".github/assets/benchmark-pr-light.svg" width="760">
+</picture>
 
-| | **Mira** | Cubic-v2 | Greptile | CodeRabbit | GitHub Copilot |
-|---|---:|---:|---:|---:|---:|
-| F1 | **44** | 56 | 35 | 32 | 31 |
-| Precision | **43%** | 50% | 32% | 24% | 24% |
-| Recall | **46%** | 65% | 40% | 50% | 43% |
-| Median time / PR | **~77s** | ~9m | ~5m | ~5m | ~10m |
+Mira sits furthest up on the precision axis at a recall most tools don't reach: the tools that find a few more bugs (Cubic, Augment, Copilot, CodeRabbit) post two to six times as many comments that match nothing in the reference set.
 
-> Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.6 as the judge.
+Median review time was **106 seconds** per PR; all 50 reviews completed.
+
+> Methodology: all 50 PRs of the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset, reviewed once each with Mira's default settings (reasoning effort `medium`, 16k-token output budget) and scored with the benchmark's own matching prompts and Claude Sonnet 4.5 as the judge; competitor rows are the benchmark's published results on the same PRs. Settings, per-PR results and commit pins are in [`benchmark-results.json`](.github/assets/benchmark-results.json).
 
 ## Quick Start
 
-Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), and Forgejo/Codeberg (via an access token) are all fully supported; Bitbucket is next.
+Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), Forgejo/Codeberg (via an access token), and Bitbucket Cloud (via an access or API token) are all supported.
 
 **1. Deploy** — one-click on Railway, or with Docker:
 
@@ -109,7 +125,33 @@ docker run -p 8000:8000 --env-file .env \
 
 **2. Install the app** on your repos — every PR gets reviewed.
 
+**Bitbucket Cloud** — instead of the GitHub App creds, set:
+
+```bash
+# A workspace/project/repository access token (Bearer), or an API token as email:token.
+# Scopes: repository read, pull requests read+write, webhooks read+write.
+MIRA_BITBUCKET_TOKEN=ATCTT3x...
+MIRA_BITBUCKET_WEBHOOK_SECRET=your-secret
+MIRA_BITBUCKET_WORKSPACE=your-workspace   # optional: dashboard repo discovery scope
+MIRA_BITBUCKET_BOT_USER=mira              # optional: bot nickname if the token can't read /user
+```
+
+Then add a workspace (or repository) webhook pointing at `https://<mira-host>/bitbucket/webhook` with the same secret and the triggers *Repository: Push*, *Pull request: Created, Updated, Merged, Comment created*. Bitbucket PRs have no labels, so `@mira pause` state is kept in Mira's database. Comment commands check repository permission through the workspace permissions API, which needs admin rights; otherwise list reviewers' account ids in `commands.allowed_users`. Bitbucket nicknames are not unique, so authorization and the allowlist match the commenter's account id, never the nickname.
+
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
+
+### Review a local branch
+
+From a Git checkout, compare committed `HEAD` with its merge base against a local ref:
+
+```bash
+mira review --base main
+```
+
+Mira pins the diff, supporting source reads, and convention documents such as
+`AGENTS.md` to the committed branch. Staged, unstaged, and untracked source edits
+are excluded. The command uses CLI configuration without dashboard overrides
+or a Git hosting token. Use `--output json` for machine-readable findings.
 
 ### Codex CLI
 
@@ -165,6 +207,20 @@ filter:
 ```
 
 → Full schema and every key: [Configuration docs](https://docs.miracode.ai/configuration).
+
+For code-index summaries over an OpenAI-compatible Chat or Responses endpoint,
+`llm.indexing_temperature` defaults to `0.0`. Set it to `omit` to leave the
+temperature field out of requests, or to a finite nonnegative number supported
+by your endpoint. The dashboard's **Indexing Temperature** setting overrides
+config; **Inherit deployment config** clears that override. This does not change
+reviewer temperature defaults or reasoning effort. Existing reasoning policy may
+still omit a numeric temperature. Bedrock uses `0.0` for index summaries.
+Codex CLI manages sampling itself.
+
+```yaml
+llm:
+  indexing_temperature: omit
+```
 
 ## Development
 

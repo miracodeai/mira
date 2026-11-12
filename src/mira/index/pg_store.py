@@ -10,9 +10,12 @@ import logging
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
+from contextvars import ContextVar
 from typing import Any
+from uuid import uuid4
 
+from mira.index._package_search import PackageGroups
 from mira.index._store_shared import _StoreSharedMixin
 from mira.index.store import (
     BlastRadiusEntry,
@@ -20,17 +23,31 @@ from mira.index.store import (
     ExternalRef,
     FeedbackEventRow,
     FileSummary,
+    IndexingSuperseded,
+    IndexRun,
     IndexStore,
     LearnedRuleRow,
+    ManifestPackageMigrationError,
     ReplyRow,
     ReviewCommentRow,
     ReviewContext,
     ReviewEvent,
     SymbolInfo,
+    _manifest_packages_for_write,
 )
 from mira.models import PRFingerprint
 
 logger = logging.getLogger(__name__)
+
+_INDEX_RUNS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS index_runs (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    token TEXT NOT NULL,
+    pending BOOLEAN NOT NULL,
+    PRIMARY KEY (owner, repo)
+);
+"""
 
 _PG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -185,6 +202,7 @@ CREATE TABLE IF NOT EXISTS feedback_events (
     comment_title TEXT NOT NULL DEFAULT '',
     signal TEXT NOT NULL DEFAULT '',
     actor TEXT NOT NULL DEFAULT '',
+    pr_author TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
@@ -214,7 +232,7 @@ CREATE TABLE IF NOT EXISTS package_manifests (
     file_path TEXT NOT NULL DEFAULT '',
     is_dev INTEGER NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0,
-    UNIQUE(owner, repo, name, kind, file_path)
+    scan_eligible INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_pkg_manifest_name
@@ -247,6 +265,26 @@ CREATE INDEX IF NOT EXISTS idx_pg_vuln_severity
 _pg_conn = None
 _schema_initialized = False
 _lock = threading.Lock()
+_index_write_connection: ContextVar[tuple[PgIndexStore, Any] | None] = ContextVar(
+    "index_write_connection", default=None
+)
+
+
+def index_write_connection(url: str) -> Any | None:
+    """Return the guarded connection for a dashboard write on the same database."""
+    scoped = _index_write_connection.get()
+    return scoped[1] if scoped is not None and scoped[0]._url == url else None
+
+
+@contextmanager
+def _index_transaction(url: str) -> Iterator[Any]:
+    from mira.db.postgres import connect
+
+    # Use a dedicated connection so no shared-cursor retry or commit can
+    # detach the ownership check from the writes it protects.
+    with connect(url) as conn, conn.transaction():
+        conn.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        yield conn
 
 
 def _drop_pg_conn() -> None:
@@ -259,10 +297,62 @@ def _drop_pg_conn() -> None:
             _pg_conn = None
 
 
+def _legacy_manifest_constraint(cur: Any) -> str | None:
+    cur.execute(
+        "SELECT i.indisprimary, c.conname, ARRAY(SELECT a.attname "
+        "FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, position) "
+        "LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum "
+        "ORDER BY k.position) "
+        "FROM pg_index i LEFT JOIN pg_constraint c ON c.conindid=i.indexrelid "
+        "AND c.conrelid=i.indrelid AND c.contype='u' "
+        "WHERE i.indrelid='package_manifests'::regclass AND i.indisunique"
+    )
+    legacy = None
+    for primary, constraint, columns in cur.fetchall():
+        if primary and tuple(columns) == ("id",):
+            continue
+        if (
+            legacy is not None
+            or constraint is None
+            or tuple(columns) != ("owner", "repo", "name", "kind", "file_path")
+        ):
+            raise ManifestPackageMigrationError("Unsupported package manifest uniqueness")
+        legacy = constraint
+    return legacy
+
+
+def _migrate_manifest_package_version_identity(url: str) -> None:
+    try:
+        from psycopg import sql
+
+        from mira.db.postgres import connect
+
+        # Schema upgrades must not open a transaction on the shared writer connection.
+        with connect(url) as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("LOCK TABLE package_manifests IN ACCESS EXCLUSIVE MODE")
+            legacy = _legacy_manifest_constraint(cur)
+            cur.execute(
+                "ALTER TABLE package_manifests ADD COLUMN IF NOT EXISTS "
+                "scan_eligible INTEGER NOT NULL DEFAULT 1"
+            )
+            if legacy is not None:
+                cur.execute(
+                    sql.SQL("ALTER TABLE package_manifests DROP CONSTRAINT {}").format(
+                        sql.Identifier(legacy)
+                    )
+                )
+    except ManifestPackageMigrationError:
+        raise
+    except Exception as exc:
+        raise ManifestPackageMigrationError(f"Package manifest migration failed: {exc}") from exc
+
+
 def _get_conn(url: str) -> Any:
     """Get the shared Postgres connection, initializing schema on first use."""
     global _pg_conn, _schema_initialized
     with _lock:
+        from psycopg.errors import UndefinedColumn
+
         from mira.db.postgres import connect
 
         if _pg_conn is None:
@@ -280,6 +370,10 @@ def _get_conn(url: str) -> Any:
                         "TEXT NOT NULL DEFAULT ''"
                     )
                 cur.execute(
+                    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS pr_author "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
                     "TEXT NOT NULL DEFAULT 'approved'"
                 )
@@ -287,6 +381,21 @@ def _get_conn(url: str) -> Any:
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS created_by "
                     "TEXT NOT NULL DEFAULT ''"
                 )
+                try:
+                    needs_migration = _legacy_manifest_constraint(cur) is not None
+                    if not needs_migration:
+                        try:
+                            cur.execute("SELECT scan_eligible FROM package_manifests LIMIT 0")
+                        except UndefinedColumn:
+                            needs_migration = True
+                except ManifestPackageMigrationError:
+                    raise
+                except Exception as exc:
+                    raise ManifestPackageMigrationError(
+                        f"Package manifest identity validation failed: {exc}"
+                    ) from exc
+            if needs_migration:
+                _migrate_manifest_package_version_identity(url)
             _schema_initialized = True
         return _pg_conn
 
@@ -314,7 +423,7 @@ def _registry_owner(storage_owner: str) -> str:
     use the clean owner to resolve the repository and ``IndexStore.open`` adds
     the storage prefix again after determining its platform.
     """
-    for platform in ("gitlab", "forgejo"):
+    for platform in ("gitlab", "forgejo", "bitbucket"):
         prefix = f"_{platform}/"
         if storage_owner.startswith(prefix):
             return storage_owner[len(prefix) :]
@@ -406,7 +515,7 @@ def list_packages_org_wide(url: str) -> list[dict]:
     file_path lets the poller prefer lockfile rows over manifest rows."""
     with _pg_cursor(url) as cur:
         cur.execute(
-            "SELECT DISTINCT owner, repo, kind, name, version, file_path "
+            "SELECT DISTINCT owner, repo, kind, name, version, file_path, scan_eligible "
             "FROM package_manifests "
             "WHERE kind IN ('npm', 'pip', 'go', 'rust', 'composer') AND version <> ''"
         )
@@ -421,27 +530,20 @@ def list_packages_org_wide(url: str) -> list[dict]:
             "name": r[3],
             "version": r[4],
             "file_path": r[5],
+            "scan_eligible": bool(r[6]),
         }
         for r in rows
     ]
 
 
-def search_packages_org_wide(
-    url: str,
-    name: str | None = None,
-    version: str | None = None,
-    kind: str | None = None,
-    is_dev: bool | None = None,
-    limit: int = 500,
-) -> list[dict]:
-    """Search for packages across every repo in the org.
-
-    Returns rows of {owner, repo, name, kind, version, file_path, is_dev}.
-    Case-insensitive name and version match (ILIKE with implicit wildcards).
-    Empty/None filters are ignored. Backs the org-wide package search page —
-    used for incident response ("which repos use lodash@4.17.20 after this
-    CVE?") and upgrade audits.
-    """
+def _package_search_query(
+    name: str | None,
+    version: str | None,
+    kind: str | None,
+    is_dev: bool | None,
+    limit: int | None,
+) -> tuple[str, tuple]:
+    """Share the existing backend matching/order between raw and grouped reads."""
     clauses: list[str] = []
     params: list = []
     if name:
@@ -462,9 +564,30 @@ def search_packages_org_wide(
         "SELECT owner, repo, name, kind, version, file_path, is_dev "
         f"FROM package_manifests {where} "
         "ORDER BY LOWER(name), owner, repo "
-        "LIMIT %s"
     )
-    params.append(limit)
+    if limit is not None:
+        sql += "LIMIT %s"
+        params.append(limit)
+    return sql, tuple(params)
+
+
+def search_packages_org_wide(
+    url: str,
+    name: str | None = None,
+    version: str | None = None,
+    kind: str | None = None,
+    is_dev: bool | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Search for packages across every repo in the org.
+
+    Returns rows of {owner, repo, name, kind, version, file_path, is_dev}.
+    Case-insensitive name and version match (ILIKE with implicit wildcards).
+    Empty/None filters are ignored. Backs the org-wide package search page —
+    used for incident response ("which repos use lodash@4.17.20 after this
+    CVE?") and upgrade audits.
+    """
+    sql, params = _package_search_query(name, version, kind, is_dev, limit)
 
     with _pg_cursor(url) as cur:
         cur.execute(sql, tuple(params))
@@ -484,6 +607,40 @@ def search_packages_org_wide(
     ]
 
 
+def search_package_groups_org_wide(
+    url: str,
+    name: str | None = None,
+    version: str | None = None,
+    kind: str | None = None,
+    is_dev: bool | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Stream final groups in the existing database order on a server cursor."""
+    from mira.db.postgres import connect
+
+    groups = PackageGroups(limit, postgres_order=True)
+    sql, params = _package_search_query(name, version, kind, is_dev, None)
+    _get_conn(url)  # Preserve the raw helper's lazy schema initialization.
+    with connect(url) as conn, conn.transaction():
+        conn.execute("SET TRANSACTION READ ONLY")
+        with conn.cursor(name="mira_package_search") as cursor:
+            cursor.itersize = 128
+            cursor.execute(sql, params)
+            for r in cursor:
+                groups.add(
+                    {
+                        "owner": _registry_owner(r[0]),
+                        "repo": r[1],
+                        "name": r[2],
+                        "kind": r[3],
+                        "version": r[4],
+                        "file_path": r[5],
+                        "is_dev": bool(r[6]),
+                    }
+                )
+    return groups.finish()
+
+
 class PgIndexStore(_StoreSharedMixin):
     """PostgreSQL-backed index store with owner/repo scoping.
 
@@ -497,6 +654,54 @@ class PgIndexStore(_StoreSharedMixin):
         self._url = url
         _get_conn(url)  # eager connect + schema init
 
+    def claim_index_run(self) -> IndexRun:
+        if _index_write_connection.get() is not None:
+            raise RuntimeError("Cannot claim an index run inside another transaction")
+        token = uuid4().hex
+        key = (self._owner, self._repo)
+        with _index_transaction(self._url) as conn:
+            # An existing installation can start multiple workers at once.
+            if conn.execute("SELECT to_regclass('index_runs')").fetchone()[0] is None:
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext('mira.index_runs'), 371)")
+                conn.execute(_INDEX_RUNS_SCHEMA)
+            conn.execute(
+                "INSERT INTO index_runs (owner, repo, token, pending) VALUES (%s, %s, %s, FALSE) "
+                "ON CONFLICT (owner, repo) DO NOTHING",
+                (*key, token),
+            )
+            (pending,) = conn.execute(
+                "SELECT pending FROM index_runs WHERE owner=%s AND repo=%s FOR UPDATE", key
+            ).fetchone()
+            conn.execute(
+                "UPDATE index_runs SET token=%s, pending=TRUE WHERE owner=%s AND repo=%s",
+                (token, *key),
+            )
+        return IndexRun(token, pending)
+
+    @contextmanager
+    def index_write(self, run: IndexRun) -> Iterator[None]:
+        if _index_write_connection.get() is not None:
+            raise RuntimeError("Nested index write")
+        with _index_transaction(self._url) as conn:
+            row = conn.execute(
+                "SELECT token FROM index_runs WHERE owner=%s AND repo=%s FOR UPDATE",
+                (self._owner, self._repo),
+            ).fetchone()
+            if row != (run.token,):
+                raise IndexingSuperseded
+            context = _index_write_connection.set((self, conn))
+            try:
+                yield
+            finally:
+                _index_write_connection.reset(context)
+
+    def finish_index_run(self, run: IndexRun) -> None:
+        with self.index_write(run), self._cursor() as cur:
+            cur.execute(
+                "UPDATE index_runs SET pending=FALSE WHERE owner=%s AND repo=%s",
+                (self._owner, self._repo),
+            )
+
     def _refresh_conn(self) -> Any:
         """Drop the shared module connection and bind a fresh handle."""
         _drop_pg_conn()
@@ -507,6 +712,11 @@ class PgIndexStore(_StoreSharedMixin):
         """Cursor on the current shared connection; reconnects once on idle drop."""
         from mira.db.postgres import ReconnectingCursor
 
+        scoped = _index_write_connection.get()
+        if scoped is not None and scoped[0] is self:
+            with scoped[1].cursor() as cur:
+                yield cur
+            return
         with ReconnectingCursor(
             _get_conn(self._url).cursor(), on_reconnect=self._refresh_conn
         ) as cur:
@@ -516,7 +726,9 @@ class PgIndexStore(_StoreSharedMixin):
         # Always commit the current shared connection — a reconnect (from this
         # or any other store instance) closes the old handle, so caching one
         # per instance would commit on a dead connection.
-        _get_conn(self._url).commit()
+        scoped = _index_write_connection.get()
+        if scoped is None or scoped[0] is not self:
+            _get_conn(self._url).commit()
 
     def _exec(self, sql: str, params: tuple = ()):
         """Execute a query and return the cursor."""
@@ -910,6 +1122,25 @@ class PgIndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    @contextmanager
+    def iter_review_events(self) -> Iterator[Iterator[ReviewEvent]]:
+        """Stream history on a dedicated read-only transaction and server cursor."""
+        from mira.db.postgres import connect
+
+        with connect(self._url) as conn, conn.transaction():
+            conn.execute("SET TRANSACTION READ ONLY")
+            with conn.cursor(name="mira_review_history") as cursor:
+                cursor.itersize = 128
+                cursor.execute(
+                    "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
+                    "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
+                    "categories, created_at, author_avatar_url, reviewed_paths "
+                    "FROM review_events WHERE owner=%s AND repo=%s "
+                    "ORDER BY created_at DESC, id ASC",
+                    (self._owner, self._repo),
+                )
+                yield (ReviewEvent(*row) for row in cursor)
+
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
@@ -1105,6 +1336,41 @@ class PgIndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    def get_review_quality_by_author(self, author: str, since: float | None = None) -> dict:
+        """Sum the blockers/warnings/suggestions raised on one author's PRs."""
+        params: list = [self._owner, self._repo, author]
+        since_clause = ""
+        if since is not None:
+            since_clause = " AND created_at >= %s"
+            params.append(since)
+        row = self._fetchone(
+            "SELECT COUNT(*), COALESCE(SUM(blockers),0), COALESCE(SUM(warnings),0), "
+            "COALESCE(SUM(suggestions),0), COALESCE(SUM(comments_posted),0) "
+            f"FROM review_events WHERE owner=%s AND repo=%s AND author=%s{since_clause}",
+            tuple(params),
+        )
+        return {
+            "reviews": int(row[0] or 0),
+            "blockers": int(row[1] or 0),
+            "warnings": int(row[2] or 0),
+            "suggestions": int(row[3] or 0),
+            "comments_posted": int(row[4] or 0),
+        }
+
+    def get_feedback_quality_by_author(self, pr_author: str) -> dict:
+        """Accept/reject tallies for Mira's feedback on one author's PRs."""
+        rows = self._fetchall(
+            "SELECT signal, COUNT(*) FROM feedback_events "
+            "WHERE owner=%s AND repo=%s AND pr_author=%s GROUP BY signal",
+            (self._owner, self._repo, pr_author),
+        )
+        counts = {signal: int(count) for signal, count in rows}
+        return {
+            "accepted": counts.get("accepted", 0),
+            "rejected": counts.get("rejected", 0),
+            "human_review": counts.get("human_review", 0),
+        }
+
     def get_review_stats(self, since: float | None = None) -> dict:
         params: list = [self._owner, self._repo]
         since_clause = ""
@@ -1260,14 +1526,16 @@ class PgIndexStore(_StoreSharedMixin):
         comment_title: str,
         signal: str,
         actor: str,
+        pr_author: str = "",
     ) -> FeedbackEventRow:
         now = time.time()
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
-                "comment_category, comment_severity, comment_title, signal, actor, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                "comment_category, comment_severity, comment_title, signal, actor, pr_author, "
+                "created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -1280,6 +1548,7 @@ class PgIndexStore(_StoreSharedMixin):
                     comment_title,
                     signal,
                     actor,
+                    pr_author,
                     now,
                 ),
             )
@@ -1296,6 +1565,7 @@ class PgIndexStore(_StoreSharedMixin):
             comment_title=comment_title,
             signal=signal,
             actor=actor,
+            pr_author=pr_author,
             created_at=now,
         )
 
@@ -1321,6 +1591,7 @@ class PgIndexStore(_StoreSharedMixin):
                 e["comment_title"],
                 e["signal"],
                 e["actor"],
+                e.get("pr_author", ""),
                 now,
             )
             for e in events
@@ -1329,8 +1600,9 @@ class PgIndexStore(_StoreSharedMixin):
             cur.executemany(
                 "INSERT INTO feedback_events "
                 "(owner, repo, pr_number, pr_url, comment_path, comment_line, "
-                "comment_category, comment_severity, comment_title, signal, actor, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "comment_category, comment_severity, comment_title, signal, actor, pr_author, "
+                "created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 rows,
             )
         self._commit()
@@ -1394,6 +1666,13 @@ class PgIndexStore(_StoreSharedMixin):
         )
         if existing:
             # Preserve the existing approval status across re-synthesis.
+            if existing[1] == "rejected":
+                # An admin rejected this rule: leave their decision, and the
+                # text they rejected, untouched rather than re-describing it
+                # under the same verdict.
+                rejected = self.get_learned_rule(existing[0])
+                if rejected is not None:
+                    return rejected
             with self._cursor() as cur:
                 cur.execute(
                     "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
@@ -1573,45 +1852,51 @@ class PgIndexStore(_StoreSharedMixin):
         file_path: str,
         packages: list[dict],
     ) -> int:
-        from mira.index.store import PackageManifestRow  # noqa: F401
-
         now = time.time()
-        with self._cursor() as cur:
+        rows = [
+            (
+                self._owner,
+                self._repo,
+                p["name"],
+                p["kind"],
+                p["version"],
+                file_path,
+                int(bool(p.get("is_dev"))),
+                now,
+                int(p.get("scan_eligible", True)),
+            )
+            for p in _manifest_packages_for_write(file_path, packages)
+        ]
+        # Raw version strings can exceed a PostgreSQL B-tree index key. Dedupe
+        # exact identities in memory and serialize replacements of the same
+        # file. The hash is only a lock key: collisions serialize two files.
+        lock_key = json.dumps(["package_manifests", self._owner, self._repo, file_path])
+        scoped = _index_write_connection.get()
+        transaction = (
+            nullcontext(scoped[1])
+            if scoped is not None and scoped[0] is self
+            else _index_transaction(self._url)
+        )
+        with transaction as conn, conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
             cur.execute(
                 "DELETE FROM package_manifests WHERE owner=%s AND repo=%s AND file_path=%s",
                 (self._owner, self._repo, file_path),
             )
-            if packages:
-                rows = [
-                    (
-                        self._owner,
-                        self._repo,
-                        p["name"],
-                        p["kind"],
-                        p["version"],
-                        p["file_path"],
-                        1 if p.get("is_dev") else 0,
-                        now,
-                    )
-                    for p in packages
-                ]
+            if rows:
                 cur.executemany(
                     "INSERT INTO package_manifests "
-                    "(owner, repo, name, kind, version, file_path, is_dev, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (owner, repo, name, kind, file_path) DO UPDATE SET "
-                    "version=EXCLUDED.version, is_dev=EXCLUDED.is_dev, "
-                    "updated_at=EXCLUDED.updated_at",
+                    "(owner, repo, name, kind, version, file_path, is_dev, updated_at, scan_eligible) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     rows,
                 )
-        self._commit()
         return len(packages)
 
     def list_manifest_packages(self):  # type: ignore[no-untyped-def]
         from mira.index.store import PackageManifestRow
 
         rows = self._fetchall(
-            "SELECT id, name, kind, version, file_path, is_dev, updated_at "
+            "SELECT id, name, kind, version, file_path, is_dev, updated_at, scan_eligible "
             "FROM package_manifests WHERE owner=%s AND repo=%s "
             "ORDER BY LOWER(name)",
             (self._owner, self._repo),
@@ -1625,6 +1910,7 @@ class PgIndexStore(_StoreSharedMixin):
                 file_path=r[4],
                 is_dev=bool(r[5]),
                 updated_at=r[6],
+                scan_eligible=bool(r[7]),
             )
             for r in rows
         ]

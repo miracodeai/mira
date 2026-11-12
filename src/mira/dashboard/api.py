@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
+from pydantic_core import InitErrorDetails
 
+from mira.config import IndexingTemperature
 from mira.dashboard.auth import AuthMiddleware, create_auth_router
 from mira.dashboard.db import AppDatabase, RepoRecord
 from mira.index.relationships import RelationshipStore
-from mira.index.store import IndexStore
+from mira.index.store import IndexingSuperseded, IndexStore
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +58,7 @@ def register_dashboard(app: FastAPI) -> None:
 
 # Standalone app — initialized at module load, but routes are registered at
 # the bottom of this file, *after* all @router decorators have run.
-app = FastAPI(title="Mira Dashboard API", version="0.9.1")
+app = FastAPI(title="Mira Dashboard API", version="0.11.1")
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
@@ -58,8 +68,8 @@ def _get_index_dir() -> str:
 
 
 # Cross-platform preference order used when the same owner/repo exists on
-# more than one platform: github → gitlab → forgejo → origin.
-_PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2, "origin": 3}
+# more than one platform: github → gitlab → forgejo → bitbucket → origin.
+_PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2, "bitbucket": 3, "origin": 4}
 
 
 def _pick_platform_record(records: list[RepoRecord]) -> RepoRecord:
@@ -126,6 +136,13 @@ class FileModel(BaseModel):
     loc: int = 0
 
 
+class RepoBaseBranchPolicy(BaseModel):
+    """Per-repo auto-review destination-branch policy (see repos.base_branch_policy)."""
+
+    mode: Literal["inherit", "override", "disable"]
+    branches: list[str] = Field(default_factory=list)
+
+
 class RepoDetail(BaseModel):
     owner: str
     repo: str
@@ -136,6 +153,10 @@ class RepoDetail(BaseModel):
     external_refs_count: int
     lines_count: int = 0
     last_indexed: str | None = None
+    # Stored auto-review destination-branch policy for this repo:
+    # "inherit" (deployment default), "override" (these patterns) or
+    # "disable".
+    base_branch_policy: RepoBaseBranchPolicy | None = None
 
 
 class ImportEdge(BaseModel):
@@ -340,6 +361,10 @@ class ForgejoRepoRegister(BaseModel):
     project: str  # "owner/repo"
 
 
+class BitbucketRepoRegister(BaseModel):
+    project: str  # "workspace/repo_slug"
+
+
 class OriginRepoRegister(BaseModel):
     project: str  # "owner/repo"
 
@@ -360,6 +385,9 @@ class ModelOption(BaseModel):
 
 class ModelsResponse(BaseModel):
     indexing_model: str
+    indexing_temperature: IndexingTemperature
+    indexing_temperature_source: str
+    config_indexing_temperature: IndexingTemperature
     review_model: str
     security_model: str
     backend: str  # "openrouter" | "bedrock" | "openai-compatible"
@@ -384,10 +412,35 @@ class ModelsResponse(BaseModel):
 
 class ModelsUpdate(BaseModel):
     indexing_model: str
+    indexing_temperature: IndexingTemperature | None = None
     review_model: str
     security_model: str = ""
     review_thinking_mode: str = "off"
     api_style: str = "chat"
+
+    @field_validator("indexing_temperature", mode="wrap")
+    @classmethod
+    def _json_safe_temperature_errors(
+        cls, value: object, handler: ValidatorFunctionWrapHandler
+    ) -> IndexingTemperature | None:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            try:
+                json.dumps(exc.errors(), allow_nan=False)
+            except (TypeError, ValueError):
+                # FastAPI echoes invalid inputs, including nonfinite values in rejected containers.
+                errors = [
+                    InitErrorDetails(
+                        type=error["type"],
+                        loc=error["loc"],
+                        input=repr(error["input"]),
+                        ctx=error.get("ctx", {}),
+                    )
+                    for error in exc.errors()
+                ]
+                raise ValidationError.from_exception_data(cls.__name__, errors) from exc
+            raise
 
 
 class GlobalSettingsResponse(BaseModel):
@@ -401,7 +454,7 @@ class GlobalSettingsUpdate(BaseModel):
 
 # Only `filter` and `review` are admin-editable from the UI; LLM creds and
 # DB settings stay env-only and would be silently overwritten if exposed
-# here.
+# here. `commands` is deliberately deployment-config-only (`mira.yaml`).
 _ALLOWED_OVERRIDE_SECTIONS = {"filter", "review"}
 
 
@@ -508,37 +561,49 @@ async def _run_initial_indexing(default_mode: str) -> None:
             logger.warning("Failed to get GitHub token for indexing: %s", exc)
     gitlab_token = os.environ.get("MIRA_GITLAB_TOKEN", "")
     forgejo_token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
+    bitbucket_token = os.environ.get("MIRA_BITBUCKET_TOKEN", "")
     origin_token = os.environ.get("MIRA_ORIGIN_TOKEN", "")
 
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
-    from mira.index.indexer import index_repo
+    from mira.index.indexer import IndexingRecoveryPending, index_repo
     from mira.llm import create_llm
     from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
-    config = load_config()
-    llm = create_llm(llm_config_for("indexing", config.llm))
+    try:
+        config = load_config()
+        llm = create_llm(llm_config_for("indexing", config.llm))
+    except Exception as exc:
+        # Runs as a fire-and-forget task: without this, the error is lost and
+        # every repo in the batch stays "indexing" until a restart.
+        logger.exception("Initial indexing setup failed")
+        for r in to_index:
+            _app_db.set_repo_status(r.owner, r.repo, "failed", error=str(exc), platform=r.platform)
+        return
 
     for repo_record in to_index:
         owner, repo, platform = repo_record.owner, repo_record.repo, repo_record.platform
         full_name = f"{owner}/{repo}"
-        if platform == "gitlab":
-            token = gitlab_token
-        elif platform == "forgejo":
-            token = forgejo_token
-        elif platform == "origin":
-            token = origin_token
-        else:
-            token = github_token
+        token = {
+            "gitlab": gitlab_token,
+            "forgejo": forgejo_token,
+            "bitbucket": bitbucket_token,
+            "origin": origin_token,
+        }.get(platform, github_token)
         if not token:
             # No usable token for this platform — leave it pending instead of
             # crashing on an empty auth header.
             logger.warning("Skipping initial index of %s — no %s token", full_name, platform)
             continue
+        store = None
+        run = None
+        job = None
         try:
-            _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
-            tracker.start(full_name)
-            store = IndexStore.open(owner, repo, platform=platform)
+            store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
+            run = store.claim_index_run()
+            with store.index_write(run):
+                _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
+                job = tracker.start(full_name)
             count = await index_repo(
                 owner=owner,
                 repo=repo,
@@ -547,31 +612,48 @@ async def _run_initial_indexing(default_mode: str) -> None:
                 store=store,
                 llm=llm,
                 full=(repo_record.index_mode == "full"),
-            )
-            # `count` is files re-indexed this run, not the store total.
-            # Read the true total before closing to keep the DB in sync.
-            total_files = len(store.all_paths())
-            store.close()
-            _app_db.set_repo_status(
-                owner,
-                repo,
-                "ready",
-                files_indexed=total_files,
-                bump_last_indexed=True,
+                run=run,
                 platform=platform,
             )
-            tracker.complete(full_name, count)
+            with store.index_write(run):
+                _app_db.set_repo_status(
+                    owner,
+                    repo,
+                    "ready",
+                    files_indexed=len(store.all_paths()),
+                    bump_last_indexed=True,
+                    platform=platform,
+                )
+                tracker.complete(full_name, count, expected=job)
             logger.info("Indexed %s: %d files", full_name, count)
             from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
 
             await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
-        except EmptyRepoError as empty:
-            _app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
-            tracker.complete(full_name, 0)
+        except IndexingSuperseded:
+            if job is not None:
+                tracker.discard(job)
+            logger.info("Indexing superseded for %s", full_name)
         except Exception as exc:
-            _app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform=platform)
-            tracker.fail(full_name, str(exc))
-            logger.exception("Failed to index %s", full_name)
+            try:
+                with store.index_write(run) if store is not None and run else nullcontext():
+                    if isinstance(exc, IndexingRecoveryPending):
+                        status = "indexing"
+                    else:
+                        status = "empty" if isinstance(exc, EmptyRepoError) else "failed"
+                    _app_db.set_repo_status(owner, repo, status, error=str(exc), platform=platform)
+                    if job is None:
+                        logger.exception("Failed to start indexing %s", full_name)
+                    elif status == "empty":
+                        tracker.complete(full_name, 0, expected=job)
+                    else:
+                        tracker.fail(full_name, str(exc), expected=job)
+                        logger.exception("Failed to index %s", full_name)
+            except IndexingSuperseded:
+                if job is not None:
+                    tracker.discard(job)
+        finally:
+            if store is not None:
+                store.close()
 
 
 class BlastRadiusModel(BaseModel):
@@ -592,12 +674,24 @@ class BlastRadiusResponse(BaseModel):
     cross_repo: list[CrossRepoBlastEntry]  # other repos that depend on this one
 
 
+class PackageVersionSourceModel(BaseModel):
+    name: str
+    file_path: str
+    is_dev: bool
+
+
+class PackageVersionModel(BaseModel):
+    version: str
+    sources: list[PackageVersionSourceModel]
+
+
 class PackageModel(BaseModel):
     name: str
     kind: str  # "npm" | "pip" | "docker" | "go" | "rust" | "composer"
     version: str
     file_path: str
     is_dev: bool = False
+    versions: list[PackageVersionModel] = Field(default_factory=list)
 
 
 class PackageSearchHit(BaseModel):
@@ -870,8 +964,11 @@ async def refresh_contributors_repo(
 
 @router.get("/api/contributors/{login}", response_model=ContributorDetailModel)
 def get_contributor(login: str, request: Request, period: str = "") -> ContributorDetailModel:
-    """One contributor's aggregated stats, 365-day heatmap, per-repo breakdown,
-    and Mira review-quality signal (the quality fan-out mirrors /api/stats). Admin only."""
+    """A GitHub contributor's stats, 365-day heatmap, and per-repo breakdown.
+
+    Review quality is aggregated across GitHub repositories for this login.
+    Admin only.
+    """
     _require_admin(request)
     contributor = _app_db.get_contributor_by_login("github", login)
     if contributor is None:
@@ -921,6 +1018,8 @@ def get_contributor(login: str, request: Request, period: str = "") -> Contribut
     q = {"reviews": 0, "blockers": 0, "warnings": 0, "suggestions": 0}
     accepted = rejected = 0
     for repo_record in _app_db.list_repos():
+        if repo_record.platform != contributor.provider:
+            continue
         try:
             store = IndexStore.open(
                 repo_record.owner, repo_record.repo, platform=repo_record.platform

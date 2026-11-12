@@ -20,10 +20,11 @@ import httpx
 from mira.config import load_config
 from mira.platforms import profiles
 from mira.platforms.auth import PlatformAuth
+from mira.platforms.base_branch_policy import base_branch_is_filtered_for_repo
+from mira.platforms.command_policy import is_command_allowed
 from mira.platforms.fetch import make_fetcher
 from mira.platforms.mentions import (
     author_is_filtered,
-    command_after_mention,
     has_mention,
     mention_names,
     strip_mentions,
@@ -271,11 +272,13 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
     # Actor is the comment author
     commenter = comment.get("user", {})
     actor = commenter.get("username", "") or commenter.get("login", "")
+    actor_id = commenter.get("id")
 
     try:
         token = await auth.get_token()
         provider = create_provider("forgejo", token)
         pr_info = await provider.get_pr_info(pr_url)
+        config = load_config()
 
         # Accept a mention of either the configured name or the real bot user.
         names = mention_names(bot_name, await auth.get_bot_identity())
@@ -283,6 +286,16 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
         first_word = question.split()[0].lower() if question.split() else ""
 
         if first_word in _PAUSE_KEYWORDS:
+            if not await is_command_allowed(
+                config,
+                "pause",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo_name,
+                user_id=actor_id,
+            ):
+                return
             await provider.add_label(pr_info, PAUSE_LABEL)
             await provider.post_comment(
                 pr_info,
@@ -290,6 +303,16 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
             )
             return
         if first_word in _RESUME_KEYWORDS:
+            if not await is_command_allowed(
+                config,
+                "resume",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo_name,
+                user_id=actor_id,
+            ):
+                return
             await provider.remove_label(pr_info, PAUSE_LABEL)
             await provider.post_comment(pr_info, "Automatic reviews resumed.")
             return
@@ -303,6 +326,16 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
 
         # Explicit reject on an inline (diff) comment → record feedback.
         if first_word in _REJECT_KEYWORDS and comment_path:
+            if not await is_command_allowed(
+                config,
+                "reject",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo_name,
+                user_id=actor_id,
+            ):
+                return
             try:
                 store = _open_store(owner, repo_name, "forgejo")
                 store.record_feedback(
@@ -338,6 +371,7 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
                 actor=actor,
                 bot_name=bot_name,
                 platform="forgejo",
+                user_id=actor_id,
             )
             return
 
@@ -352,6 +386,7 @@ async def handle_forgejo_note(payload: dict[str, Any], auth: PlatformAuth, bot_n
             actor,
             bot_name,
             platform="forgejo",
+            user_id=actor_id,
         )
     except Exception:
         logger.exception(
@@ -396,6 +431,19 @@ async def dispatch_forgejo_event(
                     actor,
                 )
                 return "ignored"
+            # Destination-branch gate (see dispatch_github_event).
+            base_branch = (payload.get("pull_request", {}).get("base") or {}).get("ref", "")
+            if base_branch_is_filtered_for_repo(
+                owner, repo_name, base_branch, cfg, platform="forgejo"
+            ):
+                logger.info(
+                    "PR %s/%s#%s skipped — base branch %r not in auto-review policy",
+                    owner,
+                    repo_name,
+                    number,
+                    base_branch,
+                )
+                return "ignored"
             background_tasks.add_task(handle_forgejo_pr, payload, auth, bot_name)
             return "processing"
         # Ignore other PR actions (closed, edited, labeled, merged, etc.)
@@ -414,12 +462,6 @@ async def dispatch_forgejo_event(
         names = mention_names(bot_name, bot_identity)
         comment_body = payload.get("comment", {}).get("body", "") or ""
         if has_mention(comment_body, names):
-            cmd_word = command_after_mention(comment_body, names)
-            if cmd_word == "review":
-                pass  # review command bypasses author filter
-            elif author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
-                logger.debug("issue_comment skipped — author %s filtered", actor)
-                return "ignored"
             background_tasks.add_task(handle_forgejo_note, payload, auth, bot_name)
             return "processing"
         return "ignored"

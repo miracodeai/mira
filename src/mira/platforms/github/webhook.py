@@ -9,16 +9,17 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime
 from functools import partial
-from typing import Any
-
-from fastapi import BackgroundTasks
+from typing import Any, Protocol
 
 from mira.config import load_config
 from mira.index.indexer import _should_index
 from mira.index.store import IndexStore
 from mira.models import PRInfo
+from mira.platforms.base_branch_policy import base_branch_is_filtered_for_repo
+from mira.platforms.command_policy import is_command_allowed
 from mira.platforms.fetch import make_fetcher
 from mira.platforms.github.auth import GitHubAppAuth
 from mira.platforms.handlers import (
@@ -46,6 +47,17 @@ logger = logging.getLogger(__name__)
 
 _PR_ACTIONS = {"opened", "synchronize", "reopened"}
 _PR_MERGE_ACTIONS = {"closed"}
+
+
+class TaskScheduler(Protocol):
+    """Where the dispatcher hands the work it decides to do.
+
+    ``fastapi.BackgroundTasks`` satisfies this under ``mira serve``; a caller
+    without a request lifecycle can pass a collector that records the calls
+    and awaits them itself. The dispatcher only ever calls ``add_task``.
+    """
+
+    def add_task(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None: ...
 
 
 def _parse_iso(ts: str) -> float:
@@ -423,17 +435,26 @@ async def _handle_thread_freeform_reply(
             comment_line=comment.get("original_line", 0) or comment.get("line", 0),
             actor=comment["user"]["login"],
             bot_name=bot_name,
+            user_id=comment["user"].get("id"),
         )
     except Exception:
         logger.exception("Error handling free-form thread reply")
 
 
-def _verify_signature(payload_bytes: bytes, signature_header: str, secret: str) -> bool:
-    """Verify the X-Hub-Signature-256 HMAC signature (timing-safe)."""
+def verify_signature(payload_bytes: bytes, signature_header: str, secret: str) -> bool:
+    """Verify the X-Hub-Signature-256 HMAC signature (timing-safe).
+
+    Public so that any entry point receiving GitHub deliveries validates them
+    exactly as ``mira serve`` does.
+    """
     if not signature_header.startswith("sha256="):
         return False
     expected = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
     return hmac.compare_digest(f"sha256={expected}", signature_header)
+
+
+# Historical name, kept for the existing server wiring and tests.
+_verify_signature = verify_signature
 
 
 async def dispatch_github_event(
@@ -441,7 +462,7 @@ async def dispatch_github_event(
     payload: dict[str, Any],
     app_auth: GitHubAppAuth,
     bot_name: str,
-    background_tasks: BackgroundTasks,
+    background_tasks: TaskScheduler,
 ) -> str:
     """Route a verified GitHub webhook to a handler. Returns a status string.
 
@@ -490,10 +511,11 @@ async def dispatch_github_event(
             )
             return "ignored"
 
+        owner = payload.get("repository", {}).get("owner", {}).get("login", "?")
+        repo = payload.get("repository", {}).get("name", "?")
+        number = payload.get("pull_request", {}).get("number", 0)
+
         if author_is_filtered(sender, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
-            owner = payload.get("repository", {}).get("owner", {}).get("login", "?")
-            repo = payload.get("repository", {}).get("name", "?")
-            number = payload.get("pull_request", {}).get("number", 0)
             logger.info(
                 "PR %s/%s#%s skipped — author %s filtered by author filter",
                 owner,
@@ -502,6 +524,21 @@ async def dispatch_github_event(
                 sender,
             )
             return "ignored"
+
+        # Destination-branch gate: a deployment can scope auto-review to
+        # integration branches (or disable it per repo) without affecting
+        # manual @bot commands, lifecycle tracking, or merged-PR learning.
+        base_branch = payload.get("pull_request", {}).get("base", {}).get("ref", "")
+        if base_branch_is_filtered_for_repo(owner, repo, base_branch, cfg, platform="github"):
+            logger.info(
+                "PR %s/%s#%s skipped — destination branch %r not in auto-review policy",
+                owner,
+                repo,
+                number,
+                base_branch,
+            )
+            return "ignored"
+
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         pr_body = payload.get("pull_request", {}).get("body", "") or ""
         if any(re.search(rf"@{re.escape(n)}[ \t]+ignore\b", pr_body, re.IGNORECASE) for n in names):
@@ -524,16 +561,6 @@ async def dispatch_github_event(
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         if "pull_request" in payload.get("issue", {}) and has_mention(comment_body, names):
             cmd_word = command_after_mention(comment_body, names)
-            if cmd_word == "review":
-                pass  # review command bypasses author filter
-            elif author_is_filtered(
-                comment_user, cfg.filter.allowed_authors, cfg.filter.blocked_authors
-            ):
-                logger.info(
-                    "issue_comment skipped — author %s filtered by author filter",
-                    comment_user,
-                )
-                return "ignored"
             if cmd_word in _PAUSE_KEYWORDS | _RESUME_KEYWORDS:
                 background_tasks.add_task(
                     handle_pause_resume, payload, app_auth, bot_name, cmd_word
@@ -624,7 +651,7 @@ async def handle_pull_request(
 
             await dispatch_event(
                 REVIEW_FAILED,
-                {"repo": repo_full, "pr_url": pr_url, "error": str(exc)},
+                {"repo": repo_full, "pr_url": pr_url, "number": number, "error": str(exc)},
             )
 
 
@@ -659,6 +686,7 @@ async def handle_comment(
             comment_user,
             bot_name,
             pr_title=payload["issue"].get("title", ""),
+            user_id=payload["comment"]["user"].get("id"),
         )
     except Exception:
         logger.exception("Error handling comment event")
@@ -692,6 +720,22 @@ async def handle_thread_reject(
         repo = payload["repository"]["name"]
         number = payload["pull_request"]["number"]
 
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
+
+        actor = payload["comment"]["user"]["login"]
+        if not await is_command_allowed(
+            load_config(),
+            "reject",
+            actor,
+            provider=provider,
+            owner=owner,
+            repo=repo,
+            user_id=payload["comment"]["user"].get("id"),
+        ):
+            return
+
         # Capture the human reply for the activity conversation timeline.
         _record_human_reply(
             owner,
@@ -701,9 +745,6 @@ async def handle_thread_reject(
             payload["comment"],
         )
 
-        provider = create_provider(
-            "github", partial(app_auth.get_installation_token, installation_id)
-        )
         from mira.models import PRInfo as _PRInfo
 
         _pr_info_for_lookup = _PRInfo(
@@ -873,6 +914,18 @@ async def handle_pause_resume(
         provider = create_provider(
             "github", partial(app_auth.get_installation_token, installation_id)
         )
+
+        actor = payload.get("comment", {}).get("user", {})
+        if not await is_command_allowed(
+            load_config(),
+            command,
+            actor.get("login", ""),
+            provider=provider,
+            owner=owner,
+            repo=repo,
+            user_id=actor.get("id"),
+        ):
+            return
 
         if command in _PAUSE_KEYWORDS:
             await provider.add_label(pr_info, PAUSE_LABEL)

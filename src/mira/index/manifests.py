@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ class ParsedPackage:
     version: str  # raw constraint as written ("^4.18.0", ">=2.0", "4.18.0", etc.)
     file_path: str
     is_dev: bool = False
+    scan_eligible: bool = True
 
 
 # ── package.json (npm, yarn, pnpm) ──
@@ -259,7 +262,9 @@ def parse_go_mod(content: str, file_path: str) -> list[ParsedPackage]:
 
 # ── Dockerfile ──
 
-_DOCKER_FROM = re.compile(r"^\s*FROM\s+([^\s]+)(?:\s+AS\s+\S+)?\s*$", re.IGNORECASE)
+_DOCKER_FROM = re.compile(
+    r"^\s*FROM\s+(?:--platform=\S+\s+)?(?!-)(\S+)(?:\s+AS\s+\S+)?\s*$", re.IGNORECASE
+)
 
 
 def parse_dockerfile(content: str, file_path: str) -> list[ParsedPackage]:
@@ -404,12 +409,64 @@ def parse_poetry_lock(content: str, file_path: str) -> list[ParsedPackage]:
     return parse_uv_lock(content, file_path)
 
 
-def parse_package_lock_json(content: str, file_path: str) -> list[ParsedPackage]:
+_NPM_NUMBER = r"(?:0|[1-9][0-9]*)"
+_NPM_PRERELEASE_ID = rf"(?:{_NPM_NUMBER}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+_NPM_VERSION = re.compile(
+    rf"{_NPM_NUMBER}\.{_NPM_NUMBER}\.{_NPM_NUMBER}"
+    rf"(?:-{_NPM_PRERELEASE_ID}(?:\.{_NPM_PRERELEASE_ID})*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+_NPM_NAME = re.compile(r"(?:@[A-Za-z0-9_~-][A-Za-z0-9._~-]*/)?[A-Za-z0-9~-][A-Za-z0-9._~-]*")
+_NPM_LOCKFILE = re.compile(r"(^|/)package-lock\.json$")
+
+
+def _npm_lock_package(
+    name: str, info: dict, file_path: str, *, legacy: bool = False
+) -> ParsedPackage | None:
+    version = info.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    resolved = info.get("resolved")
+    # A non-registry source can still have a version in its package metadata.
+    basename = name.rsplit("/", 1)[-1]
+    tarball_path = f"/{name}/-/{basename}-{version}.tgz"
+    registry = resolved is None or (legacy and resolved in (tarball_path, tarball_path[1:]))
+    if isinstance(resolved, str) and resolved.startswith(("https://", "http://")):
+        try:
+            url = urlsplit(resolved)
+            registry = bool(url.hostname) and url.path.endswith(tarball_path)
+        except ValueError:
+            pass
+    return ParsedPackage(
+        name=name,
+        kind="npm",
+        version=version,
+        file_path=file_path,
+        is_dev=bool(info.get("dev")),
+        scan_eligible=bool(
+            registry
+            and not info.get("link")
+            and not info.get("bundled")
+            and not info.get("inBundle")
+            and info.get("name", name) == name
+            and len(name) <= 214
+            and len(version) <= 256
+            and _NPM_NAME.fullmatch(name)
+            and _NPM_VERSION.fullmatch(version)
+        ),
+    )
+
+
+def parse_package_lock_json(
+    content: str, file_path: str, *, for_inventory: bool = False
+) -> list[ParsedPackage]:
     """Parse a `package-lock.json` (npm v2/v3 lockfile).
 
     Modern npm lockfiles use a flat ``packages`` map keyed by relative path
     (e.g. ``"node_modules/lodash"``). Each entry has a concrete ``version``.
     The root entry has key ``""`` and we skip it (it's the project itself).
+    Inventory also walks nested v1 entries. Review scans retain the legacy
+    top-level view until nested entries can be anchored to a specific diff.
     """
     try:
         data = json.loads(content)
@@ -422,6 +479,13 @@ def parse_package_lock_json(content: str, file_path: str) -> list[ParsedPackage]
     if isinstance(packages, dict):
         for path, info in packages.items():
             if not path or not isinstance(info, dict):
+                continue
+            if for_inventory:
+                _, separator, name = f"/{path}".rpartition("/node_modules/")
+                if separator and _NPM_NAME.fullmatch(name):
+                    pkg = _npm_lock_package(name, info, file_path)
+                    if pkg is not None:
+                        out.append(pkg)
                 continue
             # path is "node_modules/x" or "node_modules/x/node_modules/y"
             # — the package name is the last segment, accounting for scopes.
@@ -453,6 +517,23 @@ def parse_package_lock_json(content: str, file_path: str) -> list[ParsedPackage]
     # Legacy npm v1 lockfile uses nested "dependencies" tree.
     deps = data.get("dependencies")
     if isinstance(deps, dict):
+        if for_inventory:
+            pending: list[Iterator[tuple[str, object]]] = [iter(deps.items())]
+            while pending:
+                entry = next(pending[-1], None)
+                if entry is None:
+                    pending.pop()
+                    continue
+                name, info = entry
+                if not isinstance(info, dict):
+                    continue
+                pkg = _npm_lock_package(name, info, file_path, legacy=True)
+                if pkg is not None:
+                    out.append(pkg)
+                children = info.get("dependencies")
+                if isinstance(children, dict):
+                    pending.append(iter(children.items()))
+            return out
         for name, info in deps.items():
             if not isinstance(info, dict):
                 continue
@@ -472,7 +553,7 @@ _PARSERS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"(^|/)uv\.lock$"), parse_uv_lock),
     (re.compile(r"(^|/)poetry\.lock$"), parse_poetry_lock),
     (re.compile(r"(^|/)composer\.lock$"), parse_composer_lock),
-    (re.compile(r"(^|/)package-lock\.json$"), parse_package_lock_json),
+    (_NPM_LOCKFILE, parse_package_lock_json),
     (re.compile(r"(^|/)package\.json$"), parse_package_json),
     (re.compile(r"(^|/)requirements[^/]*\.txt$"), parse_requirements_txt),
     (re.compile(r"(^|/)pyproject\.toml$"), parse_pyproject_toml),
@@ -491,12 +572,14 @@ def is_manifest(path: str) -> bool:
     return any(p.search(path) for p, _ in _PARSERS)
 
 
-def parse_manifest(path: str, content: str) -> list[ParsedPackage]:
+def parse_manifest(path: str, content: str, *, for_inventory: bool = False) -> list[ParsedPackage]:
     """Dispatch to the correct parser based on file path. Returns [] for
     unknown manifest types or parse failures."""
     for pattern, fn in _PARSERS:
         if pattern.search(path):
             try:
+                if for_inventory and fn is parse_package_lock_json:
+                    return parse_package_lock_json(content, path, for_inventory=True)
                 return fn(content, path)  # type: ignore[operator]
             except Exception as exc:
                 logger.warning("Parser failed on %s: %s", path, exc)

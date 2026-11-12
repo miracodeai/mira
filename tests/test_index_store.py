@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import nullcontext
+
 import pytest
 
 from mira.index.store import (
@@ -48,6 +51,56 @@ def sample_summary() -> FileSummary:
         ],
         content_hash="abc123",
     )
+
+
+@pytest.mark.parametrize("exit_kind", ["exhausted", "early", "consumer-error"])
+def test_review_history_stream_is_lazy_and_closes_its_cursor(tmp_path, monkeypatch, exit_kind):
+    cursors = []
+    loaded = []
+
+    class TrackingConnection(sqlite3.Connection):
+        def cursor(self, *args, **kwargs):
+            result = super().cursor(*args, **kwargs)
+            cursors.append(result)
+            return result
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **kw: real_connect(*a, factory=TrackingConnection, **kw)
+    )
+    store = IndexStore(str(tmp_path / "history.db"))
+    try:
+        for number in range(1, 514):
+            store.record_review(number, "Synthetic review", "", 1, 0, 0, created_at=number // 2)
+        expected = store.list_review_events(limit=1000)
+        expected.sort(key=lambda event: (-event.created_at, event.id))
+
+        def row_factory(cursor, row):
+            loaded.append(row)
+            return row
+
+        store._conn.row_factory = row_factory
+        expected_error = (
+            pytest.raises(RuntimeError, match="consumer failed")
+            if exit_kind == "consumer-error"
+            else nullcontext()
+        )
+        with expected_error, store.iter_review_events() as events:
+            assert loaded == []
+            first = next(events)
+            assert first == expected[0]
+            assert len(loaded) == 1
+            if exit_kind == "consumer-error":
+                raise RuntimeError("consumer failed")
+            if exit_kind == "exhausted":
+                assert [first, *events] == expected
+        assert len(loaded) == (513 if exit_kind == "exhausted" else 1)
+        assert len(cursors) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed cursor"):
+            cursors[0].execute("SELECT 1")
+        assert store._conn.execute("SELECT COUNT(*) FROM review_events").fetchone() == (513,)
+    finally:
+        store.close()
 
 
 class TestIndexStoreBasic:

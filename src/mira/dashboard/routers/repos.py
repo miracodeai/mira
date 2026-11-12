@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from contextlib import nullcontext
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import HTTPException, Request
 from fastapi import Response as FastAPIResponse
 
 from mira.dashboard import api as _api
+from mira.dashboard import queries as _queries
 from mira.dashboard.api import (
     BlastRadiusModel,
     BlastRadiusResponse,
@@ -20,6 +24,9 @@ from mira.dashboard.api import (
     FileModel,
     ImportEdge,
     PackageModel,
+    PackageVersionModel,
+    PackageVersionSourceModel,
+    RepoBaseBranchPolicy,
     RepoDetail,
     RepoListItem,
     ReviewEventModel,
@@ -31,30 +38,32 @@ from mira.dashboard.api import (
     logger,
     router,
 )
-from mira.index.store import IndexStore
+from mira.index.store import IndexingSuperseded, IndexStore, PackageManifestRow
+
+
+def _parse_base_branch_policy(raw: str) -> RepoBaseBranchPolicy | None:
+    """Parse the stored policy blob; ``None`` when unset or malformed.
+
+    Uses the same parser as the dispatcher, so the dashboard and the
+    webhook path judge stored data identically.
+    """
+    from mira.platforms.base_branch_policy import MODE_DISABLE, MODE_OVERRIDE, parse_repo_policy
+
+    policy = parse_repo_policy(raw)
+    if policy is None:
+        return None
+    mode: Literal["inherit", "override", "disable"] = policy["mode"]
+    if mode == MODE_OVERRIDE:
+        return RepoBaseBranchPolicy(mode=MODE_OVERRIDE, branches=policy["branches"])
+    if mode == MODE_DISABLE:
+        return RepoBaseBranchPolicy(mode=MODE_DISABLE)
+    return RepoBaseBranchPolicy(mode="inherit")
 
 
 @router.get("/api/repos", response_model=list[RepoListItem])
 def list_repos() -> list[RepoListItem]:
     """List all repos from the registry."""
-    repos = _api._app_db.list_repos()
-    return [
-        RepoListItem(
-            owner=r.owner,
-            repo=r.repo,
-            platform=r.platform,
-            status=r.status,
-            index_mode=r.index_mode,
-            file_count=r.files_indexed,
-            file_count_estimate=r.file_count_estimate,
-            installation_id=r.installation_id,
-            error=r.error,
-            last_indexed=datetime.fromtimestamp(r.last_indexed_at, tz=UTC).isoformat()
-            if r.last_indexed_at
-            else None,
-        )
-        for r in repos
-    ]
+    return [_queries.repo_list_item(r) for r in _api._app_db.list_repos()]
 
 
 @router.post("/api/repos/sync")
@@ -180,10 +189,39 @@ def get_dependencies(owner: str, repo: str) -> DependencyGraph:
         return DependencyGraph(imports=imports, dependents=dependents)
 
 
+def _is_known_public(full_name: str) -> bool:
+    """True only when the registry records ``owner/repo`` as public; unknown
+    visibility counts as private, as it does everywhere else."""
+    owner, _, repo = full_name.rpartition("/")
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    return bool(records) and _pick_platform_record(records).private is False
+
+
 @router.get("/api/repos/{owner:path}/{repo}/blast-radius.svg")
-def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
-    """Render blast radius as an SVG image."""
+def get_blast_radius_svg(owner: str, repo: str, request: Request) -> FastAPIResponse:
+    """Render blast radius as an SVG image.
+
+    AuthMiddleware lets this path through without a session so GitHub can embed
+    the badge in a README, which makes it world-readable. An anonymous viewer
+    therefore gets file names only for a repo *known* to be public, and
+    cross-repo dependents only when they are known public too, so neither a
+    private repo's structure nor a private repo's name (via its dependency on
+    a public one) leaks. A signed-in dashboard user sees the full picture.
+    """
     from mira.dashboard.blast_svg import generate_blast_svg
+
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    if not records:
+        raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
+    signed_in = getattr(request.state, "user", None) is not None
+    reviewed_private = _pick_platform_record(records).private
+    if not signed_in and reviewed_private is not False:
+        svg = generate_blast_svg([], [], [], caption="Private repository — sign in to view")
+        return FastAPIResponse(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=300", "Vary": "Cookie"},
+        )
 
     # Rank files by how many other files depend on them
     file_scores: list[tuple[str, int]] = []
@@ -220,6 +258,8 @@ def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
                     cross_repo.append(edge.source_repo)
     except Exception:
         pass
+    if not signed_in:
+        cross_repo = [name for name in cross_repo if _is_known_public(name)]
 
     svg = generate_blast_svg(
         changed_files=core_files,
@@ -231,7 +271,10 @@ def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
         content=svg,
         media_type="image/svg+xml",
         headers={
-            "Cache-Control": "public, max-age=300",
+            # The signed-in rendering must not be served to anonymous viewers
+            # from a shared cache.
+            "Cache-Control": f"{'private' if signed_in else 'public'}, max-age=300",
+            "Vary": "Cookie",
         },
     )
 
@@ -352,35 +395,63 @@ def get_external_refs(owner: str, repo: str) -> list[ExternalRefModel]:
 
 @router.get("/api/repos/{owner:path}/{repo}/packages", response_model=list[PackageModel])
 def get_packages(owner: str, repo: str) -> list[PackageModel]:
-    """List dependencies parsed from manifest and lockfile files.
+    """List dependencies with their indexed versions and manifest sources.
 
-    When the same package appears in both a manifest (e.g. `pyproject.toml`
-    declaring `>=1.30`) and a lockfile (e.g. `uv.lock` resolving to
-    `1.99.5`), the lockfile entry wins — its concrete version is what's
-    actually installed.
+    The representative fields continue to prefer lockfiles. The versions
+    list also includes the declarations and their source paths.
     """
     from mira.index.manifests import _is_lockfile_path
 
     with _open_store(owner, repo) as store:
         rows = store.list_manifest_packages()
 
-    # Dedupe by (kind, name), preferring lockfile rows.
-    by_key: dict[tuple[str, str], PackageModel] = {}
+    by_key: dict[tuple[str, str], PackageManifestRow] = {}
+    sources_by_version: dict[tuple[str, str], dict[str, set[tuple[str, str, bool]]]] = {}
     for r in rows:
-        model = PackageModel(
-            name=r.name,
-            kind=r.kind,
-            version=r.version,
-            file_path=r.file_path,
-            is_dev=r.is_dev,
-        )
         key = (r.kind, r.name.lower())
+        sources_by_version.setdefault(key, {}).setdefault(r.version, set()).add(
+            (r.file_path, r.name, r.is_dev)
+        )
         existing = by_key.get(key)
-        if existing is None or (
-            _is_lockfile_path(r.file_path) and not _is_lockfile_path(existing.file_path)
+        if (
+            existing is None
+            or (_is_lockfile_path(r.file_path) and not _is_lockfile_path(existing.file_path))
+            # Prefer the last encountered version within one npm lockfile
+            # while the dashboard still shows one row per package.
+            or (
+                r.kind == "npm"
+                and r.name == existing.name
+                and r.file_path == existing.file_path
+                and r.id > existing.id
+            )
         ):
-            by_key[key] = model
-    return sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
+            by_key[key] = r
+    packages = []
+    for key, representative in sorted(by_key.items()):
+        sources = sources_by_version[key]
+        versions = [
+            PackageVersionModel(
+                version=version,
+                sources=[
+                    PackageVersionSourceModel(name=name, file_path=path, is_dev=is_dev)
+                    for path, name, is_dev in sorted(sources[version])
+                ],
+            )
+            for version in sorted(
+                sources, key=lambda value: (value != representative.version, value)
+            )
+        ]
+        packages.append(
+            PackageModel(
+                name=representative.name,
+                kind=representative.kind,
+                version=representative.version,
+                file_path=representative.file_path,
+                is_dev=representative.is_dev,
+                versions=versions,
+            )
+        )
+    return packages
 
 
 @router.post("/api/repos/{owner:path}/{repo}/index")
@@ -399,7 +470,7 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
     # Resolve the repo's platform and build the matching fetcher.
     records = _api._app_db.get_repo_any_platform(owner, repo)
     # Same owner/repo can exist on multiple platforms; prefer
-    # github → gitlab → forgejo → origin (the historical fallback order).
+    # github → gitlab → forgejo → bitbucket → origin (the historical fallback order).
     platform = _pick_platform_record(records).platform if records else "github"
 
     from mira.platforms.fetch import EmptyRepoError, make_fetcher
@@ -412,6 +483,10 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
         token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
         if not token:
             raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured.")
+    elif platform == "bitbucket":
+        token = os.environ.get("MIRA_BITBUCKET_TOKEN", "")
+        if not token:
+            raise HTTPException(status_code=400, detail="MIRA_BITBUCKET_TOKEN is not configured.")
     elif platform == "origin":
         token = os.environ.get("MIRA_ORIGIN_TOKEN", "")
         if not token:
@@ -452,22 +527,16 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
     from mira.llm import create_llm
 
     async def _do_index() -> None:
-        count = 0
         store = None
+        run = None
+        job = tracker.start(full_name)
         try:
             from mira.dashboard.models_config import llm_config_for
 
-            tracker.start(full_name)
             config = load_config()
-            # Use the configured indexing model — without this swap we'd
-            # silently fall back to the review model, which is slower and
-            # more expensive per token.
             llm = create_llm(llm_config_for("indexing", config.llm))
-            store = IndexStore.open(owner, repo, platform=platform)
-            if full:
-                # Wipe existing index
-                for path in list(store.all_paths()):
-                    store.remove_paths([path])
+            store = IndexStore.open(owner, repo, platform=platform, allow_fallback=False)
+            run = store.claim_index_run()
             count = await index_repo(
                 owner=owner,
                 repo=repo,
@@ -476,40 +545,48 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
                 store=store,
                 llm=llm,
                 full=full,
-                cancel_check=lambda: tracker.is_cancel_requested(full_name),
-            )
-            # Real indexing run finished — bump last_indexed_at so the
-            # dashboard's "Indexed N ago" reflects this completion.
-            # `count` is files re-indexed *this run* (not the store total), so
-            # read the store for the true total to keep the repos list in sync.
-            total_files = len(store.all_paths())
-            _api._app_db.set_repo_status(
-                owner,
-                repo,
-                "ready",
-                files_indexed=total_files,
-                bump_last_indexed=True,
+                reset=full,
+                cancel_check=lambda: job.cancel_requested,
+                run=run,
                 platform=platform,
             )
-            tracker.complete(full_name, count)
+            with store.index_write(run):
+                _api._app_db.set_repo_status(
+                    owner,
+                    repo,
+                    "ready",
+                    files_indexed=len(store.all_paths()),
+                    bump_last_indexed=True,
+                    platform=platform,
+                )
+                tracker.complete(full_name, count, expected=job)
             logger.info(
                 "Index %s for %s: %d files", "rebuild" if full else "update", full_name, count
             )
             from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
 
             await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
-        except IndexingCancelled as cancelled:
-            tracker.cancel(full_name, cancelled.files_indexed)
-            logger.info(
-                "Indexing cancelled for %s after %d files", full_name, cancelled.files_indexed
-            )
-        except EmptyRepoError as empty:
-            _api._app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
-            tracker.complete(full_name, 0)
-            logger.info("Index skipped for %s — empty repository", full_name)
+        except IndexingSuperseded:
+            tracker.discard(job)
+            logger.info("Indexing superseded for %s", full_name)
         except Exception as exc:
-            tracker.fail(full_name, str(exc))
-            logger.exception("Indexing failed for %s", full_name)
+            try:
+                with store.index_write(run) if store is not None and run else nullcontext():
+                    if isinstance(exc, IndexingCancelled):
+                        tracker.cancel(full_name, exc.files_indexed, expected=job)
+                        logger.info(
+                            "Indexing cancelled for %s after %d files", full_name, exc.files_indexed
+                        )
+                    elif isinstance(exc, EmptyRepoError):
+                        _api._app_db.set_repo_status(
+                            owner, repo, "empty", error=str(exc), platform=platform
+                        )
+                        tracker.complete(full_name, 0, expected=job)
+                    else:
+                        tracker.fail(full_name, str(exc), expected=job)
+                        logger.exception("Indexing failed for %s", full_name)
+            except IndexingSuperseded:
+                tracker.discard(job)
         finally:
             if store is not None:
                 store.close()
@@ -540,26 +617,55 @@ async def cancel_index(owner: str, repo: str, request: Request) -> dict:
 def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventModel]:
     """List recent review events for a repo."""
     with _open_store(owner, repo) as store:
-        events = store.list_review_events(limit=limit)
-        return [
-            ReviewEventModel(
-                id=e.id,
-                pr_number=e.pr_number,
-                pr_title=e.pr_title,
-                pr_url=e.pr_url,
-                comments_posted=e.comments_posted,
-                blockers=e.blockers,
-                warnings=e.warnings,
-                suggestions=e.suggestions,
-                files_reviewed=e.files_reviewed,
-                lines_changed=e.lines_changed,
-                tokens_used=e.tokens_used,
-                duration_ms=e.duration_ms,
-                categories=e.categories,
-                created_at=e.created_at,
+        return [_queries.review_event_model(e) for e in store.list_review_events(limit=limit)]
+
+
+@router.get("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBaseBranchPolicy)
+def get_branch_policy(owner: str, repo: str) -> RepoBaseBranchPolicy:
+    """The stored per-repo auto-review branch policy (admin UI backing)."""
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    record = _pick_platform_record(records) if records else None
+    return _parse_base_branch_policy(record.base_branch_policy if record else "") or (
+        RepoBaseBranchPolicy(mode="inherit")
+    )
+
+
+@router.put("/api/repos/{owner:path}/{repo}/branch-policy", response_model=RepoBaseBranchPolicy)
+def set_branch_policy(
+    owner: str, repo: str, body: RepoBaseBranchPolicy, request: Request
+) -> RepoBaseBranchPolicy:
+    """Store the per-repo auto-review branch policy.
+
+    ``override`` requires at least one branch pattern (an empty override would
+    silently disable reviews, which is what ``disable`` is for). Takes effect
+    on the next webhook event; no restart needed.
+    """
+    _require_admin(request)
+    from mira.platforms.base_branch_policy import validate_patterns
+
+    branches: list[str] = []
+    if body.mode == "override":
+        # An empty override would silently disable reviews; "disable" is the
+        # explicit, labelled way to do that.
+        if not body.branches:
+            raise HTTPException(
+                status_code=400, detail="An override needs at least one branch pattern"
             )
-            for e in events
-        ]
+        try:
+            branches = validate_patterns(body.branches)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    records = _api._app_db.get_repo_any_platform(owner, repo)
+    record = _pick_platform_record(records) if records else None
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail="Repository not registered with this Mira instance"
+        )
+    # Only override uses branches; don't persist stale values for inherit/disable.
+    blob = json.dumps({"mode": body.mode, "branches": branches})
+    _api._app_db.set_repo_base_branch_policy(owner, repo, blob, platform=record.platform)
+    return RepoBaseBranchPolicy(mode=body.mode, branches=branches)
 
 
 # Keep the catch-all detail route last.  For nested GitLab namespaces it can
@@ -617,4 +723,7 @@ def get_repo_detail(owner: str, repo: str) -> RepoDetail:
             external_refs_count=total_external_refs,
             lines_count=total_loc,
             last_indexed=last_indexed,
+            base_branch_policy=_parse_base_branch_policy(
+                repo_record.base_branch_policy if repo_record else ""
+            ),
         )

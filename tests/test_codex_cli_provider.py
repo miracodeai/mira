@@ -56,6 +56,20 @@ class TestCodexCLIProvider:
             "-",
         ]
 
+    def test_command_passes_reasoning_effort(self):
+        provider = CodexCLIProvider(
+            LLMConfig(provider="codex-cli", model="gpt-5-codex", reasoning_effort="high")
+        )
+        cmd = provider._command("/tmp/out.txt")
+        assert 'model_reasoning_effort="high"' in cmd
+
+    def test_command_omits_reasoning_effort_when_off(self):
+        provider = CodexCLIProvider(
+            LLMConfig(provider="codex-cli", model="gpt-5-codex", reasoning_effort="off")
+        )
+        cmd = provider._command("/tmp/out.txt")
+        assert not any("model_reasoning_effort" in part for part in cmd)
+
     def test_command_omits_model_for_codex_default(self):
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli", model="codex-default"))
         cmd = provider._command("/tmp/out.txt")

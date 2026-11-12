@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+from typing import Literal
 
 from mira.models import (
     BotThreadRecord,
@@ -13,9 +14,16 @@ from mira.models import (
     UnresolvedThread,
 )
 
+CheckConclusion = Literal["success", "failure", "neutral"]
+CHECK_RUN_NAME = "Mira"
+
 
 class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
+
+    # Whether a username identifies exactly one account. When False (Bitbucket
+    # nicknames), command authorization matches ``user_id`` only, never the name.
+    unique_usernames: bool = True
 
     @abc.abstractmethod
     def __init__(self, token: str) -> None:
@@ -85,6 +93,42 @@ class BaseProvider(abc.ABC):
         """Replace the PR/MR description body. No-op default; providers override."""
         return
 
+    async def start_check_run(
+        self,
+        pr_info: PRInfo,
+        *,
+        title: str = "",
+        summary: str = "",
+        details_url: str = "",
+    ) -> int | None:
+        """Start a check run (or, where the platform has no Checks API,
+        post a ``pending`` commit status) for the PR head commit.
+
+        Returns a run handle for :meth:`finish_check_run`, or ``None`` when
+        nothing was published (e.g. no head SHA, or the token lacks permission
+        and the provider degrades to ``None``). Providers MAY raise
+        ``ProviderError`` on other failures; callers in the engine treat the
+        whole call as best-effort.
+        """
+        return None
+
+    async def finish_check_run(
+        self,
+        pr_info: PRInfo,
+        run_id: int | None,
+        conclusion: CheckConclusion,
+        *,
+        title: str = "",
+        summary: str = "",
+        details: str = "",
+    ) -> None:
+        """Finish a check run with a conclusion (success/failure/neutral).
+
+        ``details`` is the expanded detail text (e.g. review stats); platforms
+        without an expandable details area (Forgejo commit statuses) ignore it.
+        """
+        return
+
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         """Add a label to a pull request."""
         return
@@ -96,6 +140,24 @@ class BaseProvider(abc.ABC):
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref."""
         return ""
+
+    async def get_repo_permission(
+        self,
+        owner: str,
+        repo: str,
+        username: str,
+        *,
+        user_id: int | str | None = None,
+    ) -> str | None:
+        """Normalized repo permission for a user.
+
+        Returns ``"write"``, ``"read"``, ``"none"``, or ``None`` when the
+        platform cannot determine it. Command authorization treats anything
+        other than ``"write"`` as a denial. ``user_id`` is the platform's
+        immutable user id when known (an int on GitHub, the account id string
+        on Bitbucket).
+        """
+        return None
 
     # The methods below are called by the engine and merge handler. They have
     # safe defaults so a provider can ship without them and simply degrade

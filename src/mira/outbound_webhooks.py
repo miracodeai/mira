@@ -18,7 +18,7 @@ import os
 import socket
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
@@ -61,6 +61,23 @@ _EVENT_VALUES = {e["value"] for e in AVAILABLE_EVENTS}
 _TIMEOUT_SECONDS = 5.0
 
 
+def _parse_http_url(value: object) -> ParseResult | None:
+    if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        return None
+    try:
+        value.encode("utf-8")
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        if any(c.isspace() for c in parsed.netloc):
+            return None
+        _ = parsed.port  # Access validates numeric/range syntax without DNS.
+        httpx.URL(value)
+    except (ValueError, httpx.InvalidURL):
+        return None
+    return parsed
+
+
 class WebhookConfig(BaseModel):
     """A single configured outbound webhook."""
 
@@ -74,8 +91,8 @@ class WebhookConfig(BaseModel):
     @classmethod
     def _validate_url(cls, v: str) -> str:
         v = v.strip()
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("URL must start with http:// or https://")
+        if _parse_http_url(v) is None:
+            raise ValueError("URL must be a valid http(s) URL with a hostname and optional port")
         return v
 
     @field_validator("events")
@@ -89,7 +106,9 @@ class WebhookConfig(BaseModel):
 
 def detect_format(url: str) -> str:
     """Classify a webhook URL as ``"slack"``, ``"teams"`` or ``"generic"``."""
-    parsed = urlparse(url)
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return "generic"
     host = (parsed.hostname or "").lower()
     if host == "hooks.slack.com":
         return "slack"
@@ -113,7 +132,9 @@ def detect_format(url: str) -> str:
 
 def mask_url(url: str) -> str:
     """``https://hooks.slack.com/services/T0/B0/XXXX`` → ``https://hooks.slack.com/…XXXX``."""
-    parsed = urlparse(url)
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return "(invalid URL)"
     host = parsed.hostname or ""
     scheme = parsed.scheme or "https"
     tail = url[-4:] if len(url) >= 4 else url
@@ -209,45 +230,90 @@ def _allowed_hosts() -> set[str]:
     return {h.strip().lower() for h in raw.split(",") if h.strip()}
 
 
-def is_safe_webhook_url(url: str) -> bool:
-    """Best-effort SSRF guard run before delivery.
+def resolve_safe_webhook_url(url: str) -> list[str] | None:
+    """SSRF guard run before delivery: vet ``url`` and return the addresses a
+    delivery may connect to.
 
-    Rejects ``localhost``, any private / loopback / link-local / reserved IP
-    literal, and any *hostname that resolves* into one of those ranges — so an
-    admin can't reach internal services or a cloud metadata endpoint (e.g.
-    ``169.254.169.254``) either directly or via a DNS name pointing there.
+    ``None`` means the URL must not be contacted: ``localhost``, any private /
+    loopback / link-local / reserved IP literal, an unresolvable name, or a
+    *hostname that resolves* into one of those ranges — so an admin can't reach
+    internal services or a cloud metadata endpoint (e.g. ``169.254.169.254``)
+    either directly or via a DNS name pointing there.
 
-    Named internal services (a docker-compose ``mattermost`` host, etc.) no
-    longer pass implicitly; list them in ``MIRA_WEBHOOK_ALLOWED_HOSTS`` to keep
-    them usable on self-hosted deployments.
-
-    Still best-effort: the check resolves the name but the eventual request
-    re-resolves it, leaving a narrow DNS-rebinding window for an admin who also
-    controls a fast-flipping DNS record.
+    Otherwise the resolved addresses, every one of which passed the check.
+    :func:`deliver_one` connects to one of *these* instead of letting the HTTP
+    client resolve the name again, which closes the DNS-rebinding window
+    between the check and the connection. An empty list means no pinning is
+    needed: the host is an IP literal that passed, or is trusted by name via
+    ``MIRA_WEBHOOK_ALLOWED_HOSTS`` (named internal services such as a
+    docker-compose ``mattermost`` host don't pass implicitly; list them there
+    to keep them usable on self-hosted deployments).
     """
-    host = (urlparse(url).hostname or "").lower()
+    parsed = _parse_http_url(url)
+    if parsed is None:
+        return None
+    host = (parsed.hostname or "").lower()
     if not host or host == "localhost":
-        return False
+        return None
 
     try:
-        return not _is_blocked_ip(ipaddress.ip_address(host))
+        literal = ipaddress.ip_address(host)
     except ValueError:
         pass  # not an IP literal — resolve it below
+    else:
+        return None if _is_blocked_ip(literal) else []
 
     if host in _allowed_hosts():
-        return True
+        return []
 
     try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        # AI_ADDRCONFIG: only families this host has an address for, so an
+        # IPv4-only host isn't handed IPv6 addresses it can't connect to.
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP, flags=socket.AI_ADDRCONFIG)
     except socket.gaierror:
-        return False  # unresolvable — treat as unsafe rather than send blind
+        return None  # unresolvable — treat as unsafe rather than send blind
+    addresses: list[str] = []
     for info in infos:
+        address = str(info[4][0])
         try:
-            if _is_blocked_ip(ipaddress.ip_address(info[4][0])):
-                return False
+            if _is_blocked_ip(ipaddress.ip_address(address)):
+                return None
         except ValueError:
-            return False
-    return True
+            return None
+        if address not in addresses:
+            addresses.append(address)
+    # A delivery connects to one address per attempt (no happy-eyeballs race
+    # across the set), so put IPv4 first: it is the family most likely to be
+    # routable from a self-hosted box, and a dual-stack target stays reachable.
+    addresses.sort(key=lambda a: ":" in a)
+    return addresses or None
+
+
+def is_safe_webhook_url(url: str) -> bool:
+    """True when :func:`resolve_safe_webhook_url` lets ``url`` through."""
+    return resolve_safe_webhook_url(url) is not None
+
+
+def _pinned_request(
+    url: str, addresses: list[str], attempt: int
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """``(url, headers, extensions)`` for one delivery attempt.
+
+    With resolved ``addresses`` the request goes to one of them (rotating per
+    attempt) while the ``Host`` header and the TLS server name (SNI and
+    certificate verification) keep the original hostname, so the server sees
+    an ordinary request and the client never re-resolves the name. Without
+    addresses the URL is sent as written.
+    """
+    if not addresses:
+        return url, {}, {}
+    parsed = httpx.URL(url)
+    address = addresses[(attempt - 1) % len(addresses)]
+    headers = {"Host": parsed.netloc.decode("ascii")}
+    extensions: dict[str, Any] = {}
+    if parsed.scheme == "https":
+        extensions["sni_hostname"] = parsed.raw_host.decode("ascii")
+    return str(parsed.copy_with(host=address)), headers, extensions
 
 
 async def deliver_one(
@@ -262,7 +328,8 @@ async def deliver_one(
     url = webhook.get("url", "")
     if not url:
         return False, "missing url"
-    if not is_safe_webhook_url(url):
+    addresses = resolve_safe_webhook_url(url)
+    if addresses is None:
         return False, "URL points to a private or internal address"
     fmt = detect_format(url)
     payload = render(event, data, fmt)
@@ -271,10 +338,13 @@ async def deliver_one(
     # One retry: transient network blips and 5xx are worth a second attempt;
     # 4xx is a real misconfiguration, so we stop immediately.
     for attempt in (1, 2):
+        target, headers, extensions = _pinned_request(url, addresses, attempt)
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-                resp = await client.post(url, json=payload)
-            if resp.status_code < 400:
+                resp = await client.post(
+                    target, json=payload, headers=headers, extensions=extensions
+                )
+            if 200 <= resp.status_code < 300:
                 return True, f"HTTP {resp.status_code}"
             last_detail = f"HTTP {resp.status_code}"
             if resp.status_code < 500:

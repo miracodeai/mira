@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from mira.dashboard.api import (
     CustomEdgeModel,
@@ -14,6 +14,7 @@ from mira.dashboard.api import (
     RepoEdgeModel,
     RepoGroupModel,
     _open_relationships,
+    _require_admin,
     router,
 )
 
@@ -81,8 +82,14 @@ def list_overrides() -> list[OverrideModel]:
         ]
 
 
+# ── Overrides + custom edges (admin only) ──────────────────────────────────
+# These rewrite the cross-repo graph every blast-radius analysis reads, so they
+# are instance configuration: any authenticated user may read, only admins write.
+
+
 @router.post("/api/relationships/overrides", response_model=OverrideModel)
-def set_override(body: OverrideRequest) -> OverrideModel:
+def set_override(body: OverrideRequest, request: Request) -> OverrideModel:
+    _require_admin(request)
     if body.status not in ("confirmed", "denied"):
         raise HTTPException(status_code=400, detail="Status must be 'confirmed' or 'denied'")
     with _open_relationships() as rs:
@@ -96,7 +103,8 @@ def set_override(body: OverrideRequest) -> OverrideModel:
 
 
 @router.delete("/api/relationships/overrides")
-def delete_override(source_repo: str, target_repo: str) -> dict:
+def delete_override(source_repo: str, target_repo: str, request: Request) -> dict:
+    _require_admin(request)
     with _open_relationships() as rs:
         rs.delete_override(source_repo, target_repo)
         return {"ok": True}
@@ -118,7 +126,8 @@ def list_custom_edges() -> list[CustomEdgeModel]:
 
 
 @router.post("/api/relationships/custom", response_model=CustomEdgeModel)
-def add_custom_edge(body: CustomEdgeRequest) -> CustomEdgeModel:
+def add_custom_edge(body: CustomEdgeRequest, request: Request) -> CustomEdgeModel:
+    _require_admin(request)
     with _open_relationships() as rs:
         e = rs.add_custom_edge(body.source_repo, body.target_repo, body.reason)
         return CustomEdgeModel(
@@ -131,7 +140,8 @@ def add_custom_edge(body: CustomEdgeRequest) -> CustomEdgeModel:
 
 
 @router.delete("/api/relationships/custom/{edge_id}")
-def delete_custom_edge(edge_id: int) -> dict:
+def delete_custom_edge(edge_id: int, request: Request) -> dict:
+    _require_admin(request)
     with _open_relationships() as rs:
         rs.delete_custom_edge(edge_id)
         return {"ok": True}

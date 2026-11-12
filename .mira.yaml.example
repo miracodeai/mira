@@ -10,7 +10,20 @@ llm:
   # Fallback model if primary fails
   fallback_model: "openai/gpt-4o-mini"
   temperature: 0.2
-  max_tokens: 4096
+  # Code-index summaries over Chat/Responses only: 0.0 (default), omit, or a
+  # finite nonnegative number supported by your endpoint. Reviewer defaults
+  # and requested reasoning effort stay unchanged. Dashboard overrides win.
+  # indexing_temperature: 0.0
+
+  # Output budget per call. Thinking tokens count against it on most
+  # providers; an endpoint that rejects the budget is retried at 4096.
+  max_tokens: 16384
+
+  # Thinking mode for the review and security passes: "off", "low", "medium",
+  # "high", "xhigh" or "max". Unset means "medium", which the published
+  # benchmark ran with; "off" disables thinking, including on models that
+  # think by default such as DeepSeek v4.1 flash.
+  # review_reasoning_effort: "medium"
 
   # ── AWS Bedrock configuration (uncomment to use) ──
   # provider: "bedrock"
@@ -54,10 +67,58 @@ filter:
   # blocked_authors:
   #   - app/renovate
   #   - app/dependabot
+  # Auto-review only PRs whose destination (base) branch matches one of
+  # these globs — e.g. ["main", "release/*"]. Empty = review every branch.
+  # Individual repos can replace this per repo (see below) or from the
+  # dashboard's per-repo Review Policy tab. Manual @bot commands are not
+  # affected by this list.
+  # allowed_base_branches:
+  #   - main
+  #   - release/*
+  # Per-repo replacement for allowed_base_branches, keyed "owner/repo"
+  # (case-insensitive). An empty list disables auto-review for that repo.
+  # allowed_base_branch_overrides:
+  #   org/website: ["main"]
+  #   org/mobile: ["develop", "release/*"]
   # Skip deleted files
   exclude_deleted: true
   # Maximum number of files to review
   max_files: 50
+
+# Who may invoke interactive @-mention commands (review, review-rest, help,
+# pause, resume, reject, and free-form questions). Independent of the
+# auto-review author lists above. Deployment-only: set this in `mira.yaml`,
+# not in a repository's `.mira.yaml`.
+commands:
+  # Extra users allowed to run any command, including read-only users.
+  # On Bitbucket, list account ids (e.g. "557058:0a1b…"), not nicknames:
+  # nicknames are not unique, so they never grant access there. Blocking by
+  # nickname still works.
+  allowed_users: []
+  # Applies to every command. Users with write/admin access to the repository
+  # may invoke commands. If the bot cannot read collaborator/member roles from
+  # the provider API, commands are denied unless the user is listed in
+  # allowed_users (or a per-command list). Forgejo additionally requires the
+  # bot account to be a repository admin/owner (or site admin) to look up
+  # other users' permissions.
+  allow_repo_write_access: true
+  # Always denied; takes precedence over the grants above.
+  blocked_users: []
+  # Per-command overrides. Setting allowed_users here replaces the global
+  # allowlist for that command only. blocked_users adds command-specific
+  # denials on top of the global list. The write-access gate above still
+  # applies to every command.
+  # review:
+  #   allowed_users:
+  #     - alice
+  # ask:
+  #   blocked_users:
+  #     - alice              # alice can use every command except free-form ask
+  # review_rest: {}
+  # help: {}
+  # pause: {}
+  # resume: {}
+  # reject: {}
 
 review:
   # Lines of context around hunks
@@ -68,6 +129,21 @@ review:
   focus_only_on_problems: false
   # Include a summary comment
   include_summary: true
+  # List findings the self-critique graded "plausible" but did not post in a
+  # collapsed "Worth a look (not verified)" walkthrough section (max 5, never
+  # inline). With it shown and nothing posted, the verdict reads
+  # "No confirmed issues".
+  show_unverified_findings: false
+  # Investigation turns the reviewer gets per chunk with its read_file /
+  # grep_repo tools before it is asked to submit. The submission is always
+  # forced over the full investigation transcript when the budget runs out,
+  # so a lower value trades depth for speed, never the review itself. 1-30.
+  agentic_max_hops: 10
+  # After the reviewer submits, ask it once more over the same transcript for
+  # the concrete defects it analysed but withheld as minor or uncertain, and
+  # append them. One extra (prompt-cached) model call per chunk: more recall,
+  # a few more unverified comments, ~25 s slower. Off by default.
+  second_look: false
   # Generate a PR walkthrough comment (top-level summary)
   walkthrough: true
   # Include a Mermaid sequence diagram in the walkthrough

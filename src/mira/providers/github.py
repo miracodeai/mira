@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -26,7 +27,7 @@ from mira.models import (
     ReviewResult,
     UnresolvedThread,
 )
-from mira.providers.base import BaseProvider
+from mira.providers.base import CHECK_RUN_NAME, BaseProvider, CheckConclusion
 
 # Shared comment-formatting helpers (re-exported for back-compat — callers and
 # tests import these names from this module).
@@ -193,6 +194,21 @@ def _async_constant(value: str) -> Callable[[], Awaitable[str]]:
     return _const
 
 
+_WRITE_PERMISSIONS = frozenset({"admin", "maintain", "push", "write"})
+_READ_PERMISSIONS = frozenset({"pull", "read", "triage"})
+
+
+def _normalize_permission(permission: str | None) -> str | None:
+    value = (permission or "").lower()
+    if value in _WRITE_PERMISSIONS:
+        return "write"
+    if value in _READ_PERMISSIONS:
+        return "read"
+    if value == "none":
+        return "none"
+    return None
+
+
 class GitHubProvider(BaseProvider):
     """GitHub code hosting provider."""
 
@@ -237,6 +253,31 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to fetch PR info: {e}") from e
+
+    async def get_repo_permission(
+        self,
+        owner: str,
+        repo: str,
+        username: str,
+        *,
+        user_id: int | str | None = None,
+    ) -> str | None:
+        """Fetch a user's collaborator permission, normalized for authz."""
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
+        def _fetch() -> str:
+            return gh.get_repo(f"{owner}/{repo}").get_collaborator_permission(username)
+
+        try:
+            permission = await asyncio.to_thread(_fetch)
+        except GithubException as exc:
+            if getattr(exc, "status", None) == 404:
+                return "none"
+            raise ProviderError(f"Failed to fetch repo permission for {username}: {exc}") from exc
+        except Exception as exc:
+            raise ProviderError(f"Failed to fetch repo permission for {username}: {exc}") from exc
+        return _normalize_permission(permission)
 
     async def get_pr_diff(self, pr_info: PRInfo) -> str:
         diff_url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/pulls/{pr_info.number}"
@@ -589,6 +630,109 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to post comment: {e}") from e
 
+    def _check_run_headers(self, token: str) -> dict[str, str]:
+        return {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+    async def start_check_run(
+        self,
+        pr_info: PRInfo,
+        *,
+        title: str = "",
+        summary: str = "",
+        details_url: str = "",
+    ) -> int | None:
+        """Create an in-progress check run for the PR head commit.
+
+        Uses the Checks API: the run shows the bot avatar, a title/summary,
+        and a details link (clickable from the PR checks section). No retry on
+        transient errors — a missing ``checks: write`` permission surfaces as
+        a single 403 instead of a retry storm.
+        """
+        if not pr_info.head_sha:
+            return None
+        token = await self._resolve_token()
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/check-runs"
+        payload: dict[str, Any] = {
+            "name": CHECK_RUN_NAME,
+            "head_sha": pr_info.head_sha,
+            "status": "in_progress",
+            "started_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "output": {
+                "title": title or CHECK_RUN_NAME,
+                "summary": summary,
+                "text": "",
+            },
+        }
+        if details_url:
+            payload["details_url"] = details_url
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    url,
+                    json=payload,
+                    headers=self._check_run_headers(token),
+                )
+        except (ConnectionError, TimeoutError, httpx.TransportError) as e:
+            raise ProviderError(f"GitHub POST {url} failed: {e}") from e
+        if resp.status_code == 403:
+            # Check-run write is App-only (`checks: write` is granted to
+            # GitHub App installations, not to personal tokens). Skip the
+            # check run; the engine logs no status was published.
+            logger.warning(
+                "GitHub check-run create forbidden (needs a GitHub App "
+                "installation with checks:write granted): %s",
+                resp.text[:300],
+            )
+            return None
+        if resp.status_code != 201:
+            raise ProviderError(f"GitHub POST {url} → {resp.status_code}: {resp.text[:300]}")
+        return int(resp.json()["id"])
+
+    async def finish_check_run(
+        self,
+        pr_info: PRInfo,
+        run_id: int | None,
+        conclusion: CheckConclusion,
+        *,
+        title: str = "",
+        summary: str = "",
+        details: str = "",
+    ) -> None:
+        """Complete an in-progress check run with a conclusion.
+
+        ``details`` goes into the check run's expandable DETAILS section
+        (``output.text``); an empty string leaves the box blank.
+        """
+        if run_id is None:
+            return
+        token = await self._resolve_token()
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/check-runs/{run_id}"
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload: dict[str, Any] = {
+            "status": "completed",
+            "conclusion": conclusion,
+            "completed_at": now,
+            "output": {
+                "title": title or CHECK_RUN_NAME,
+                "summary": summary,
+                "text": details,
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.patch(
+                    url,
+                    json=payload,
+                    headers=self._check_run_headers(token),
+                )
+        except (ConnectionError, TimeoutError, httpx.TransportError) as e:
+            raise ProviderError(f"GitHub PATCH {url} failed: {e}") from e
+        if resp.status_code != 200:
+            raise ProviderError(f"GitHub PATCH {url} → {resp.status_code}: {resp.text[:300]}")
+
     async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:
         token = await self._resolve_token()
         gh = self._make_client(token)
@@ -843,9 +987,12 @@ class GitHubProvider(BaseProvider):
         return threads
 
     async def get_pr_description(self, pr_info: PRInfo) -> str:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _fetch() -> str:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             return gh_repo.get_pull(pr_info.number).body or ""
 
         try:
@@ -856,9 +1003,12 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to fetch PR description: {e}") from e
 
     async def update_pr_description(self, pr_info: PRInfo, body: str) -> None:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _edit() -> None:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             gh_repo.get_pull(pr_info.number).edit(body=body)
 
         try:

@@ -21,6 +21,8 @@ from mira.llm import create_llm
 from mira.llm.prompts.review import build_conversation_prompt
 from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
+from mira.platforms.command_policy import is_command_allowed
+from mira.platforms.mentions import strip_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,25 @@ _PAUSE_KEYWORDS = {"pause"}
 _RESUME_KEYWORDS = {"resume"}
 
 
+def classify_command(text: str, names: list[str], *, inline: bool = False) -> str:
+    """Map a comment body to the command key used by command authorization."""
+    normalized = strip_mentions(text, names).lower().strip()
+    first_word = normalized.split()[0] if normalized.split() else ""
+    if inline:
+        return "reject" if first_word in _REJECT_KEYWORDS else "ask"
+    if normalized in _REVIEW_KEYWORDS:
+        return "review"
+    if normalized in _REVIEW_REST_KEYWORDS:
+        return "review_rest"
+    if normalized in _HELP_KEYWORDS:
+        return "help"
+    if first_word in _PAUSE_KEYWORDS:
+        return "pause"
+    if first_word in _RESUME_KEYWORDS:
+        return "resume"
+    return "ask"
+
+
 def _open_store(owner: str, repo: str, platform: str = "github") -> IndexStore:
     """Open an IndexStore for the given owner/repo."""
     return IndexStore.open(owner, repo, platform=platform)
@@ -62,7 +83,7 @@ def _help_message(bot_name: str) -> str:
         f"| Command | What it does |\n"
         f"|---|---|\n"
         f"| `@{bot_name} review` | Re-run the full review on this PR. Useful after force-pushes or when you want a fresh pass. |\n"
-        f"| `@{bot_name} review-rest` | Review files that were skipped on the first pass because the PR was too large. Aliases: `rest`, `continue`. |\n"
+        f"| `@{bot_name} review-rest` | Review files that were skipped or not reviewed because a chunk failed. Aliases: `rest`, `continue`. |\n"
         f"| `@{bot_name} pause` | Pause Mira on this PR. No more reviews until you resume. Adds a `mira-paused` label. |\n"
         f"| `@{bot_name} resume` | Resume Mira on a paused PR and re-review the latest diff. |\n"
         f"| `@{bot_name} help` | Show this message. Aliases: `?`, `commands`. |\n"
@@ -173,6 +194,7 @@ async def run_pr_command(
     bot_name: str,
     platform: str = "github",
     pr_title: str = "",
+    user_id: int | str | None = None,
 ) -> None:
     """Platform-neutral handler for an @-mention command on a PR/MR.
 
@@ -181,16 +203,34 @@ async def run_pr_command(
     """
     repo_full = f"{owner}/{repo}"
     config = load_config()
+
+    command = classify_command(question, [])
+    if not await is_command_allowed(
+        config,
+        command,
+        actor,
+        provider=provider,
+        owner=owner,
+        repo=repo,
+        user_id=user_id,
+    ):
+        return
+
+    # Pause/resume/reject have dedicated handlers; never fall through to a
+    # paid free-form answer if one is misrouted here.
+    if command not in {"review", "review_rest", "help", "ask"}:
+        logger.warning("Command %r cannot run through run_pr_command", command)
+        return
+
     from mira.dashboard.models_config import llm_config_for
 
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
 
-    normalized = question.lower().strip()
-    is_review = normalized in _REVIEW_KEYWORDS
-    is_review_rest = normalized in _REVIEW_REST_KEYWORDS
-    is_help = normalized in _HELP_KEYWORDS
+    is_review = command == "review"
+    is_review_rest = command == "review_rest"
+    is_help = command == "help"
 
     if is_help:
         pr_info_for_help = await provider.get_pr_info(pr_url)
@@ -278,6 +318,7 @@ async def run_thread_reply(
     actor: str = "",
     bot_name: str = "miracodeai",
     platform: str = "github",
+    user_id: int | str | None = None,
 ) -> None:
     """Platform-neutral free-form thread reply with intent classification.
 
@@ -287,6 +328,16 @@ async def run_thread_reply(
     → answer, leave open; ``agreement`` / ``other`` → acknowledge, leave open.
     """
     config = load_config()
+    if not await is_command_allowed(
+        config,
+        "ask",
+        actor,
+        provider=provider,
+        owner=pr_info.owner,
+        repo=pr_info.repo,
+        user_id=user_id,
+    ):
+        return
     llm = create_llm(llm_config_for("indexing", config.llm))
     prompt = _THREAD_REPLY_TEMPLATE.render(
         user_reply=human_reply or "(empty)",
@@ -317,7 +368,17 @@ async def run_thread_reply(
         logger.warning("Failed to post thread reply: %s", exc)
         return
 
-    if intent == "disagreement":
+    # A free-form disagreement is an implicit ``reject``: resolving the thread
+    # and recording feedback must honour the reject policy, not just ``ask``.
+    if intent == "disagreement" and await is_command_allowed(
+        config,
+        "reject",
+        actor,
+        provider=provider,
+        owner=pr_info.owner,
+        repo=pr_info.repo,
+        user_id=user_id,
+    ):
         try:
             tid = thread_id
             if tid is None and comment_node_id:

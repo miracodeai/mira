@@ -91,8 +91,8 @@ async def scan_manifest_changes(
         return []
 
     queries: list[PackageQuery] = []
-    # (ecosystem, name, version) → (first_line_no, first_line_text)
-    hit_map: dict[tuple[str, str, str], tuple[int, str]] = {}
+    # (ecosystem, name, version) → (file_path, first_line_no, first_line_text)
+    hit_map: dict[tuple[str, str, str], tuple[str, int, str]] = {}
 
     for f in manifest_files:
         try:
@@ -114,10 +114,11 @@ async def scan_manifest_changes(
             ver = normalize_version(pkg.version)
             if not ver:
                 continue
-            key = (eco, pkg.name, ver)
-            queries.append(PackageQuery(ecosystem=eco, name=pkg.name, version=ver))
-            if key not in hit_map:
-                hit_map[key] = (hits[0][0], hits[0][1])
+            key = (pkg.kind, pkg.name, ver)
+            if key in hit_map:
+                continue
+            queries.append(PackageQuery(ecosystem=pkg.kind, name=pkg.name, version=ver))
+            hit_map[key] = (f.path, hits[0][0], hits[0][1])
 
     if not queries:
         return []
@@ -137,7 +138,7 @@ async def scan_manifest_changes(
         vulns = results.get(key, [])
         if not vulns:
             continue
-        line_no, line_text = hit_map[key]
+        file_path, line_no, line_text = hit_map[key]
 
         severity = max(
             (_SEVERITY_MAP.get(v.severity, Severity.SUGGESTION) for v in vulns),
@@ -169,14 +170,14 @@ async def scan_manifest_changes(
         fixes_str = ", ".join(distinct_fixes) if distinct_fixes else "see advisory links"
 
         agent_prompt = (
-            f"In {f.path}, upgrade the dependency {q.name} from {q.version} "
+            f"In {file_path}, upgrade the dependency {q.name} from {q.version} "
             f"to a non-vulnerable version ({fixes_str}). "
             f"Update any associated lockfile entries."
         )
 
         comments.append(
             ReviewComment(
-                path=f.path,
+                path=file_path,
                 line=line_no,
                 end_line=None,
                 severity=severity,

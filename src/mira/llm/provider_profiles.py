@@ -31,7 +31,23 @@ DEFAULT_PROFILE: dict = {
     "model_prefix": "strip",
     "extra_headers": {},
     "reasoning_effort_map": {},
+    # Added alongside the effort when reasoning is on (e.g. DeepSeek's
+    # ``thinking`` toggle). Empty for everyone else.
+    "reasoning_on_payload": {},
+    # Sent when reasoning is off, for endpoints that think by default and need
+    # an explicit disable (DeepSeek). Empty for everyone else — no-op.
+    "reasoning_off_payload": {},
+    # Responses API uses a different off shape than Chat (DeepSeek needs
+    # ``reasoning.effort = none``). Empty for everyone else.
+    "reasoning_off_payload_responses": {},
+    # Chat Completions output-token field. OpenAI proper requires
+    # ``max_completion_tokens``; most compatible endpoints only document
+    # ``max_tokens``.
+    "max_tokens_field": "max_tokens",
     "api_key_env": None,
+    # "anthropic" when the endpoint forwards Anthropic ``cache_control``
+    # breakpoints (OpenRouter). None leaves requests untouched.
+    "prompt_caching": None,
 }
 
 

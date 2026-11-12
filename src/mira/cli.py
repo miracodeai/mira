@@ -13,6 +13,7 @@ import click
 from mira import __version__
 from mira.config import load_config
 from mira.core.engine import ReviewEngine
+from mira.core.git_snapshot import GitSnapshot
 from mira.exceptions import MiraError
 from mira.llm import create_llm
 from mira.models import ReviewResult, Severity
@@ -47,7 +48,10 @@ def _format_text(result: ReviewResult) -> str:
         lines.append("")
 
     if not result.comments:
-        lines.append("No issues found.")
+        if result.failed_chunks or result.security_failures or result.dependency_failures:
+            lines.append("Review incomplete: one or more review chunks failed.")
+        else:
+            lines.append("No issues found.")
         return "\n".join(lines)
 
     for i, c in enumerate(result.comments, 1):
@@ -125,6 +129,7 @@ def main() -> None:
 @main.command()
 @click.option("--pr", "pr_url", default=None, help="PR/MR URL (GitHub PR or GitLab MR)")
 @click.option("--stdin", "use_stdin", is_flag=True, help="Read diff from stdin")
+@click.option("--base", "base_ref", help="Review committed HEAD changes since this Git ref")
 @click.option("--model", envvar="MIRA_MODEL", default=None, help="LLM model to use")
 @click.option("--max-comments", envvar="MIRA_MAX_COMMENTS", type=int, default=None)
 @click.option("--confidence", envvar="MIRA_CONFIDENCE_THRESHOLD", type=float, default=None)
@@ -153,6 +158,7 @@ def main() -> None:
 def review(
     pr_url: str | None,
     use_stdin: bool,
+    base_ref: str | None,
     model: str | None,
     max_comments: int | None,
     confidence: float | None,
@@ -172,11 +178,14 @@ def review(
         stream=sys.stdout,
     )
 
-    if not pr_url and not use_stdin:
-        raise click.UsageError("Provide --pr <url> or --stdin")
+    if base_ref is not None and (pr_url or use_stdin):
+        raise click.UsageError("--base cannot be combined with --pr or --stdin")
+    if not pr_url and not use_stdin and base_ref is None:
+        raise click.UsageError("Provide --pr <url>, --stdin, or --base <ref>")
     if trust_execution_settings and config_path is None:
         raise click.UsageError("--trust-execution-settings requires --config")
 
+    use_dashboard = base_ref is None
     overrides: dict[str, object] = {}
     if model:
         overrides["llm.model"] = model
@@ -188,19 +197,22 @@ def review(
         overrides["review.walkthrough"] = False
 
     try:
+        snapshot = GitSnapshot(base_ref) if base_ref is not None else None
+        local_diff = snapshot.diff() if snapshot is not None else ""
         config = load_config(
             config_path,
             overrides,
             trust_execution_settings=trust_execution_settings,
+            use_dashboard=use_dashboard,
         )
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
     from mira.dashboard.models_config import llm_config_for
 
-    llm = create_llm(llm_config_for("review", config.llm))
-    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
-    security_llm = create_llm(llm_config_for("security", config.llm))
+    llm = create_llm(llm_config_for("review", config.llm, use_dashboard=use_dashboard))
+    indexing_llm = create_llm(llm_config_for("indexing", config.llm, use_dashboard=use_dashboard))
+    security_llm = create_llm(llm_config_for("security", config.llm, use_dashboard=use_dashboard))
 
     git_token = token or github_token
     github_provider = None
@@ -210,7 +222,9 @@ def review(
                 "--token (or --github-token / GITHUB_TOKEN / MIRA_GIT_TOKEN) is required for PR review"
             )
         # Infer the platform from the URL shape; fall back to the configured default.
-        if "/-/merge_requests/" in pr_url or "gitlab" in pr_url:
+        if "/pull-requests/" in pr_url or "bitbucket" in pr_url:
+            provider_type = "bitbucket"
+        elif "/-/merge_requests/" in pr_url or "gitlab" in pr_url:
             provider_type = "gitlab"
         elif "/pulls/" in pr_url or "forgejo" in pr_url:
             provider_type = "forgejo"
@@ -240,7 +254,9 @@ def review(
     )
 
     try:
-        if use_stdin:
+        if snapshot is not None:
+            result = asyncio.run(engine.review_diff(local_diff, local_snapshot=snapshot))
+        elif use_stdin:
             diff_text = sys.stdin.read()
             result = asyncio.run(engine.review_diff(diff_text))
         else:
@@ -340,6 +356,27 @@ def review(
     help="Origin API base, default https://api.cursor.com/v1/origin",
 )
 @click.option(
+    "--bitbucket-token",
+    envvar="MIRA_BITBUCKET_TOKEN",
+    default=None,
+    help=(
+        "Bitbucket Cloud credential (enables the Bitbucket webhook route): a workspace/"
+        "project/repository access token, or an API token given as email:token"
+    ),
+)
+@click.option(
+    "--bitbucket-webhook-secret",
+    envvar="MIRA_BITBUCKET_WEBHOOK_SECRET",
+    default=None,
+    help="Secret set on the Bitbucket webhook (verifies the X-Hub-Signature header)",
+)
+@click.option(
+    "--bitbucket-bot-user",
+    envvar="MIRA_BITBUCKET_BOT_USER",
+    default=None,
+    help="The bot's Bitbucket nickname, when the credential can't read GET /user",
+)
+@click.option(
     "--bot-name",
     envvar="MIRA_BOT_NAME",
     default=None,
@@ -373,17 +410,21 @@ def serve(
     origin_private_key: str | None,
     origin_token: str | None,
     origin_base_url: str | None,
+    bitbucket_token: str | None,
+    bitbucket_webhook_secret: str | None,
+    bitbucket_bot_user: str | None,
     bot_name: str | None,
     config_path: str | None,
     verbose: bool,
 ) -> None:
-    """Run the Mira webhook server for GitHub, GitLab, Forgejo, and/or Cursor Origin."""
+    """Run the Mira webhook server for GitHub, GitLab, Forgejo, Bitbucket, and/or Cursor Origin."""
     try:
         import asyncio
 
         import uvicorn
 
         from mira.config import set_global_defaults
+        from mira.platforms.bitbucket.auth import BitbucketTokenAuth
         from mira.platforms.forgejo.auth import ForgejoTokenAuth
         from mira.platforms.github.auth import GitHubAppAuth
         from mira.platforms.gitlab.auth import GitLabTokenAuth
@@ -411,22 +452,27 @@ def serve(
     gitlab_configured = bool(gitlab_token and gitlab_webhook_secret)
     forgejo_configured = bool(forgejo_token and forgejo_webhook_secret)
     origin_configured = bool(origin_app_id and origin_private_key)
-    if (
-        not github_configured
-        and not gitlab_configured
-        and not forgejo_configured
-        and not origin_configured
+    bitbucket_configured = bool(bitbucket_token and bitbucket_webhook_secret)
+    if not (
+        github_configured
+        or gitlab_configured
+        or forgejo_configured
+        or bitbucket_configured
+        or origin_configured
     ):
         raise click.ClickException(
             "No platform configured. Provide GitHub App creds (--app-id, --private-key, "
             "--webhook-secret), GitLab creds (--gitlab-token, --gitlab-webhook-secret), "
-            "Forgejo creds, and/or Origin App creds (--origin-app-id, --origin-private-key)."
+            "Forgejo creds (--forgejo-token, --forgejo-webhook-secret), Bitbucket "
+            "creds (--bitbucket-token, --bitbucket-webhook-secret), and/or Origin App "
+            "creds (--origin-app-id, --origin-private-key)."
         )
 
     app_auth = None
     gitlab_auth = None
     forgejo_auth = None
     origin_auth = None
+    bitbucket_auth = None
 
     if github_configured:
         assert private_key is not None
@@ -450,6 +496,16 @@ def serve(
             forgejo_token, forgejo_base_url or "https://codeberg.org/api/v1"
         )
 
+    if bitbucket_configured:
+        assert bitbucket_token is not None
+        from mira.platforms import profiles
+
+        bitbucket_auth = BitbucketTokenAuth(
+            bitbucket_token,
+            profiles.resolve("bitbucket")["api_url"] or "https://api.bitbucket.org/2.0",
+            bot_identity=bitbucket_bot_user,
+        )
+
     if origin_configured:
         assert origin_app_id is not None
         assert origin_private_key is not None
@@ -470,9 +526,13 @@ def serve(
     # Auto-detect the bot @mention from whichever platform's own identity when
     # the user didn't override it. Falls back to "miracodeai" on a lookup blip.
     if not bot_name:
-        identity_auth = app_auth or gitlab_auth or forgejo_auth or origin_auth
+        identity_auth = app_auth or gitlab_auth or forgejo_auth or bitbucket_auth or origin_auth
         if identity_auth is not None:
             bot_name = asyncio.run(identity_auth.get_bot_identity()) or "miracodeai"
+            # Bitbucket nicknames may contain characters the server rejects.
+            if not all(c.isascii() and (c.isalnum() or c in "_-") for c in bot_name):
+                click.echo(f"Detected bot identity {bot_name!r} is not a valid @mention name")
+                bot_name = "miracodeai"
             click.echo(f"Detected bot @mention: @{bot_name}")
         else:
             bot_name = "miracodeai"
@@ -493,6 +553,8 @@ def serve(
         gitlab_webhook_secret=gitlab_webhook_secret,
         forgejo_auth=forgejo_auth,
         forgejo_webhook_secret=forgejo_webhook_secret,
+        bitbucket_auth=bitbucket_auth,
+        bitbucket_webhook_secret=bitbucket_webhook_secret,
         origin_auth=origin_auth if origin_configured else None,
     )
 
@@ -502,6 +564,7 @@ def serve(
             ("GitHub", github_configured),
             ("GitLab", gitlab_configured),
             ("Forgejo", forgejo_configured),
+            ("Bitbucket", bitbucket_configured),
             ("Origin", origin_configured),
         ]
         if on

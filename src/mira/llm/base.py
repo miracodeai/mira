@@ -10,7 +10,7 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from mira.config import LLMConfig
-from mira.exceptions import LLMError, NonRetriableLLMError
+from mira.exceptions import LLMError, NonRetriableLLMError, StructuredOutputError
 from mira.llm import provider_profiles as profiles
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 
@@ -41,6 +41,8 @@ class LLMProviderProtocol(Protocol):
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str: ...
 
     async def complete_with_tools(
@@ -48,6 +50,7 @@ class LLMProviderProtocol(Protocol):
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str: ...
 
     async def complete_agentic(
@@ -110,13 +113,28 @@ def _strip_model_prefix(model: str, base_url: str) -> str:
 
 
 def _retriable(exception: BaseException) -> bool:
-    """Return True for transient errors; False for 4xx non-retriable errors."""
-    if isinstance(exception, NonRetriableLLMError):
+    """Return True for transient errors; False for 4xx and semantic failures."""
+    if isinstance(exception, (NonRetriableLLMError, StructuredOutputError)):
         return False
     return isinstance(
         exception,
         (httpx.TimeoutException, httpx.NetworkError, LLMError),
     )
+
+
+# Output budget for the one retry after a response was cut off at ``max_tokens``
+# when the configured budget was lower than this (the default is this value,
+# which the published benchmark ran with).
+BUDGET_RETRY_TOKENS = 16384
+# Budget an endpoint is retried at after rejecting the configured one; every
+# model Mira has been run on accepts it.
+BUDGET_FLOOR_TOKENS = 4096
+
+
+def _exception_excerpt(error: BaseException, limit: int = 300) -> str:
+    """Short, single-line error text safe to put in a diagnostic message."""
+    text = " ".join(str(error).split())
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 # ── Shared base for OpenAI-compatible providers ─────────────────────
@@ -140,8 +158,13 @@ class OpenAICompatibleProvider:
         self.profile = profiles.resolve(config.base_url)
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        # Prompt-cache activity reported by the endpoint (subset of prompt tokens).
+        self.total_cache_read_tokens = 0
+        self.total_cache_write_tokens = 0
         self._no_forced_tool_choice: set[str] = set()
         self._no_reasoning: set[str] = set()
+        # Per-model output budget after an endpoint rejected the configured one.
+        self._budget_caps: dict[str, int] = {}
 
         # Apply retry decorator imperatively so it reads config values
         # (max_retries, retry_min_wait, retry_max_wait) at instance time.
@@ -176,21 +199,181 @@ class OpenAICompatibleProvider:
         self._cached_headers = headers
         return dict(headers)
 
-    def _apply_reasoning(self, body: dict) -> None:
-        """Enable extended thinking when a reasoning effort is configured.
+    def _max_tokens_field(self) -> str:
+        """Name of the Chat Completions output-token field for this profile."""
+        return self.profile.get("max_tokens_field", "max_tokens")
 
-        The effort is passed via the unified ``reasoning.effort`` knob, after
-        any per-provider remap from the profile. Anthropic models reject a
-        custom ``temperature`` while thinking is on, so we drop it.
-        No-op when reasoning is off, keeping the request unchanged.
+    @staticmethod
+    def _reasoning_requested(body: dict) -> bool:
+        """Whether the request asked the model to think (rather than not, or nothing)."""
+        if body.get("reasoning_effort"):
+            return True
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, dict):
+            return reasoning.get("enabled") is not False
+        thinking = body.get("thinking")
+        return isinstance(thinking, dict) and thinking.get("type") == "enabled"
+
+    def _budget_exhausted_retry(self, body: dict, data: dict) -> dict | None:
+        """Return a retry body when the model hit the output budget before finishing.
+
+        Thinking models count their reasoning against ``max_tokens``, so a
+        reply cut off at the budget comes in two shapes. The answer itself was
+        too long: retry with the larger budget. The model spent the budget
+        thinking and never got to the answer: a larger budget does not help
+        (DeepSeek v4.1 flash spent all of 16k reasoning on two real PRs), so
+        the retry also turns thinking off where the provider has a switch for
+        it, and the same prompt then completes in seconds. Returns ``None``
+        when the response finished normally or nothing could change.
+        """
+        choice = (data.get("choices") or [{}])[0]
+        if choice.get("finish_reason") != "length":
+            return None
+        model = str(body.get("model"))
+        field = self._max_tokens_field()
+        current = int(body.get(field) or self.config.max_tokens)
+        target = min(BUDGET_RETRY_TOKENS, self._budget_caps.get(model, 10**9))
+        usage = data.get("usage") or {}
+        details = usage.get("completion_tokens_details") or {}
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+
+        raise_budget = current < target
+        thinking_ate_it = reasoning_tokens > 0 and reasoning_tokens * 10 >= completion_tokens * 9
+        stop_thinking = (
+            thinking_ate_it
+            and self._reasoning_requested(body)
+            and bool(self.profile.get("reasoning_off_payload"))
+        )
+        if not raise_budget and not stop_thinking:
+            return None
+
+        retry = dict(body)
+        changes: list[str] = []
+        if raise_budget:
+            retry[field] = target
+            changes.append(f"budget {target}")
+        if stop_thinking:
+            self._remove_reasoning(retry)
+            retry.update(self.profile["reasoning_off_payload"])
+            changes.append("thinking off")
+        logger.warning(
+            "Model %s hit its %d-token output budget before finishing "
+            "(completion_tokens=%s, reasoning_tokens=%s); retrying once with %s",
+            model,
+            current,
+            completion_tokens,
+            reasoning_tokens,
+            ", ".join(changes),
+        )
+        return retry
+
+    def _cap_output_budget(self, body: dict) -> None:
+        """Lower the request's output budget to what this model accepted before."""
+        cap = self._budget_caps.get(str(body.get("model")))
+        if cap is None:
+            return
+        field = self._max_tokens_field()
+        if int(body.get(field) or 0) > cap:
+            body[field] = cap
+
+    def _lower_rejected_budget(self, body: dict, error_text: str) -> bool:
+        """After a 400 about the output budget, lower it in place and remember.
+
+        Endpoints word it differently ("max_tokens is too large", "maximum
+        context length", "output tokens"), so match loosely but only when the
+        request actually carried more than the floor. Returns True when the
+        body was changed and the request should be sent again.
+        """
+        text = error_text.lower()
+        if not any(
+            marker in text
+            for marker in ("max_tokens", "max_completion_tokens", "context length", "output tokens")
+        ):
+            return False
+        field = self._max_tokens_field()
+        current = int(body.get(field) or 0)
+        if current <= BUDGET_FLOOR_TOKENS:
+            return False
+        logger.warning(
+            "Endpoint rejected an output budget of %d for %s; retrying at %d and keeping it there",
+            current,
+            body.get("model"),
+            BUDGET_FLOOR_TOKENS,
+        )
+        self._budget_caps[str(body.get("model"))] = BUDGET_FLOOR_TOKENS
+        body[field] = BUDGET_FLOOR_TOKENS
+        return True
+
+    @staticmethod
+    def _remove_reasoning(body: dict) -> None:
+        """Drop every reasoning-shaped field Mira may have added."""
+        for key in ("reasoning", "reasoning_effort", "thinking", "enable_thinking"):
+            body.pop(key, None)
+
+    @staticmethod
+    def _has_reasoning(body: dict) -> bool:
+        return any(
+            key in body for key in ("reasoning", "reasoning_effort", "thinking", "enable_thinking")
+        )
+
+    def _apply_reasoning_off(self, body: dict, protocol: str = "chat") -> None:
+        """Apply a profile's explicit "thinking off" payload, if it has one.
+
+        Chat and Responses disable thinking differently, so the Responses
+        payload is separate. Providers with no documented disable remain a
+        no-op (their default applies). So does a model that already refused
+        reasoning settings on a provider whose effort and off switch are one
+        unified parameter (OpenRouter's ``reasoning``): it takes neither.
+        """
+        if body.get("model") in self._no_reasoning and not self.profile.get("reasoning_on_payload"):
+            return
+        key = (
+            "reasoning_off_payload_responses"
+            if protocol == "responses"
+            else "reasoning_off_payload"
+        )
+        body.update(self.profile.get(key, {}))
+
+    def _drop_rejected_reasoning(self, body: dict, api_model: str, protocol: str = "chat") -> None:
+        """Strip the reasoning fields a 400 just refused and remember the model.
+
+        Providers with a separate thinking toggle (DeepSeek's ``thinking``)
+        get the explicit off payload back after the effort field is refused,
+        or default-on thinking would stay in place. Providers whose effort
+        and off switch are one unified parameter (OpenRouter's ``reasoning``)
+        have just said the model takes neither: a model whose reasoning is
+        mandatory refuses the off payload, a model without reasoning refuses
+        the effort, and ``_apply_reasoning_off`` sends both nothing from now on.
+        """
+        logger.info("Model %s rejected reasoning settings; retrying without them", api_model)
+        self._remove_reasoning(body)
+        self._no_reasoning.add(api_model)
+        self._apply_reasoning_off(body, protocol)
+
+    def _apply_reasoning(self, body: dict, protocol: str = "chat") -> None:
+        """Add the provider's documented reasoning toggle and effort field.
+
+        Chat Completions uses the top-level ``reasoning_effort`` field on
+        OpenAI and most compatible endpoints; OpenRouter accepts that same
+        shorthand. Responses API uses ``reasoning.effort``. Providers that
+        need a separate toggle (DeepSeek) get it from the profile.
+
+        Anthropic-style models reject a custom ``temperature`` while thinking
+        is on, so we drop it when reasoning is applied. When reasoning is off
+        or was previously rejected for this model, the profile's explicit off
+        payload is applied instead.
         """
         effort = self.config.reasoning_effort
-        if not effort or effort == "off":
-            return
-        if body.get("model") in self._no_reasoning:
+        if not effort or effort == "off" or body.get("model") in self._no_reasoning:
+            self._apply_reasoning_off(body, protocol)
             return
         effort = self.profile.get("reasoning_effort_map", {}).get(effort, effort)
-        body["reasoning"] = {"effort": effort}
+        if protocol == "responses":
+            body["reasoning"] = {"effort": effort}
+        else:
+            body["reasoning_effort"] = effort
+            body.update(self.profile.get("reasoning_on_payload", {}))
         body.pop("temperature", None)
 
     def _account_usage(self, data: dict) -> None:
@@ -203,6 +386,18 @@ class OpenAICompatibleProvider:
         if usage:
             self.total_prompt_tokens += usage.get("prompt_tokens", 0)
             self.total_completion_tokens += usage.get("completion_tokens", 0)
+            details = usage.get("prompt_tokens_details") or {}
+            cache_read = details.get("cached_tokens") or 0
+            cache_write = details.get("cache_write_tokens") or 0
+            self.total_cache_read_tokens += cache_read
+            self.total_cache_write_tokens += cache_write
+            if cache_read or cache_write:
+                logger.info(
+                    "LLM prompt cache: read=%d write=%d prompt=%d",
+                    cache_read,
+                    cache_write,
+                    usage.get("prompt_tokens", 0),
+                )
 
     @staticmethod
     def _handle_error(resp: httpx.Response) -> None:
@@ -221,6 +416,8 @@ class OpenAICompatibleProvider:
         json_mode: bool,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         raise NotImplementedError
 
@@ -230,6 +427,7 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -250,6 +448,8 @@ class OpenAICompatibleProvider:
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         """Complete a prompt using JSON mode, with fallback model support."""
         try:
@@ -259,6 +459,7 @@ class OpenAICompatibleProvider:
                 json_mode,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                omit_temperature=omit_temperature,
             )
         except NonRetriableLLMError:
             raise
@@ -277,6 +478,7 @@ class OpenAICompatibleProvider:
                         json_mode,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        omit_temperature=omit_temperature,
                     )
                 except Exception as fallback_err:
                     raise LLMError(
@@ -294,11 +496,22 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
-        """Complete a prompt using tool calling for structured output."""
+        """Complete a prompt using tool calling for structured output.
+
+        ``force_tool`` names the tool to force and switches on strict structured
+        output: a successful response that contains prose instead of that tool
+        call raises ``StructuredOutputError``. Without it the historical text
+        fallback is preserved for callers that tolerate prose.
+        """
         try:
             return await self._call_llm_with_tools(
-                self.config.model, messages, tools, temperature=temperature
+                self.config.model,
+                messages,
+                tools,
+                temperature=temperature,
+                force_tool=force_tool,
             )
         except NonRetriableLLMError:
             raise
@@ -316,14 +529,26 @@ class OpenAICompatibleProvider:
                         messages,
                         tools,
                         temperature=temperature,
+                        force_tool=force_tool,
                     )
                 except Exception as fallback_err:
+                    if isinstance(primary_err, StructuredOutputError) or isinstance(
+                        fallback_err, StructuredOutputError
+                    ):
+                        raise StructuredOutputError(
+                            "structured_output",
+                            model=self.config.fallback_model,
+                            tool=force_tool or "structured tool",
+                            excerpt=_exception_excerpt(fallback_err),
+                        ) from fallback_err
                     raise LLMError(
                         "both_models_failed",
                         primary_model=self.config.model,
                         fallback_model=self.config.fallback_model,
                         error=fallback_err,
                     ) from fallback_err
+            if isinstance(primary_err, StructuredOutputError):
+                raise
             raise LLMError(
                 "tool_call_failed", model=self.config.model, error=primary_err
             ) from primary_err

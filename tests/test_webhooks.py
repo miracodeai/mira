@@ -439,6 +439,84 @@ async def _post(client: AsyncClient, event: str, payload: dict) -> dict:
 
 @patch("mira.platforms.github.webhook.load_config")
 @patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_base_branch_filtered(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(
+        filter=FilterConfig(allowed_base_branches=["main", "release/*"])
+    )
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    payload["pull_request"]["base"] = {"ref": "develop"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "ignored"
+    mock_handler.assert_not_awaited()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_base_branch_allowed(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(
+        filter=FilterConfig(allowed_base_branches=["main", "release/*"])
+    )
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    payload["pull_request"]["base"] = {"ref": "main"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_no_base_branch_policy_reviews_by_default(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig()
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    # No base ref in the payload and no policy configured → reviewed.
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_repo_branch_override_replaces_default(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(
+        filter=FilterConfig(
+            allowed_base_branches=["main"],
+            allowed_base_branch_overrides={"testowner/testrepo": ["dev*"]},
+        )
+    )
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    payload["pull_request"]["base"] = {"ref": "dev-feature"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
+async def test_pr_comment_review_ignores_branch_policy(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    # Manual commands are never gated by the branch policy.
+    mock_load_config.return_value = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    payload = _comment_payload("@mira-bot review")
+    result = await _post(client, "issue_comment", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_opened_blocked_author_filtered(
     mock_handler: AsyncMock, mock_load_config, client: AsyncClient
 ) -> None:
@@ -534,10 +612,10 @@ async def test_push_blocked_author_filtered(
 
 @patch("mira.platforms.github.webhook.load_config")
 @patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
-async def test_comment_review_bypass_for_blocked_author(
+async def test_comment_review_ignores_author_filter(
     mock_handler: AsyncMock, mock_load_config, client: AsyncClient
 ) -> None:
-    """Manual @mira-bot review bypasses the author filter."""
+    """Commands use the command policy, not the auto-review author filter."""
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
     payload = _comment_payload(f"@{BOT_NAME} review")
     payload["comment"]["user"]["login"] = "dependabot[bot]"
@@ -548,23 +626,23 @@ async def test_comment_review_bypass_for_blocked_author(
 
 @patch("mira.platforms.github.webhook.load_config")
 @patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
-async def test_comment_non_review_no_bypass(
+async def test_comment_question_ignores_author_filter(
     mock_handler: AsyncMock, mock_load_config, client: AsyncClient
 ) -> None:
-    """Non-review commands do NOT bypass the author filter."""
+    """Free-form command dispatch is separate from the auto-review author filter."""
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["alice"]))
-    payload = _comment_payload(f"@{BOT_NAME} pause")
+    payload = _comment_payload(f"@{BOT_NAME} why is this slow?")
     result = await _post(client, "issue_comment", payload)
-    assert result["status"] == "ignored"
-    mock_handler.assert_not_awaited()
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
 
 
 @patch("mira.platforms.github.webhook.load_config")
 @patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
-async def test_comment_case_insensitive_review_bypass(
+async def test_comment_case_insensitive_review_dispatches(
     mock_handler: AsyncMock, mock_load_config, client: AsyncClient
 ) -> None:
-    """Case-insensitive @mira-bot Review bypasses the author filter."""
+    """Case-insensitive commands still dispatch to the command handler."""
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
     payload = _comment_payload(f"@{BOT_NAME} Review")
     payload["comment"]["user"]["login"] = "dependabot[bot]"

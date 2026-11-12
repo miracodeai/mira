@@ -21,6 +21,7 @@ import {
 import { useParams } from "react-router"
 
 import { api } from "@/lib/api"
+import type { IndexingTemperature } from "@/lib/api/settings"
 import { useAuth } from "@/lib/auth"
 import { useDocumentTitle } from "@/lib/hooks"
 
@@ -45,15 +46,23 @@ export function SettingsPage() {
   const [apiStyle, setApiStyle] = useState("chat")
   const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
+  const [modelsLoaded, setModelsLoaded] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
+  const [temperatureMode, setTemperatureMode] = useState("inherit")
+  const [temperatureInput, setTemperatureInput] = useState("")
+  const [configTemperature, setConfigTemperature] =
+    useState<IndexingTemperature>(0)
+  const [temperatureSource, setTemperatureSource] = useState("config")
+  const [temperatureError, setTemperatureError] = useState("")
+  const [modelsError, setModelsError] = useState("")
 
   const [effective, setEffective] = useState<{
-    filter?: Record<string, number | boolean | string>
-    review?: Record<string, number | boolean | string>
+    filter?: Record<string, number | boolean | string | string[]>
+    review?: Record<string, number | boolean | string | string[]>
   } | null>(null)
   const [overrides, setOverrides] = useState<{
-    filter: Record<string, number | boolean | string>
-    review: Record<string, number | boolean | string>
+    filter: Record<string, number | boolean | string | string[]>
+    review: Record<string, number | boolean | string | string[]>
   }>({ filter: {}, review: {} })
   const [savingOverrides, setSavingOverrides] = useState(false)
   const [overridesSaved, setOverridesSaved] = useState(false)
@@ -66,36 +75,63 @@ export function SettingsPage() {
   // render inline under the offending input. `_global` is the catch-all
   // bucket for non-field errors.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  // List fields whose override was deleted locally but not yet saved; see
+  // the resetPending hint in strListField.
+  const [resetFields, setResetFields] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (!currentUser?.is_admin) return
-    api.getModels().then((m) => {
-      setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
-      setReviewModel(m.review_source === "config" ? "" : m.review_model)
-      setSecurityModel(m.security_source === "config" ? "" : m.security_model)
-      setConfigIndexingModel(m.config_indexing_model)
-      setConfigReviewModel(m.config_review_model)
-      setConfigSecurityModel(m.config_security_model)
-      setBackend(m.backend)
-      setIndexingOptions(m.indexing_options)
-      setReviewOptions(m.review_options)
-      setSecurityOptions(m.security_options)
-      setThinkingMode(m.review_thinking_mode)
-      setThinkingOptions(m.thinking_options)
-      setApiStyle(m.api_style ?? "chat")
-      setApiStyleOptions(m.api_style_options ?? [])
-    })
+    api
+      .getModels()
+      .then((m) => {
+        setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
+        setReviewModel(m.review_source === "config" ? "" : m.review_model)
+        setSecurityModel(m.security_source === "config" ? "" : m.security_model)
+        setConfigIndexingModel(m.config_indexing_model)
+        setConfigReviewModel(m.config_review_model)
+        setConfigSecurityModel(m.config_security_model)
+        setBackend(m.backend)
+        setIndexingOptions(m.indexing_options)
+        setReviewOptions(m.review_options)
+        setSecurityOptions(m.security_options)
+        setThinkingMode(m.review_thinking_mode)
+        setThinkingOptions(m.thinking_options)
+        setApiStyle(m.api_style ?? "chat")
+        setApiStyleOptions(m.api_style_options ?? [])
+        const temperature = m.indexing_temperature
+        setConfigTemperature(m.config_indexing_temperature)
+        setTemperatureSource(m.indexing_temperature_source)
+        setTemperatureMode(
+          m.indexing_temperature_source === "config"
+            ? "inherit"
+            : temperature === "omit"
+              ? "omit"
+              : "custom"
+        )
+        setTemperatureInput(
+          typeof temperature === "number" ? String(temperature) : ""
+        )
+        setModelsError("")
+        setModelsLoaded(true)
+      })
+      .catch(() => {
+        setModelsLoaded(false)
+        setModelsError(
+          "Could not load model settings. Reload the page to retry."
+        )
+      })
     api.getGlobalSettings().then((s) => {
       setEffective(
         (s.effective as {
-          filter?: Record<string, number | boolean | string>
-          review?: Record<string, number | boolean | string>
+          filter?: Record<string, number | boolean | string | string[]>
+          review?: Record<string, number | boolean | string | string[]>
         }) ?? null
       )
       setOverrides({
         filter: s.overrides.filter ?? {},
         review: s.overrides.review ?? {},
       })
+      setResetFields(new Set())
     })
   }, [currentUser])
 
@@ -107,24 +143,51 @@ export function SettingsPage() {
     )
   }
 
+  const httpBackend =
+    modelsLoaded && backend !== "bedrock" && backend !== "codex-cli"
+
   const saveModels = async () => {
+    if (!modelsLoaded) return
+    let temperature: IndexingTemperature | null = null
+    setTemperatureError("")
+    setModelsError("")
+    if (httpBackend && temperatureMode === "custom") {
+      const value = Number(temperatureInput)
+      if (!temperatureInput.trim() || !Number.isFinite(value) || value < 0) {
+        setTemperatureError("Enter a finite, nonnegative number.")
+        return
+      }
+      temperature = value
+    } else if (temperatureMode === "omit") {
+      temperature = "omit"
+    }
     setSavingModels(true)
-    await api.saveModels(
-      indexingModel,
-      reviewModel,
-      securityModel,
-      thinkingMode,
-      apiStyle
-    )
-    setSavingModels(false)
-    setModelsSaved(true)
-    setTimeout(() => setModelsSaved(false), 2000)
+    setModelsSaved(false)
+    try {
+      await api.saveModels(
+        indexingModel,
+        reviewModel,
+        securityModel,
+        thinkingMode,
+        apiStyle,
+        httpBackend ? temperature : undefined
+      )
+      if (httpBackend) {
+        setTemperatureSource(temperature === null ? "config" : "dashboard")
+      }
+      setModelsSaved(true)
+      setTimeout(() => setModelsSaved(false), 2000)
+    } catch (err) {
+      setModelsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSavingModels(false)
+    }
   }
 
   const setOverride = (
     section: "filter" | "review",
     key: string,
-    value: number | boolean | string | null
+    value: number | boolean | string | string[] | null
   ) => {
     setOverrides((prev) => {
       const next = { ...prev[section] }
@@ -137,8 +200,11 @@ export function SettingsPage() {
   const saveOverrides = async () => {
     setSavingOverrides(true)
     setFieldErrors({})
+    // Only this generation's pending resets are cleared by its own save;
+    // a reset clicked while the PUT is in flight belongs to the next one.
+    const savedResets = resetFields
     try {
-      const body: Record<string, Record<string, number | boolean | string>> = {}
+      const body: Record<string, Record<string, number | boolean | string | string[]>> = {}
       if (Object.keys(overrides.filter).length > 0)
         body.filter = overrides.filter
       if (Object.keys(overrides.review).length > 0)
@@ -149,10 +215,17 @@ export function SettingsPage() {
       const fresh = await api.getGlobalSettings()
       setEffective(
         (fresh.effective as {
-          filter?: Record<string, number | boolean | string>
-          review?: Record<string, number | boolean | string>
+          filter?: Record<string, number | boolean | string | string[]>
+          review?: Record<string, number | boolean | string | string[]>
         }) ?? null
       )
+      // Hints survive until fresh effective settings arrive, so the stale
+      // persisted override is never shown bare during the refresh.
+      setResetFields((prev) => {
+        const next = new Set(prev)
+        for (const f of savedResets) next.delete(f)
+        return next
+      })
     } catch (err) {
       // The API returns `{detail: {field?, message}}` for validation failures.
       // `fetchJson`/`putJson` wrap the response body in `API error NNN: <body>`,
@@ -320,6 +393,117 @@ export function SettingsPage() {
     )
   }
 
+  const strListField = (
+    section: "filter" | "review",
+    key: string,
+    label: string,
+    description: string
+  ) => {
+    const fieldKey = `${section}.${key}`
+    const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[key]
+    const override = overrides[section][key]
+    const overridden = override !== undefined
+    const committed = Array.isArray(override)
+      ? override.join(", ")
+      : Array.isArray(eff)
+        ? (eff as unknown[]).map(String).join(", ")
+        : ""
+    const draft = drafts[fieldKey]
+    const display = draft !== undefined ? draft : committed
+    // Distinguishes "override deleted locally, not yet saved" from a value
+    // that simply comes from config: only the former needs the pending hint,
+    // because `effective` still contains the persisted override until Save.
+    const resetPending =
+      !draft && !overridden && resetFields.has(fieldKey)
+    const error = fieldErrors[fieldKey]
+
+    const commit = () => {
+      const v = drafts[fieldKey]
+      if (v === undefined) return
+      setDrafts((d) => {
+        const next = { ...d }
+        delete next[fieldKey]
+        return next
+      })
+      // An empty entry is an explicit "review every branch" ([]), not a
+      // reset: deleting the override would silently restore the mira.yaml
+      // restriction. "Reset to config" below is the explicit reset.
+      const parts = v
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+      setResetFields((prev) => {
+        if (!prev.has(fieldKey)) return prev
+        const next = new Set(prev)
+        next.delete(fieldKey)
+        return next
+      })
+      setOverride(section, key, parts)
+    }
+
+    return (
+      <div className="space-y-1">
+        <div className="flex items-baseline gap-3">
+          <label className="text-sm font-medium" htmlFor={fieldKey}>
+            {label}
+          </label>
+          {overridden && (
+            <span className="text-[11px] font-semibold text-primary">
+              Overrides <code className="font-mono">mira.yaml</code>
+            </span>
+          )}
+        </div>
+        <Input
+          id={fieldKey}
+          type="text"
+          className="max-w-md font-mono text-sm"
+          aria-invalid={error ? true : undefined}
+          value={display}
+          onChange={(e) =>
+            setDrafts((d) => ({ ...d, [fieldKey]: e.target.value }))
+          }
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.currentTarget.blur()
+            }
+          }}
+        />
+        {error ? (
+          <p className="text-xs text-destructive">
+            {label} {error}
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">{description}</p>
+        )}
+        {overridden && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-xs"
+            disabled={savingOverrides}
+            onClick={() => {
+              setOverride(section, key, null)
+              setResetFields((prev) => new Set(prev).add(fieldKey))
+              setDrafts((d) => {
+                const next = { ...d }
+                delete next[fieldKey]
+                return next
+              })
+            }}
+          >
+            Reset to config value
+          </Button>
+        )}
+        {resetPending && (
+          <p className="text-xs text-muted-foreground">
+            Reset pending — Save overrides to apply the configuration value.
+          </p>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6 p-6">
       <div>
@@ -357,6 +541,79 @@ export function SettingsPage() {
                 model is recommended since it runs over every file.
               </p>
             </div>
+            {httpBackend ? (
+              <div className="space-y-2">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="indexing-temperature-mode"
+                >
+                  Indexing Temperature
+                </label>
+                <Select
+                  value={temperatureMode}
+                  onValueChange={(mode) => {
+                    setTemperatureMode(mode)
+                    setTemperatureError("")
+                  }}
+                >
+                  <SelectTrigger id="indexing-temperature-mode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      Inherit deployment config
+                    </SelectItem>
+                    <SelectItem value="omit">
+                      Provider default (omit)
+                    </SelectItem>
+                    <SelectItem value="custom">Custom number</SelectItem>
+                  </SelectContent>
+                </Select>
+                {temperatureMode === "custom" && (
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="indexing-temperature-value"
+                      className="text-sm"
+                    >
+                      Custom indexing temperature
+                    </label>
+                    <Input
+                      id="indexing-temperature-value"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={temperatureInput}
+                      onChange={(e) => setTemperatureInput(e.target.value)}
+                      aria-invalid={!!temperatureError}
+                      aria-describedby="indexing-temperature-error"
+                    />
+                  </div>
+                )}
+                {temperatureError && (
+                  <p
+                    id="indexing-temperature-error"
+                    role="alert"
+                    className="text-xs text-destructive"
+                  >
+                    {temperatureError}
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  Deployment config:{" "}
+                  {configTemperature === "omit" ? "omit" : configTemperature}.{" "}
+                  Saved source:{" "}
+                  {temperatureSource === "config"
+                    ? "deployment config"
+                    : "dashboard"}
+                  . Applies to code-index summaries only. Reasoning effort is
+                  unchanged; existing reasoning policy may omit temperature.
+                </p>
+              </div>
+            ) : modelsLoaded ? (
+              <p className="text-xs text-muted-foreground">
+                Indexing temperature is managed by this backend.
+              </p>
+            ) : null}
             <div className="space-y-2">
               <label className="text-sm font-medium">Review Model</label>
               <ModelCombobox
@@ -429,8 +686,22 @@ export function SettingsPage() {
                 </p>
               </div>
             )}
+            {!modelsLoaded && !modelsError && (
+              <p role="status" className="text-sm text-muted-foreground">
+                Loading model settings…
+              </p>
+            )}
+            {modelsError && (
+              <p role="alert" className="text-sm text-destructive">
+                {modelsError}
+              </p>
+            )}
             <div className="flex items-center gap-3">
-              <Button size="sm" onClick={saveModels} disabled={savingModels}>
+              <Button
+                size="sm"
+                onClick={saveModels}
+                disabled={savingModels || !modelsLoaded}
+              >
                 {savingModels && (
                   <Loader2 className="mr-2 h-3 w-3 animate-spin" />
                 )}
@@ -485,6 +756,12 @@ export function SettingsPage() {
                   "Cap on files reviewed in a single PR. PRs above this are partially reviewed.",
                   "1",
                   1
+                )}
+                {strListField(
+                  "filter",
+                  "allowed_base_branches",
+                  "Auto-reviewed destination branches",
+                  "Comma-separated globs of base (target) branches that get automatic reviews — e.g. 'main, dev*, release/*'. Empty means every branch is auto-reviewed. Individual repos can replace this on their Review Policy tab."
                 )}
               </div>
             </div>
