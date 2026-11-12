@@ -121,6 +121,10 @@ commands:
   # reject: {}
 
 review:
+  # Verify supported Python call-binding changes across chunks using committed
+  # source and explicit repository-root or sibling imports. Requires code_context.
+  # Other calls follow the ordinary review path.
+  python_call_verification: false
   # Lines of context around hunks
   context_lines: 3
   # Maximum diff size in characters

@@ -31,6 +31,7 @@ from mira.core.passes import (
     self_critique,
 )
 from mira.core.priority import rank_files
+from mira.core.python_calls import SOURCE_PASS, CheckedCall, check_python_calls
 from mira.core.threads import (
     resolve_verified_threads,
     short_thread_description,
@@ -1658,7 +1659,13 @@ class ReviewEngine:
                 logger.warning("Walkthrough generation failed, skipping: %s", exc)
                 return None
 
+        python_source: tuple[SourceFetcher, set[str]] | None = None
+        verify_python = (
+            self.config.review.python_call_verification and self.config.review.code_context
+        )
+
         async def _build_context() -> str:
+            nonlocal python_source
             if local_snapshot is not None or not self.config.review.code_context:
                 return ""
             try:
@@ -1693,7 +1700,9 @@ class ReviewEngine:
                     # (indexed or not), so the reviewer tools are available on indexed repos too.
                     tree_paths: set[str] | None = None
                     if source_fetcher is not None and (
-                        self.config.review.agentic_tools or not index_has_data_for_changed
+                        self.config.review.agentic_tools
+                        or not index_has_data_for_changed
+                        or (verify_python and pr_info.head_sha)
                     ):
                         self._agentic_source_fetcher = source_fetcher
                         if hasattr(self.provider, "get_repo_tree"):
@@ -1704,6 +1713,8 @@ class ReviewEngine:
                             except Exception as exc:
                                 logger.debug("Repo tree fetch failed: %s", exc)
                         self._agentic_repo_tree = sorted(tree_paths) if tree_paths else []
+                        if verify_python and pr_info.head_sha and tree_paths:
+                            python_source = source_fetcher, tree_paths
 
                     if not index_has_data_for_changed and source_fetcher is not None:
                         try:
@@ -1805,6 +1816,28 @@ class ReviewEngine:
             provider=self.llm,
         )
 
+        checked_calls: list[CheckedCall] = []
+        if verify_python and len(chunks) > 1:
+            if local_snapshot is not None:
+                python_source = local_snapshot, set(repo_tree)
+            if python_source is not None:
+                # Keep the checker on lines visible to the ordinary reviewer.
+                full_files = {f.path: f for f in expanded}
+                chunk_by_path = {
+                    f.path: idx
+                    for idx, chunk in enumerate(chunks)
+                    for f in chunk.files
+                    if f == full_files[f.path]
+                }
+                fetcher, tree_paths = python_source
+                try:
+                    checked_calls = await _asyncio.wait_for(
+                        check_python_calls(diff_text, chunk_by_path, tree_paths, fetcher),
+                        timeout=5,
+                    )
+                except Exception as exc:
+                    logger.debug("Python call verification unavailable: %s", exc)
+
         learned_rules: list[str] = []
         custom_rules: list[dict[str, str]] = []
         try:
@@ -1885,13 +1918,28 @@ class ReviewEngine:
                     chunk_history = {
                         f.path: file_history[f.path] for f in chunk.files if f.path in file_history
                     }
+                    chunk_paths = {f.path for f in chunk.files}
+                    bindings = [
+                        f"- `{c.caller}:{c.line}` → `{c.callee}:{c.signature_line}`"
+                        f" ({'binding fails' if c.error else 'binding succeeds'})"
+                        for c in checked_calls
+                        if c.caller in chunk_paths or c.callee in chunk_paths
+                    ]
+                    chunk_context = code_context_block
+                    if bindings:
+                        chunk_context += (
+                            "\n\n### Independently checked Python call bindings\n"
+                            "Mira handles signature binding for the exact call pairs below. "
+                            "Review other behavior as usual and avoid duplicate binding findings.\n"
+                            + "\n".join(bindings)
+                        )
                     messages = build_review_prompt(
                         files=chunk.files,
                         config=self.config,
                         pr_title=pr_title,
                         pr_description=pr_description,
                         existing_comments=base_existing or None,
-                        code_context=code_context_block,
+                        code_context=chunk_context,
                         learned_rules=learned_rules or None,
                         custom_rules=custom_rules or None,
                         file_history=chunk_history or None,
@@ -2244,7 +2292,16 @@ class ReviewEngine:
         failed_path_set = set(failed_paths)
         reviewed_paths = [p for p in selected_paths if p not in failed_path_set]
 
-        all_comments = [classify_severity(c) for c in all_comments]
+        verified_comments = [comment for call in checked_calls if (comment := call.comment())]
+        if checked_calls:
+            audit.append(
+                {
+                    "stage": SOURCE_PASS,
+                    "checked": len(checked_calls),
+                    "count": len(verified_comments),
+                }
+            )
+        all_comments = verified_comments + [classify_severity(c) for c in all_comments]
 
         final_comments = filter_noise(
             all_comments,
@@ -2269,7 +2326,8 @@ class ReviewEngine:
         # filter can't, since confidence scores are LLM-generated too. Pass
         # the team's documented preferences so the critic doesn't strip
         # findings that enforce them as "style nits".
-        if final_comments and self.config.review.self_critique:
+        critique_candidates = [c for c in final_comments if c.source_pass != SOURCE_PASS]
+        if critique_candidates and self.config.review.self_critique:
             # A dependency finding can land on a manifest that lost the size
             # cull and so isn't in `filtered`. The critic grades on the hunk
             # covering a comment; with no hunk it reads as "unsupported" and
@@ -2277,9 +2335,9 @@ class ReviewEngine:
             _selected = {f.path for f in filtered}
             critique_files = filtered + [f for f in manifest_candidates if f.path not in _selected]
             try:
-                final_comments = await self_critique(
+                critiqued = await self_critique(
                     self.llm,
-                    final_comments,
+                    critique_candidates,
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
                     indexing_llm=self.indexing_llm,
@@ -2287,6 +2345,13 @@ class ReviewEngine:
                     audit=audit,
                     held_back=held_back,
                 )
+                if len(critique_candidates) == len(final_comments):
+                    final_comments = critiqued
+                else:
+                    proved = [c for c in final_comments if c.source_pass == SOURCE_PASS]
+                    final_comments = sorted(
+                        proved + critiqued, key=lambda c: (c.severity, c.confidence), reverse=True
+                    )
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
 
