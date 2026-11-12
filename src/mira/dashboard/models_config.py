@@ -163,7 +163,7 @@ def get_review_thinking_mode(config: LLMConfig, db_value: str | None = None) -> 
     return resolved
 
 
-def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
+def llm_config_for(purpose: str, base: LLMConfig, *, use_dashboard: bool = True) -> LLMConfig:
     """Return an LLMConfig with the appropriate model set for the given purpose.
 
     Reads the DB setting first (via _app_db), falls back to config fields.
@@ -175,23 +175,24 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     db_review: str | None = None
     db_style: str | None = None
     db_temperature: str | None = None
-    try:
-        from mira.dashboard.api import _app_db
+    if use_dashboard:
+        try:
+            from mira.dashboard.api import _app_db
 
-        if _app_db is not None:
-            if purpose == "indexing":
-                db_model = _app_db.get_setting("indexing_model")
-                db_temperature = _app_db.get_setting("indexing_temperature")
-            elif purpose == "review":
-                db_model = _app_db.get_setting("review_model")
-                db_thinking = _app_db.get_setting("review_thinking_mode")
-            elif purpose == "security":
-                db_model = _app_db.get_setting("security_model")
-                db_thinking = _app_db.get_setting("review_thinking_mode")
-                db_review = _app_db.get_setting("review_model")
-            db_style = _app_db.get_setting("api_style")
-    except Exception:
-        pass  # DB not available — resolve from config fields alone
+            if _app_db is not None:
+                if purpose == "indexing":
+                    db_model = _app_db.get_setting("indexing_model")
+                    db_temperature = _app_db.get_setting("indexing_temperature")
+                elif purpose == "review":
+                    db_model = _app_db.get_setting("review_model")
+                    db_thinking = _app_db.get_setting("review_thinking_mode")
+                elif purpose == "security":
+                    db_model = _app_db.get_setting("security_model")
+                    db_thinking = _app_db.get_setting("review_thinking_mode")
+                    db_review = _app_db.get_setting("review_model")
+                db_style = _app_db.get_setting("api_style")
+        except Exception:
+            pass  # DB not available — resolve from config fields alone
 
     # Thinking mode only applies to reviews; other purposes leave it off.
     thinking_mode: str | None = None

@@ -140,6 +140,19 @@ Then add a workspace (or repository) webhook pointing at `https://<mira-host>/bi
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 
+### Review a local branch
+
+From a Git checkout, compare committed `HEAD` with its merge base against a local ref:
+
+```bash
+mira review --base main
+```
+
+Mira pins the diff, supporting source reads, and convention documents such as
+`AGENTS.md` to the committed branch. Staged, unstaged, and untracked source edits
+are excluded. The command uses CLI configuration without dashboard overrides
+or a Git hosting token. Use `--output json` for machine-readable findings.
+
 ### Codex CLI
 
 If you already use OpenAI Codex locally, Mira can run reviews through the
