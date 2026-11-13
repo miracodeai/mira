@@ -543,7 +543,7 @@ export function SettingsPage() {
       })
       if (v.trim() === "") {
         setOverride(section, key, null)
-        if (typeof eff === "string" && eff !== "")
+        if (overridden && typeof eff === "string" && eff !== "")
           setResetFields((prev) => new Set(prev).add(fieldKey))
         return
       }
