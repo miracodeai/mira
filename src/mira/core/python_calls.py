@@ -208,6 +208,18 @@ def _change(file: PatchedFile, source: str) -> _Change | None:
             before_lines.append(head_lines[i])
         cursor = end
 
+    removals: list[int] = []
+    additions: list[int] = []
+
+    def pair_replacements() -> None:
+        if len(removals) == len(additions):
+            old_line.update(zip(additions, removals, strict=True))
+        elif removals and additions:
+            # Keep the start of a call that changed from one line to several or vice versa.
+            old_line[additions[0]] = removals[0]
+        removals.clear()
+        additions.clear()
+
     for hunk in file:
         start = hunk.target_start - 1 if hunk.target_length else hunk.target_start
         old_start = hunk.source_start - 1 if hunk.source_length else hunk.source_start
@@ -216,16 +228,9 @@ def _change(file: PatchedFile, source: str) -> _Change | None:
         copy_context(start)
         if len(before_lines) != old_start:
             return None
-        removals: list[int] = []
-        additions: list[int] = []
         for line in hunk:
             if line.is_context:
-                # Pair the start of a rewritten call even when its line count changes.
-                # The caller scope and imported symbol are checked separately.
-                if removals and additions:
-                    old_line[additions[0]] = removals[0]
-                removals.clear()
-                additions.clear()
+                pair_replacements()
             elif line.is_removed:
                 removals.append(len(before_lines) + 1)
                 removed.add(len(before_lines) + 1)
@@ -243,8 +248,7 @@ def _change(file: PatchedFile, source: str) -> _Change | None:
                 cursor += 1
             if line.is_context or line.is_removed:
                 before_lines.append(line.value)
-        if removals and additions:
-            old_line[additions[0]] = removals[0]
+        pair_replacements()
     copy_context(len(head_lines))
     before = _revision("".join(before_lines))
     head = _revision(source)

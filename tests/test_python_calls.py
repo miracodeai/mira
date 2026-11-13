@@ -30,6 +30,26 @@ _CHUNKS = {"caller.py": 0, "service.py": 1}
 
 
 @pytest.mark.parametrize(
+    "tail", ["", "\n\ndef another():\n    pass\n"], ids=["hunk-end", "context"]
+)
+async def test_checks_later_call_in_a_consecutive_replacement(tail):
+    before = "from service import greet\n\ndef run():\n    x = old()\n    return greet('Ada')\n"
+    head = before.replace("old()", "new()").replace("'Ada'", "'Grace'")
+    sources = {"caller.py": head + tail, "service.py": _HEAD}
+    fetcher = AsyncMock()
+    fetcher.fetch.side_effect = sources.get
+    diff = _diff("caller.py", before + tail, head + tail) + _diff("service.py", _OLD, _HEAD)
+
+    (checked,) = await check_python_calls(diff, _CHUNKS, set(sources), fetcher)
+
+    assert (checked.caller, checked.line, checked.error) == (
+        "caller.py",
+        5,
+        "missing a required argument: 'prefix'",
+    )
+
+
+@pytest.mark.parametrize(
     ("imports", "callee"),
     [
         ("from service import greet", "greet"),
