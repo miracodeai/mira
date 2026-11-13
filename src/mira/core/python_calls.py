@@ -36,12 +36,14 @@ _SCOPES = (
     ast.DictComp,
     ast.GeneratorExp,
 )
+_ImportBinding = tuple[int, str, str | None]
 
 
 @dataclass
 class _Revision:
     module: ast.Module
-    imports: dict[str, tuple[int, str, str | None]]
+    imports: dict[str, _ImportBinding]
+    mutated_imports: set[_ImportBinding]
     functions: dict[str, ast.FunctionDef]
     scope: symtable.SymbolTable
 
@@ -118,11 +120,13 @@ def _walk_scope(nodes: list[ast.stmt]) -> Iterator[ast.AST]:
 
 def _revision(source: str) -> _Revision | None:
     module = ast.parse(source)
-    imports: dict[str, tuple[int, str, str | None]] = {}
+    imports: dict[str, _ImportBinding] = {}
+    import_bindings: list[tuple[str, _ImportBinding]] = []
     functions: dict[str, ast.FunctionDef] = {}
     import_counts: dict[str, int] = {}
     declarations: dict[str, int] = {}
     written: set[str] = set()
+    mutated: set[str] = set()
     for node in _walk_scope(module.body):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
@@ -130,6 +134,10 @@ def _revision(source: str) -> _Revision | None:
                     return None
                 name = alias.asname or alias.name.split(".")[0]
                 import_counts[name] = import_counts.get(name, 0) + 1
+                if isinstance(node, ast.Import) and (alias.asname or "." not in alias.name):
+                    import_bindings.append((name, (0, alias.name, None)))
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    import_bindings.append((name, (node.level, node.module, alias.name)))
         elif isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
             declarations[node.name] = declarations.get(node.name, 0) + 1
         elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -148,7 +156,7 @@ def _revision(source: str) -> _Revision | None:
             and isinstance(node.value, ast.Name)
             and isinstance(node.ctx, (ast.Store, ast.Del))
         ):
-            written.add(node.value.id)
+            mutated.add(node.value.id)
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -156,8 +164,9 @@ def _revision(source: str) -> _Revision | None:
             and node.args
             and isinstance(node.args[0], ast.Name)
         ):
-            written.add(node.args[0].id)
+            mutated.add(node.args[0].id)
 
+    written.update(mutated)
     for node in module.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
@@ -176,7 +185,10 @@ def _revision(source: str) -> _Revision | None:
             and declarations[node.name] == 1
         ):
             functions[node.name] = node
-    return _Revision(module, imports, functions, symtable.symtable(source, "", "exec"))
+    mutated_imports = {binding for alias, binding in import_bindings if alias in mutated}
+    return _Revision(
+        module, imports, mutated_imports, functions, symtable.symtable(source, "", "exec")
+    )
 
 
 def _change(file: PatchedFile, source: str) -> _Change | None:
@@ -254,27 +266,27 @@ def _scoped_functions(
                 yield prefix + node.name, node, scope
 
 
-def _target(
+def _module_file(
     path: str,
-    binding: tuple[int, str, str | None],
-    attribute: str | None,
+    binding: _ImportBinding,
+    *,
+    as_module: bool,
     known_paths: set[str],
-) -> tuple[str, str] | None:
+) -> str | None:
     level, module, imported = binding
     package = PurePosixPath(path).parent
     if level > len(package.parts):
         return None
     root = package.parts[: len(package.parts) - level + 1] if level else ()
     module_path = str(PurePosixPath(*root, *module.split(".")))
-    if attribute is not None and imported is not None:
+    if as_module and imported is not None:
         # A package initializer could export an object in place of the submodule.
         if f"{module_path}/__init__.py" in known_paths or f"{module_path}.py" in known_paths:
             return None
         module_path = f"{module_path}/{imported}"
-    elif (attribute is None) == (imported is None):
+    elif not as_module and imported is None:
         return None
-    name = attribute or imported
-    if name is None or f"{module_path}/__init__.py" in known_paths:
+    if f"{module_path}/__init__.py" in known_paths:
         return None
     sibling = package / module_path
     if (
@@ -283,12 +295,17 @@ def _target(
         and (f"{sibling}.py" in known_paths or f"{sibling}/__init__.py" in known_paths)
     ):
         return None
-    return f"{module_path}.py", name
+    return f"{module_path}.py"
 
 
 def _calls(revision: _Revision, path: str, known_paths: set[str]) -> dict[int, _Call]:
     calls: dict[int, _Call] = {}
     ambiguous = set()
+    # An attribute write through one import alias affects the module seen by all aliases.
+    mutated_files = {
+        _module_file(path, binding, as_module=True, known_paths=known_paths)
+        for binding in revision.mutated_imports
+    }
     for scope_name, wrapper, scope in _scoped_functions(revision.module.body, revision.scope):
         for node in _walk_scope(wrapper.body):
             if not isinstance(node, ast.Call):
@@ -302,14 +319,23 @@ def _calls(revision: _Revision, path: str, known_paths: set[str]) -> dict[int, _
                 continue
             if alias not in revision.imports or not scope.lookup(alias).is_global():
                 continue
-            resolved = _target(path, revision.imports[alias], attribute, known_paths)
-            if resolved is None or node.lineno in ambiguous:
+            binding = revision.imports[alias]
+            callee = _module_file(
+                path, binding, as_module=attribute is not None, known_paths=known_paths
+            )
+            name = attribute or binding[2]
+            if (
+                callee is None
+                or callee in mutated_files
+                or name is None
+                or node.lineno in ambiguous
+            ):
                 continue
             if node.lineno in calls:
                 ambiguous.add(node.lineno)
                 del calls[node.lineno]
                 continue
-            calls[node.lineno] = _Call(scope_name, *resolved, node)
+            calls[node.lineno] = _Call(scope_name, callee, name, node)
     return calls
 
 

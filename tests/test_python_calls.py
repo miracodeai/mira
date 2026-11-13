@@ -96,6 +96,65 @@ async def test_skips_unproven_pairs(before, head, old_service, head_source, extr
     assert await check_python_calls(diff, _CHUNKS, tree, fetcher) == []
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "override.greet = lambda name: name",
+        "del override.greet",
+        "setattr(override, 'greet', lambda name: name)",
+        "delattr(override, 'greet')",
+    ],
+    ids=["assignment", "deletion", "setattr", "delattr"],
+)
+@pytest.mark.parametrize("mutated_module", ["service", "other"])
+async def test_mutation_is_shared_by_aliases_of_the_same_module(mutation, mutated_module):
+    caller = _caller(
+        "api.greet('Ada')",
+        f"import service as api\nimport {mutated_module} as override\n{mutation}",
+    )
+    sources = {"caller.py": caller, "service.py": _HEAD}
+    fetcher = AsyncMock()
+    fetcher.fetch.side_effect = sources.get
+    importers = AsyncMock(return_value=["caller.py"])
+
+    checked = await check_python_calls(
+        _diff("service.py", _OLD, _HEAD),
+        {"service.py": 0},
+        {*sources, "other.py"},
+        fetcher,
+        unchanged_importers=importers,
+    )
+
+    if mutated_module == "service":
+        assert checked == []
+    else:
+        (call,) = checked
+        assert call.error == "missing a required argument: 'prefix'"
+
+
+async def test_submodule_mutation_invalidates_a_differently_spelled_alias():
+    caller = _caller(
+        "api.greet('Ada')",
+        "import pkg.service as api\nfrom pkg import service as override\n"
+        "override.greet = lambda name: name",
+    )
+    sources = {"caller.py": caller, "pkg/service.py": _HEAD}
+    fetcher = AsyncMock()
+    fetcher.fetch.side_effect = sources.get
+    importers = AsyncMock(return_value=["caller.py"])
+
+    assert (
+        await check_python_calls(
+            _diff("pkg/service.py", _OLD, _HEAD),
+            {"pkg/service.py": 0},
+            set(sources),
+            fetcher,
+            unchanged_importers=importers,
+        )
+        == []
+    )
+
+
 async def test_multiple_calls_remain_distinct_and_same_chunk_is_skipped():
     before = _caller("greet('Ada')") + "\ndef second():\n    return greet('Bob')\n"
     head = _caller("greet('Grace')") + "\ndef second():\n    return greet('Alice')\n"
