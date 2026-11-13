@@ -222,6 +222,22 @@ llm:
   indexing_temperature: omit
 ```
 
+`review.custom_instructions` is free-form text (up to 4,000 characters) that
+Mira adds as an "Operator Instructions" block to every prompt whose output a
+person reads: reviews, the security and dependency passes, the walkthrough and
+PR summary, review summaries, `@mira` answers, thread replies, cross-PR overlap
+notes and fix verification. It governs the language, tone and style of that
+text only; JSON keys, response formats and code identifiers stay as Mira
+expects them. Index summaries are internal and do not receive it. Leave it
+empty (the default) and the prompts are unchanged. It also merges from the
+dashboard's global settings (`PUT /api/admin/settings`).
+
+```yaml
+review:
+  custom_instructions: |
+    Keep every comment, summary and reply concise and use a formal tone.
+```
+
 ## Development
 
 ```bash
