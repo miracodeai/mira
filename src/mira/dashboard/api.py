@@ -68,8 +68,8 @@ def _get_index_dir() -> str:
 
 
 # Cross-platform preference order used when the same owner/repo exists on
-# more than one platform: github → gitlab → forgejo → bitbucket.
-_PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2, "bitbucket": 3}
+# more than one platform: github → gitlab → forgejo → bitbucket → origin.
+_PLATFORM_ORDER = {"github": 0, "gitlab": 1, "forgejo": 2, "bitbucket": 3, "origin": 4}
 
 
 def _pick_platform_record(records: list[RepoRecord]) -> RepoRecord:
@@ -365,6 +365,10 @@ class BitbucketRepoRegister(BaseModel):
     project: str  # "workspace/repo_slug"
 
 
+class OriginRepoRegister(BaseModel):
+    project: str  # "owner/repo"
+
+
 class CostEstimate(BaseModel):
     estimated_usd: float
     input_tokens: int
@@ -558,6 +562,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
     gitlab_token = os.environ.get("MIRA_GITLAB_TOKEN", "")
     forgejo_token = os.environ.get("MIRA_FORGEJO_TOKEN", "")
     bitbucket_token = os.environ.get("MIRA_BITBUCKET_TOKEN", "")
+    origin_token = os.environ.get("MIRA_ORIGIN_TOKEN", "")
 
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
@@ -583,6 +588,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
             "gitlab": gitlab_token,
             "forgejo": forgejo_token,
             "bitbucket": bitbucket_token,
+            "origin": origin_token,
         }.get(platform, github_token)
         if not token:
             # No usable token for this platform — leave it pending instead of

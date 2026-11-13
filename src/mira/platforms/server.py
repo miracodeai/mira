@@ -49,6 +49,7 @@ def create_app(
     gitlab_webhook_secret: str | None = None,
     forgejo_auth: Any = None,
     forgejo_webhook_secret: str | None = None,
+    origin_auth: Any = None,
     bitbucket_auth: Any = None,
     bitbucket_webhook_secret: str | None = None,
 ) -> FastAPI:
@@ -101,6 +102,9 @@ def create_app(
                     else None
                 )
             )
+
+        # Origin discovery is installation-scoped; skip token-less / no-install
+        # startup backfill here. installation.created webhooks register repos.
 
         # Bitbucket's equivalent: discover the repos the credential can access.
         bb_task = None
@@ -242,6 +246,34 @@ def create_app(
             payload = await request.json()
             status = await dispatch_bitbucket_event(
                 event, payload, bitbucket_auth, bot_name, background_tasks
+            )
+            return _json_status(status)
+
+    if origin_auth is not None:
+        from mira.platforms.origin.webhook import (
+            dispatch_origin_event,
+            verify_origin_signature,
+        )
+
+        @app.post("/origin/webhook")
+        async def origin_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+            body = await request.body()
+            ok = await verify_origin_signature(
+                body,
+                request.headers.get("webhook-id", ""),
+                request.headers.get("webhook-timestamp", ""),
+                request.headers.get("webhook-signature", ""),
+            )
+            if not ok:
+                return Response(
+                    content='{"error": "invalid signature"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+            event = request.headers.get("webhook-event-type", "")
+            payload = await request.json()
+            status = await dispatch_origin_event(
+                event, payload, origin_auth, bot_name, background_tasks
             )
             return _json_status(status)
 
