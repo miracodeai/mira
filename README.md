@@ -98,9 +98,11 @@ Median review time was **106 seconds** per PR; all 50 reviews completed.
 
 Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), Forgejo/Codeberg (via an access token), and Bitbucket Cloud (via an access or API token) are all supported.
 
-**1. Deploy** — one-click on Railway, or with Docker:
+**1. Deploy** — one-click on Railway, RepoCloud, or with Docker:
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/workspace/templates/05874bad-2d98-43f4-aa93-332f394e9ebd)
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Mira/)
 
 ```yaml
 # mira.yaml — deployment-wide defaults. Every key is optional.
