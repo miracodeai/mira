@@ -26,6 +26,7 @@ import type { IndexingTemperature } from "@/lib/api/settings"
 import { useAuth } from "@/lib/auth"
 import { useDocumentTitle } from "@/lib/hooks"
 
+// Keep in sync with MAX_CUSTOM_INSTRUCTIONS_CHARS in src/mira/config.py.
 const CUSTOM_INSTRUCTIONS_MAX_LENGTH = 4000
 
 export function SettingsPage() {

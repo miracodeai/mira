@@ -25,6 +25,7 @@ IndexingTemperature = (
 # 0.1.1 standardization on the .yaml extension.
 _DEFAULT_CONFIG_FILENAMES = (".mira.yaml", ".mira.yml")
 
+# Keep in sync with CUSTOM_INSTRUCTIONS_MAX_LENGTH in ui/mira/src/pages/settings.tsx.
 MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000
 
 
