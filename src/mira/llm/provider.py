@@ -98,7 +98,10 @@ class LLMProvider(OpenAICompatibleProvider):
                         temperature if temperature is not None else self.config.temperature
                     )
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
-            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
+            # Twice: the limit the error names, then the floor if that is refused too.
+            for _ in range(2):
+                if resp.status_code != 400 or not self._lower_rejected_budget(body, resp.text):
+                    break
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
@@ -221,7 +224,10 @@ class LLMProvider(OpenAICompatibleProvider):
                     temperature if temperature is not None else self.config.temperature
                 )
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
-            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
+            # Twice: the limit the error names, then the floor if that is refused too.
+            for _ in range(2):
+                if resp.status_code != 400 or not self._lower_rejected_budget(body, resp.text):
+                    break
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
@@ -325,7 +331,10 @@ class LLMProvider(OpenAICompatibleProvider):
                     temperature if temperature is not None else self.config.temperature
                 )
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
-            if resp.status_code == 400 and self._lower_rejected_budget(body, resp.text):
+            # Twice: the limit the error names, then the floor if that is refused too.
+            for _ in range(2):
+                if resp.status_code != 400 or not self._lower_rejected_budget(body, resp.text):
+                    break
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()

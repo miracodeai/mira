@@ -96,7 +96,7 @@ async def test_default_budget_is_sent(provider):
 @pytest.mark.parametrize("path", ["tools", "agentic", "plain"])
 async def test_rejected_budget_is_lowered_and_remembered(provider, path):
     def serve(body, n):
-        if body["max_tokens"] > BUDGET_FLOOR_TOKENS:
+        if body["max_tokens"] > 8192:
             return httpx.Response(400, json=_TOO_LARGE)
         if path == "plain":
             return httpx.Response(
@@ -121,8 +121,43 @@ async def test_rejected_budget_is_lowered_and_remembered(provider, path):
     await call()
     await call()
 
-    # First call: rejected once, retried at the floor. Second call: floor from the start.
-    assert [r["max_tokens"] for r in requests] == [16384, BUDGET_FLOOR_TOKENS, BUDGET_FLOOR_TOKENS]
+    # First call: rejected once, retried at the named limit. Second call: that limit from the start.
+    assert [r["max_tokens"] for r in requests] == [16384, 8192, 8192]
+
+
+@pytest.mark.asyncio
+async def test_refused_named_limit_falls_back_to_the_floor(provider):
+    def serve(body, n):
+        if body["max_tokens"] > BUDGET_FLOOR_TOKENS:
+            return httpx.Response(400, json=_TOO_LARGE)
+        return httpx.Response(200, json=_tool_reply())
+
+    llm, requests = provider(serve)
+
+    await llm.complete_with_tools([{"role": "user", "content": "review"}], [SUBMIT_REVIEW_TOOL])
+
+    assert [r["max_tokens"] for r in requests] == [16384, 8192, BUDGET_FLOOR_TOKENS]
+
+
+@pytest.mark.asyncio
+async def test_context_window_error_leaves_room_for_the_prompt(provider):
+    message = (
+        "This endpoint's maximum context length is 131072 tokens. However, you requested "
+        "about 262244 tokens (100 of text input, 262144 in the output)."
+    )
+
+    def serve(body, n):
+        if body["max_tokens"] > 131072 - 100:
+            return httpx.Response(400, json={"error": {"message": message}})
+        return httpx.Response(200, json=_tool_reply())
+
+    llm, requests = provider(serve, max_tokens=262144)
+
+    await llm.complete_with_tools([{"role": "user", "content": "review"}], [SUBMIT_REVIEW_TOOL])
+
+    sent = [r["max_tokens"] for r in requests]
+    assert sent[0] == 262144 and len(sent) == 2
+    assert 120000 < sent[1] < 131072 - 100
 
 
 @pytest.mark.asyncio
@@ -139,12 +174,12 @@ async def test_unrelated_400_is_not_treated_as_a_budget_problem(provider):
 
 @pytest.mark.asyncio
 async def test_cut_off_reply_is_not_retried_above_a_remembered_cap(provider):
-    """Once a model is capped at the floor, a length cut-off cannot be answered
+    """Once a model is capped at its limit, a length cut-off cannot be answered
     with a bigger budget, so the reply is returned as it is."""
     truncated = _tool_reply(finish_reason="length")
 
     def serve(body, n):
-        if body["max_tokens"] > BUDGET_FLOOR_TOKENS:
+        if body["max_tokens"] > 8192:
             return httpx.Response(400, json=_TOO_LARGE)
         return httpx.Response(200, json=truncated)
 
@@ -152,4 +187,4 @@ async def test_cut_off_reply_is_not_retried_above_a_remembered_cap(provider):
 
     await llm.complete_with_tools([{"role": "user", "content": "review"}], [SUBMIT_REVIEW_TOOL])
 
-    assert [r["max_tokens"] for r in requests] == [16384, BUDGET_FLOOR_TOKENS]
+    assert [r["max_tokens"] for r in requests] == [16384, 8192]
