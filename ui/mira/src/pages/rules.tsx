@@ -93,6 +93,12 @@ export function RulesPage() {
   const [selectedRepo, setSelectedRepo] = useState<string>("")
   const [repoRules, setRepoRules] = useState<RuleModel[]>([])
   const [editingRepo, setEditingRepo] = useState<EditingRule | null>(null)
+  // Drop the previous repo's rules as soon as the selection changes.
+  const [rulesRepo, setRulesRepo] = useState(selectedRepo)
+  if (rulesRepo !== selectedRepo) {
+    setRulesRepo(selectedRepo)
+    setRepoRules([])
+  }
 
   useEffect(() => {
     if (!selectedRepo) return

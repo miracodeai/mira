@@ -440,14 +440,14 @@ export function ActivityPage() {
     )
 
   // Pagination. Reset to the first page whenever the result set changes shape.
-  const pageKey = [
+  const pageKey = JSON.stringify([
     debouncedSearch,
     repo,
     windowSel,
     sort.key,
     sort.dir,
     pageSize,
-  ].join("|")
+  ])
   const [prevPageKey, setPrevPageKey] = useState(pageKey)
   if (prevPageKey !== pageKey) {
     setPrevPageKey(pageKey)

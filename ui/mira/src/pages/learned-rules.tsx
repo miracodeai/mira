@@ -546,7 +546,7 @@ function LearningsTable({
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(20)
 
-  const pageKey = [resetKey, sort.key, sort.dir, pageSize].join("|")
+  const pageKey = JSON.stringify([resetKey, sort.key, sort.dir, pageSize])
   const [prevPageKey, setPrevPageKey] = useState(pageKey)
   if (prevPageKey !== pageKey) {
     setPrevPageKey(pageKey)
