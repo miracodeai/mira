@@ -313,9 +313,8 @@ class OpenAICompatibleProvider:
         field = self._max_tokens_field()
         current = int(body.get(field) or 0)
         model = str(body.get("model"))
-        named = (
-            None if model in self._budget_caps else _budget_from_error(error_text, body, current)
-        )
+        # A limit already rejected is never below `current`, so it falls to the floor.
+        named = _budget_from_error(error_text, body, current)
         target = named or BUDGET_FLOOR_TOKENS
         if current <= target:
             return False

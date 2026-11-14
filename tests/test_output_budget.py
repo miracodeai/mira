@@ -161,6 +161,35 @@ async def test_context_window_error_leaves_room_for_the_prompt(provider):
 
 
 @pytest.mark.asyncio
+async def test_output_cap_named_after_a_context_cap_is_used(provider):
+    """A model capped by its context window can still name a lower output limit."""
+    window = (
+        "This endpoint's maximum context length is 131072 tokens. However, you requested "
+        "about 262244 tokens (100 of text input, 262144 in the output)."
+    )
+
+    def serve(body, n):
+        if body["max_tokens"] > 131072 - 100:
+            return httpx.Response(400, json={"error": {"message": window}})
+        if body["max_tokens"] > 8192:
+            # Real endpoints echo the budget that was sent.
+            message = (
+                f"max_tokens is too large: {body['max_tokens']}. "
+                "This model supports at most 8192 completion tokens."
+            )
+            return httpx.Response(400, json={"error": {"message": message}})
+        return httpx.Response(200, json=_tool_reply())
+
+    llm, requests = provider(serve, max_tokens=262144)
+
+    await llm.complete_with_tools([{"role": "user", "content": "review"}], [SUBMIT_REVIEW_TOOL])
+
+    sent = [r["max_tokens"] for r in requests]
+    assert sent[0] == 262144 and 120000 < sent[1] < 131072 - 100
+    assert sent[2:] == [8192]
+
+
+@pytest.mark.asyncio
 async def test_unrelated_400_is_not_treated_as_a_budget_problem(provider):
     llm, requests = provider(
         lambda body, n: httpx.Response(400, json={"error": {"message": "invalid api key"}})
