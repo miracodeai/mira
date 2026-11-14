@@ -481,6 +481,12 @@ def _strip_deployment_only_settings(overlay: dict[str, Any]) -> dict[str, Any]:
     # Command authorization is deployment-controlled: a repository must not
     # be able to widen its own command allowlist.
     cleaned.pop("commands", None)
+    # Free-form text injected into system prompts must come from a trusted source.
+    review = cleaned.get("review")
+    if isinstance(review, dict):
+        cleaned_review = dict(review)
+        cleaned_review.pop("custom_instructions", None)
+        cleaned["review"] = cleaned_review
     return cleaned
 
 
