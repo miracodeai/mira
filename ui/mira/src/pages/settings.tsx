@@ -594,7 +594,7 @@ export function SettingsPage() {
           <span
             id={`${fieldKey}-count`}
             className={`shrink-0 text-xs tabular-nums ${
-              display.length >= maxLength
+              display.length > maxLength
                 ? "text-destructive"
                 : "text-muted-foreground"
             }`}
