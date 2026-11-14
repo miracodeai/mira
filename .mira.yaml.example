@@ -152,3 +152,9 @@ review:
   # disable (default) = off; append = add/update the marked block, preserving the
   #   author's description; replace = set the entire body to the summary block.
   # pr_summary: "disable"
+  # Free-form instructions (max 4000 chars) added to every prompt whose output a
+  # person reads: review comments, summaries, walkthrough, replies. They steer
+  # language, tone and style only; JSON keys and response formats are unchanged.
+  # Empty (default) leaves the prompts untouched. Deployment-only: set this in
+  # `mira.yaml` or the dashboard, not in a repository's `.mira.yaml`.
+  # custom_instructions: "Keep every comment, summary and reply concise and use a formal tone."

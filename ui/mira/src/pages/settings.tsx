@@ -18,12 +18,28 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Textarea } from "@/components/ui/textarea"
 import { useParams } from "react-router"
 
 import { api } from "@/lib/api"
 import type { IndexingTemperature } from "@/lib/api/settings"
 import { useAuth } from "@/lib/auth"
 import { useDocumentTitle } from "@/lib/hooks"
+
+// Keep in sync with MAX_CUSTOM_INSTRUCTIONS_CHARS in src/mira/config.py.
+const CUSTOM_INSTRUCTIONS_MAX_LENGTH = 4000
+
+function OverridesConfigBadge({
+  title = "This dashboard value overrides the deployment config. A repository's own .mira.yaml still takes precedence.",
+}: {
+  title?: string
+}) {
+  return (
+    <span className="text-[11px] font-semibold text-primary" title={title}>
+      Overrides deployment <code className="font-mono">mira.yaml</code>
+    </span>
+  )
+}
 
 export function SettingsPage() {
   useDocumentTitle("Settings")
@@ -305,11 +321,7 @@ export function SettingsPage() {
           <label className="text-sm font-medium" htmlFor={fieldKey}>
             {label}
           </label>
-          {overridden && (
-            <span className="text-[11px] font-semibold text-primary">
-              Overrides <code className="font-mono">mira.yaml</code>
-            </span>
-          )}
+          {overridden && <OverridesConfigBadge />}
         </div>
         <Input
           id={fieldKey}
@@ -376,11 +388,7 @@ export function SettingsPage() {
             />
             {label}
           </label>
-          {overridden && (
-            <span className="text-[11px] font-semibold text-primary">
-              Overrides <code className="font-mono">mira.yaml</code>
-            </span>
-          )}
+          {overridden && <OverridesConfigBadge />}
         </div>
         {error ? (
           <p className="pl-6 text-xs text-destructive">
@@ -447,11 +455,7 @@ export function SettingsPage() {
           <label className="text-sm font-medium" htmlFor={fieldKey}>
             {label}
           </label>
-          {overridden && (
-            <span className="text-[11px] font-semibold text-primary">
-              Overrides <code className="font-mono">mira.yaml</code>
-            </span>
-          )}
+          {overridden && <OverridesConfigBadge />}
         </div>
         <Input
           id={fieldKey}
@@ -495,6 +499,106 @@ export function SettingsPage() {
             Reset to config value
           </Button>
         )}
+        {resetPending && (
+          <p className="text-xs text-muted-foreground">
+            Reset pending — Save overrides to apply the configuration value.
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  const textField = (
+    section: "filter" | "review",
+    key: string,
+    label: string,
+    description: string,
+    placeholder: string,
+    maxLength: number,
+    badgeTitle?: string
+  ) => {
+    const fieldKey = `${section}.${key}`
+    const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[
+      key
+    ]
+    const override = overrides[section][key]
+    const overridden = override !== undefined
+    const draft = drafts[fieldKey]
+    const resetPending =
+      draft === undefined && !overridden && resetFields.has(fieldKey)
+    const committed =
+      typeof override === "string"
+        ? override
+        : !resetPending && typeof eff === "string"
+          ? eff
+          : ""
+    const display = draft !== undefined ? draft : committed
+    const error = fieldErrors[fieldKey]
+
+    const commit = () => {
+      const v = drafts[fieldKey]
+      if (v === undefined) return
+      setDrafts((d) => {
+        const next = { ...d }
+        delete next[fieldKey]
+        return next
+      })
+      if (v.trim() === "") {
+        setOverride(section, key, null)
+        if (overridden && typeof eff === "string" && eff !== "")
+          setResetFields((prev) => new Set(prev).add(fieldKey))
+        return
+      }
+      setResetFields((prev) => {
+        if (!prev.has(fieldKey)) return prev
+        const next = new Set(prev)
+        next.delete(fieldKey)
+        return next
+      })
+      setOverride(section, key, v)
+    }
+
+    return (
+      <div className="space-y-1">
+        <div className="flex items-baseline gap-3">
+          <label className="text-sm font-medium" htmlFor={fieldKey}>
+            {label}
+          </label>
+          {overridden && <OverridesConfigBadge title={badgeTitle} />}
+        </div>
+        <Textarea
+          id={fieldKey}
+          rows={4}
+          maxLength={maxLength}
+          placeholder={placeholder}
+          className="max-h-80 min-h-24 resize-y overflow-y-auto"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={`${fieldKey}-count`}
+          value={display}
+          onChange={(e) =>
+            setDrafts((d) => ({ ...d, [fieldKey]: e.target.value }))
+          }
+          onBlur={commit}
+        />
+        <div className="flex items-start justify-between gap-3">
+          {error ? (
+            <p className="text-xs text-destructive">
+              {label} {error}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">{description}</p>
+          )}
+          <span
+            id={`${fieldKey}-count`}
+            className={`shrink-0 text-xs tabular-nums ${
+              display.length > maxLength
+                ? "text-destructive"
+                : "text-muted-foreground"
+            }`}
+          >
+            {display.length} / {maxLength}
+          </span>
+        </div>
         {resetPending && (
           <p className="text-xs text-muted-foreground">
             Reset pending — Save overrides to apply the configuration value.
@@ -725,7 +829,7 @@ export function SettingsPage() {
               <code className="text-xs">mira.yaml</code> and apply to every repo
               this Mira instance reviews. Per-repo{" "}
               <code className="text-xs">.mira.yml</code> files still take
-              precedence for individual repos.
+              precedence for individual repos, except for custom instructions.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -819,6 +923,15 @@ export function SettingsPage() {
                   "1",
                   1,
                   20
+                )}
+                {textField(
+                  "review",
+                  "custom_instructions",
+                  "Custom instructions",
+                  "Appended to every prompt whose output a person reads: reviews, security and dependency passes, the walkthrough and PR summary, review summaries, @mention answers, thread replies, overlap notes, and fix verification. Use it to set the language or tone of that text. Leave empty to use the configuration value.",
+                  "Response language settings, etc.",
+                  CUSTOM_INSTRUCTIONS_MAX_LENGTH,
+                  "This dashboard value overrides the deployment config. Repository .mira.yaml files cannot override this setting."
                 )}
               </div>
             </div>

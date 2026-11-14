@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from mira.llm.prompts.operator import with_operator_instructions
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import UnresolvedThread
 
@@ -64,6 +65,7 @@ def _extract_issue_description(body: str) -> str:
 
 def build_verify_fixes_prompt(
     file_groups: list[tuple[str, str, list[UnresolvedThread]]],
+    custom_instructions: str = "",
 ) -> list[dict[str, str]]:
     """Build a prompt asking the LLM which review issues have been fixed.
 
@@ -88,7 +90,7 @@ def build_verify_fixes_prompt(
 
     user_content = "\n\n---\n\n".join(sections)
 
-    return [
+    messages = [
         {
             "role": "system",
             "content": (
@@ -116,6 +118,7 @@ def build_verify_fixes_prompt(
         },
         {"role": "user", "content": user_content},
     ]
+    return with_operator_instructions(messages, custom_instructions)
 
 
 def parse_verify_fixes_response(raw: str) -> list[str]:

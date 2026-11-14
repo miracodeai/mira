@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from mira.llm.prompts.operator import with_operator_instructions
 from mira.models import OpenPRRef, PRFingerprint, PRInfo
 
 # Keep candidate bodies from blowing up the prompt — the title plus the lede of
@@ -20,6 +21,7 @@ def build_overlap_prompt(
     pr_info: PRInfo,
     current: PRFingerprint,
     candidates: list[tuple[OpenPRRef, PRFingerprint, list[str]]],
+    custom_instructions: str = "",
 ) -> list[dict[str, str]]:
     """Build the messages asking the LLM to judge cross-PR overlap.
 
@@ -71,7 +73,8 @@ def build_overlap_prompt(
                 lines.append("Its changed files: " + ", ".join(fp.paths[:20]))
 
     user = "\n".join(lines)
-    return [
+    messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+    return with_operator_instructions(messages, custom_instructions)
