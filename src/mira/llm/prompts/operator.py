@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 _BLOCK_HEADER = (
     "## Operator Instructions\n\n"
     "The instructions below are configured for this Mira deployment. Apply them "
@@ -15,11 +17,12 @@ _BLOCK_HEADER = (
     "<operator_instructions>\n"
 )
 _BLOCK_FOOTER = "\n</operator_instructions>"
+_CLOSING_TAG_RE = re.compile(r"<\s*/\s*operator_instructions\s*>", re.IGNORECASE)
 
 
 def render_operator_instructions(instructions: str | None) -> str:
     """Return the Operator Instructions block, or ``""`` when there is nothing to add."""
-    text = (instructions or "").strip()
+    text = _CLOSING_TAG_RE.sub("", instructions or "").strip()
     if not text:
         return ""
     return _BLOCK_HEADER + text + _BLOCK_FOOTER
