@@ -931,7 +931,7 @@ export function SettingsPage() {
                   "review",
                   "custom_instructions",
                   "Custom instructions",
-                  "Appended to every review, walkthrough, and reply prompt. Use it to set the language or tone of Mira's comments. Leave empty to use the configuration value.",
+                  "Appended to every prompt whose output a person reads: reviews, security and dependency passes, the walkthrough and PR summary, review summaries, @mention answers, thread replies, overlap notes, and fix verification. Use it to set the language or tone of that text. Leave empty to use the configuration value.",
                   "Response language settings, etc.",
                   CUSTOM_INSTRUCTIONS_MAX_LENGTH
                 )}
