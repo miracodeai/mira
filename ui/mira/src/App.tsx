@@ -6,7 +6,7 @@ import { SetupModal } from "@/components/dashboard/setup-modal"
 import { Toaster } from "@/components/ui/sonner"
 import { UninstallModal } from "@/components/dashboard/uninstall-modal"
 import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { ActivityPage } from "@/pages/activity"
 import { ContributorDetailPage } from "@/pages/contributor-detail"
 import { ContributorsPage } from "@/pages/contributors"
@@ -55,18 +55,23 @@ function SetupGuard({ children }: { children: React.ReactNode }) {
   const [needsSetup, setNeedsSetup] = useState(false)
 
   useEffect(() => {
-    if (!user?.is_admin) {
-      setChecking(false)
-      return
-    }
+    if (!user?.is_admin) return
+    let cancelled = false
     api
       .getSetupStatus()
-      .then((s) => setNeedsSetup(!s.setup_complete))
+      .then((s) => {
+        if (!cancelled) setNeedsSetup(!s.setup_complete)
+      })
       .catch(() => {})
-      .finally(() => setChecking(false))
+      .finally(() => {
+        if (!cancelled) setChecking(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [user])
 
-  if (checking) {
+  if (checking && user?.is_admin) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <p className="text-sm text-muted-foreground">Loading...</p>

@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/card"
 import { RelationshipGraph } from "@/components/dashboard/relationship-graph"
 import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function RelationshipsPage() {

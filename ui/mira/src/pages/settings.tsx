@@ -22,7 +22,7 @@ import { useParams } from "react-router"
 
 import { api } from "@/lib/api"
 import type { IndexingTemperature } from "@/lib/api/settings"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useDocumentTitle } from "@/lib/hooks"
 
 export function SettingsPage() {

@@ -48,7 +48,7 @@ import {
 } from "@/components/ui/tabs"
 import { toast } from "@/components/ui/sonner"
 import { api, type OrgLearnedRuleModel } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 
@@ -546,9 +546,12 @@ function LearningsTable({
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(20)
 
-  useEffect(() => {
+  const pageKey = [resetKey, sort.key, sort.dir, pageSize].join("|")
+  const [prevPageKey, setPrevPageKey] = useState(pageKey)
+  if (prevPageKey !== pageKey) {
+    setPrevPageKey(pageKey)
     setPage(0)
-  }, [resetKey, sort.key, sort.dir, pageSize])
+  }
 
   const toggleSort = (key: SortKey) =>
     setSort((s) =>

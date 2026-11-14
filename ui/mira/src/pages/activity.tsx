@@ -323,6 +323,7 @@ export function ActivityPage() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [live, setLive] = useState(false)
   const [countdown, setCountdown] = useState(LIVE_INTERVAL_SECS)
+  const [wasTicking, setWasTicking] = useState(false)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(20)
   // `selected` holds the PR being shown; `panelOpen` drives the slide
@@ -355,9 +356,13 @@ export function ActivityPage() {
 
   // Live mode: tick a 1s countdown; when it hits zero, refetch and reset.
   // Pause while a detail panel is open so the table doesn't shift underneath.
+  const ticking = live && !panelOpen
+  if (ticking !== wasTicking) {
+    setWasTicking(ticking)
+    if (ticking) setCountdown(LIVE_INTERVAL_SECS)
+  }
   useEffect(() => {
-    if (!live || panelOpen) return
-    setCountdown(LIVE_INTERVAL_SECS)
+    if (!ticking) return
     const id = setInterval(() => {
       setCountdown((c) => {
         if (c <= 1) {
@@ -368,7 +373,7 @@ export function ActivityPage() {
       })
     }, 1000)
     return () => clearInterval(id)
-  }, [live, panelOpen])
+  }, [ticking])
 
   const { data: timeseries, loading: chartLoading } = useAsync(
     () => api.getTimeseries(period),
@@ -404,6 +409,7 @@ export function ActivityPage() {
   const windowFilteredPRs = useMemo(() => {
     const win = TIME_WINDOWS.find((w) => w.value === windowSel)
     if (!win || win.seconds === 0) return prs
+    // eslint-disable-next-line react-hooks/purity -- a relative window is measured at render
     const cutoff = Date.now() / 1000 - win.seconds
     return prs.filter((g) => g.lastReviewedAt >= cutoff)
   }, [prs, windowSel])
@@ -434,9 +440,19 @@ export function ActivityPage() {
     )
 
   // Pagination. Reset to the first page whenever the result set changes shape.
-  useEffect(() => {
+  const pageKey = [
+    debouncedSearch,
+    repo,
+    windowSel,
+    sort.key,
+    sort.dir,
+    pageSize,
+  ].join("|")
+  const [prevPageKey, setPrevPageKey] = useState(pageKey)
+  if (prevPageKey !== pageKey) {
+    setPrevPageKey(pageKey)
     setPage(0)
-  }, [debouncedSearch, repo, windowSel, sort.key, sort.dir, pageSize])
+  }
 
   const totalPages = Math.max(1, Math.ceil(sortedPRs.length / pageSize))
   const safePage = Math.min(page, totalPages - 1)

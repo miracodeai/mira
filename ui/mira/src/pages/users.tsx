@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/tooltip"
 import { UserAvatar } from "@/components/ui/user-avatar"
 import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 // Epoch seconds → "Just now" / "5m ago" / "3h ago" / "2d ago" / a date.

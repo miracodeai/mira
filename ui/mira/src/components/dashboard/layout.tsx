@@ -22,7 +22,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router"
 
 import { useTheme } from "@/components/theme-provider"
 import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync } from "@/lib/hooks"
 
 const API_BASE = import.meta.env.VITE_API_URL || ""

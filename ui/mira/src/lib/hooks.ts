@@ -1,14 +1,24 @@
 import { useEffect, useState } from "react"
 
+const sameDeps = (a: unknown[], b: unknown[]) =>
+  a.length === b.length && a.every((value, i) => Object.is(value, b[i]))
+
 export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [prevDeps, setPrevDeps] = useState(deps)
+
+  // React documents adjusting state during render for changed inputs; it
+  // avoids a cascading render and an extra paint after deps change.
+  if (!sameDeps(prevDeps, deps)) {
+    setPrevDeps(deps)
+    setLoading(true)
+    setError(null)
+  }
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    setError(null)
     fn()
       .then((result) => {
         if (!cancelled) setData(result)
