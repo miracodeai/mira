@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { type Column, useDataTable } from "@/components/ui/use-data-table"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { api, type ReviewerStat } from "@/lib/api"
 import { useAsync } from "@/lib/hooks"
 
