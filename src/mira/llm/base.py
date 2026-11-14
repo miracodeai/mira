@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from typing import ClassVar, Protocol, runtime_checkable
 
 import httpx
@@ -126,9 +128,24 @@ def _retriable(exception: BaseException) -> bool:
 # when the configured budget was lower than this (the default is this value,
 # which the published benchmark ran with).
 BUDGET_RETRY_TOKENS = 16384
-# Budget an endpoint is retried at after rejecting the configured one; every
-# model Mira has been run on accepts it.
+# Budget an endpoint is retried at after rejecting the configured one when its
+# error names no usable limit; every model Mira has been run on accepts it.
 BUDGET_FLOOR_TOKENS = 4096
+
+
+def _budget_from_error(error_text: str, body: dict, current: int) -> int | None:
+    """The output budget a rejection names: its largest number below the one sent.
+
+    "supports at most 8192 completion tokens" gives 8192. A context-window error
+    names the whole window, so the prompt's share (estimated high) is taken off.
+    Returns None when nothing usable at or above the floor is found.
+    """
+    numbers = [int(n) for n in re.findall(r"\b\d+\b", error_text.replace(",", ""))]
+    limit = max((n for n in numbers if n < current), default=0)
+    text = error_text.lower()
+    if "context" in text or "input" in text:
+        limit -= len(json.dumps(body)) // 3
+    return limit if limit >= BUDGET_FLOOR_TOKENS else None
 
 
 def _exception_excerpt(error: BaseException, limit: int = 300) -> str:
@@ -282,8 +299,10 @@ class OpenAICompatibleProvider:
 
         Endpoints word it differently ("max_tokens is too large", "maximum
         context length", "output tokens"), so match loosely but only when the
-        request actually carried more than the floor. Returns True when the
-        body was changed and the request should be sent again.
+        request actually carried more than the new budget. The new budget is
+        the limit the error names; when it names none, or that limit was
+        already rejected, the floor. Returns True when the body was changed
+        and the request should be sent again.
         """
         text = error_text.lower()
         if not any(
@@ -293,16 +312,20 @@ class OpenAICompatibleProvider:
             return False
         field = self._max_tokens_field()
         current = int(body.get(field) or 0)
-        if current <= BUDGET_FLOOR_TOKENS:
+        model = str(body.get("model"))
+        # A limit already rejected is never below `current`, so it falls to the floor.
+        named = _budget_from_error(error_text, body, current)
+        target = named or BUDGET_FLOOR_TOKENS
+        if current <= target:
             return False
         logger.warning(
             "Endpoint rejected an output budget of %d for %s; retrying at %d and keeping it there",
             current,
-            body.get("model"),
-            BUDGET_FLOOR_TOKENS,
+            model,
+            target,
         )
-        self._budget_caps[str(body.get("model"))] = BUDGET_FLOOR_TOKENS
-        body[field] = BUDGET_FLOOR_TOKENS
+        self._budget_caps[model] = target
+        body[field] = target
         return True
 
     @staticmethod
