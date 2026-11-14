@@ -8,7 +8,8 @@ import pytest
 
 from mira.dashboard.db import AppDatabase
 from mira.index.pg_store import PgIndexStore, rename_repo_pg
-from mira.index.store import IndexingSuperseded, IndexStore
+from mira.index.relationships import RelationshipStore
+from mira.index.store import FileSummary, IndexingSuperseded, IndexStore
 from mira.platforms.github import webhook
 
 
@@ -70,3 +71,96 @@ def test_pg_rename_moves_rows_and_fences_a_running_index(postgres_url: str) -> N
     with pytest.raises(IndexingSuperseded), old.index_write(run):
         pass
     assert new.claim_index_run().needs_reconciliation  # the unfinished run needs recovery
+
+
+_RENAMED = {
+    "action": "renamed",
+    "repository": {"name": "new", "owner": {"login": "o"}},
+    "changes": {"repository": {"name": {"from": "old"}}},
+}
+
+
+def _sqlite_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppDatabase:
+    monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    db = AppDatabase(url=str(tmp_path / "app.db"), admin_password="admin")
+    monkeypatch.setattr(webhook, "_get_app_db", lambda: db)
+    db.register_repo("o", "old")
+    store = IndexStore.open("o", "old")
+    store.upsert_summary(FileSummary(path="a.py", language="python", summary="old"))
+    store.close()
+    return db
+
+
+async def test_leftover_empty_index_under_new_name_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _sqlite_setup(tmp_path, monkeypatch)
+    IndexStore.open("o", "new").close()  # created, then interrupted before indexing
+
+    await webhook.handle_repo_renamed(_RENAMED, None, "mira")  # type: ignore[arg-type]
+
+    assert db.get_repo("o", "new") is not None
+    store = IndexStore.open("o", "new")
+    assert store.all_paths() == {"a.py"}
+    store.close()
+
+
+async def test_populated_index_under_new_name_moves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _sqlite_setup(tmp_path, monkeypatch)
+    store = IndexStore.open("o", "new")
+    store.upsert_summary(FileSummary(path="b.py", language="python", summary="new"))
+    store.close()
+
+    await webhook.handle_repo_renamed(_RENAMED, None, "mira")  # type: ignore[arg-type]
+
+    assert db.get_repo("o", "old") is not None and db.get_repo("o", "new") is None
+    assert (tmp_path / "o" / "old.db").exists()
+
+
+async def test_failed_registry_rename_moves_the_index_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _sqlite_setup(tmp_path, monkeypatch)
+
+    def conflict(*args: object) -> None:
+        raise RuntimeError("rows already exist under the new name")
+
+    monkeypatch.setattr(db, "rename_repo", conflict)
+
+    await webhook.handle_repo_renamed(_RENAMED, None, "mira")  # type: ignore[arg-type]
+
+    assert (tmp_path / "o" / "old.db").exists()
+    assert not (tmp_path / "o" / "new.db").exists()
+
+
+async def test_duplicate_override_under_new_name_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sqlite_setup(tmp_path, monkeypatch)
+    rel = RelationshipStore(index_dir=str(tmp_path))
+    rel.set_override("o/old", "x/y", "denied")
+    rel.set_override("o/new", "x/y", "confirmed")
+    rel.close()
+
+    await webhook.handle_repo_renamed(_RENAMED, None, "mira")  # type: ignore[arg-type]
+
+    rel = RelationshipStore(index_dir=str(tmp_path))
+    overrides = [(o.source_repo, o.target_repo, o.status) for o in rel.list_overrides()]
+    rel.close()
+    assert overrides == [("o/new", "x/y", "confirmed")]
+
+
+def test_pg_app_database_rename_moves_registry_and_history(postgres_url: str) -> None:
+    db = AppDatabase(url=postgres_url, admin_password="admin")
+    db.register_repo("o", "old")
+    db.upsert_pull_request("o", "old", 1, author="alice")
+
+    db.rename_repo("o", "old", "new")
+
+    assert db.get_repo("o", "new") is not None and db.get_repo("o", "old") is None
+    with db._pg_cursor() as cur:
+        cur.execute("SELECT repo FROM pull_requests")
+        assert cur.fetchall() == [("new",)]

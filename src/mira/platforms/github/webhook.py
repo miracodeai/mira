@@ -1102,13 +1102,24 @@ async def handle_repo_renamed(
     old = payload.get("changes", {}).get("repository", {}).get("name", {}).get("from", "")
     if not (owner and old and new) or old == new:
         return
+    # Index first: the registry decides which name the dashboard resolves. Each step
+    # is one transaction; a failed registry step moves the index back, so the repo's
+    # data never ends up split across both names.
     try:
-        # Index first: the registry decides which name the dashboard resolves.
         rename_repo_index(owner, old, new)
-        _get_app_db().rename_repo(owner, old, new)
-        logger.info("Renamed repo %s/%s -> %s/%s", owner, old, owner, new)
     except Exception:
-        logger.exception("Error renaming repo %s/%s -> %s", owner, old, new)
+        logger.exception("Error renaming index %s/%s -> %s; nothing moved", owner, old, new)
+        return
+    try:
+        _get_app_db().rename_repo(owner, old, new)
+    except Exception:
+        logger.exception("Error renaming repo %s/%s -> %s; moving index back", owner, old, new)
+        try:
+            rename_repo_index(owner, new, old)
+        except Exception:
+            logger.exception("Could not move index for %s/%s back to %s", owner, new, old)
+        return
+    logger.info("Renamed repo %s/%s -> %s/%s", owner, old, owner, new)
 
 
 async def handle_repos_added(

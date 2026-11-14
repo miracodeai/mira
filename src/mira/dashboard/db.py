@@ -1163,9 +1163,13 @@ class AppDatabase:
                 for sql, params in stmts:
                     self._sqlite_conn.execute(sql, params)
             return
-        with self._pg_cursor() as cur, cur.connection.transaction():
+        from mira.db.postgres import connect
+
+        # A dedicated connection: the shared cursor's reconnect-and-retry would commit
+        # the remaining statements outside this transaction.
+        with connect(self._url) as conn, conn.transaction():
             for sql, params in stmts:
-                cur.execute(sql.replace("?", "%s"), params)
+                conn.execute(sql.replace("?", "%s"), params)
 
     def set_repo_file_count(
         self, owner: str, repo: str, count: int, platform: str = "github"

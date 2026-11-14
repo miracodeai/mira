@@ -2061,6 +2061,17 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
     return rows[:limit]
 
 
+def _store_has_files(path: str) -> bool:
+    """Whether a per-repo SQLite store holds any indexed file."""
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("SELECT 1 FROM files LIMIT 1").fetchone() is not None
+    except sqlite3.OperationalError:  # no schema yet
+        return False
+    finally:
+        conn.close()
+
+
 def rename_repo_index(owner: str, old: str, new: str, platform: str = "github") -> None:
     """Move a renamed repo's index (and relationship overrides) to its new name.
 
@@ -2079,7 +2090,12 @@ def rename_repo_index(owner: str, old: str, new: str, platform: str = "github") 
         dst = os.path.join(index_dir, key_owner, f"{new}.db")
         if os.path.exists(src):
             if os.path.exists(dst):
-                raise FileExistsError(f"Index store already exists for {owner}/{new}")
+                if _store_has_files(dst):
+                    raise FileExistsError(f"Index store already exists for {owner}/{new}")
+                # An empty store, e.g. one created and then interrupted, is replaced.
+                for suffix in ("", "-wal", "-shm"):
+                    if os.path.exists(dst + suffix):
+                        os.remove(dst + suffix)
             for suffix in ("", "-wal", "-shm"):
                 if os.path.exists(src + suffix):
                     os.replace(src + suffix, dst + suffix)
@@ -2096,6 +2112,19 @@ def rename_repo_index(owner: str, old: str, new: str, platform: str = "github") 
                             f"UPDATE OR IGNORE {table} SET {col}=? WHERE {col}=?",
                             (new_full, old_full),
                         )
+                        # A row left behind duplicates one already under the new name,
+                        # which wins; dropping it keeps a reused old name clean.
+                        dropped = conn.execute(
+                            f"DELETE FROM {table} WHERE {col}=?", (old_full,)
+                        ).rowcount
+                        if dropped:
+                            logger.warning(
+                                "Dropped %d %s row(s) for %s that duplicate %s",
+                                dropped,
+                                table,
+                                old_full,
+                                new_full,
+                            )
         finally:
             conn.close()
 
