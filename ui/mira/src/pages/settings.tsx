@@ -29,6 +29,18 @@ import { useDocumentTitle } from "@/lib/hooks"
 // Keep in sync with MAX_CUSTOM_INSTRUCTIONS_CHARS in src/mira/config.py.
 const CUSTOM_INSTRUCTIONS_MAX_LENGTH = 4000
 
+function OverridesConfigBadge({
+  title = "This dashboard value overrides the deployment config. A repository's own .mira.yaml still takes precedence.",
+}: {
+  title?: string
+}) {
+  return (
+    <span className="text-[11px] font-semibold text-primary" title={title}>
+      Overrides deployment <code className="font-mono">mira.yaml</code>
+    </span>
+  )
+}
+
 export function SettingsPage() {
   useDocumentTitle("Settings")
   const { user: currentUser } = useAuth()
@@ -309,11 +321,7 @@ export function SettingsPage() {
           <label className="text-sm font-medium" htmlFor={fieldKey}>
             {label}
           </label>
-          {overridden && (
-            <span className="text-[11px] font-semibold text-primary">
-              Overrides <code className="font-mono">mira.yaml</code>
-            </span>
-          )}
+          {overridden && <OverridesConfigBadge />}
         </div>
         <Input
           id={fieldKey}
@@ -380,11 +388,7 @@ export function SettingsPage() {
             />
             {label}
           </label>
-          {overridden && (
-            <span className="text-[11px] font-semibold text-primary">
-              Overrides <code className="font-mono">mira.yaml</code>
-            </span>
-          )}
+          {overridden && <OverridesConfigBadge />}
         </div>
         {error ? (
           <p className="pl-6 text-xs text-destructive">
@@ -451,11 +455,7 @@ export function SettingsPage() {
           <label className="text-sm font-medium" htmlFor={fieldKey}>
             {label}
           </label>
-          {overridden && (
-            <span className="text-[11px] font-semibold text-primary">
-              Overrides <code className="font-mono">mira.yaml</code>
-            </span>
-          )}
+          {overridden && <OverridesConfigBadge />}
         </div>
         <Input
           id={fieldKey}
@@ -514,7 +514,8 @@ export function SettingsPage() {
     label: string,
     description: string,
     placeholder: string,
-    maxLength: number
+    maxLength: number,
+    badgeTitle?: string
   ) => {
     const fieldKey = `${section}.${key}`
     const eff = (effective?.[section] as Record<string, unknown> | undefined)?.[
@@ -563,11 +564,7 @@ export function SettingsPage() {
           <label className="text-sm font-medium" htmlFor={fieldKey}>
             {label}
           </label>
-          {overridden && (
-            <span className="text-[11px] font-semibold text-primary">
-              Overrides <code className="font-mono">mira.yaml</code>
-            </span>
-          )}
+          {overridden && <OverridesConfigBadge title={badgeTitle} />}
         </div>
         <Textarea
           id={fieldKey}
@@ -832,7 +829,7 @@ export function SettingsPage() {
               <code className="text-xs">mira.yaml</code> and apply to every repo
               this Mira instance reviews. Per-repo{" "}
               <code className="text-xs">.mira.yml</code> files still take
-              precedence for individual repos.
+              precedence for individual repos, except for custom instructions.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -933,7 +930,8 @@ export function SettingsPage() {
                   "Custom instructions",
                   "Appended to every prompt whose output a person reads: reviews, security and dependency passes, the walkthrough and PR summary, review summaries, @mention answers, thread replies, overlap notes, and fix verification. Use it to set the language or tone of that text. Leave empty to use the configuration value.",
                   "Response language settings, etc.",
-                  CUSTOM_INSTRUCTIONS_MAX_LENGTH
+                  CUSTOM_INSTRUCTIONS_MAX_LENGTH,
+                  "This dashboard value overrides the deployment config. Repository .mira.yaml files cannot override this setting."
                 )}
               </div>
             </div>
