@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from difflib import unified_diff
+from io import StringIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+from mira.core.diff_parser import parse_diff
 from mira.models import FileChangeType, FileDiff, HunkInfo, Severity
 from mira.security.osv import VulnEntry
 from mira.security.pr_scan import (
@@ -130,6 +134,311 @@ class TestAddedLineHits:
         assert len(hits) == 1
 
 
+def _json_file_diff(path: str, before: str, after: str) -> FileDiff:
+    diff = "".join(
+        unified_diff(
+            StringIO(before).readlines(),
+            StringIO(after).readlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+    return parse_diff(diff).files[0]
+
+
+class TestExactNpmOrigins:
+    @pytest.mark.asyncio
+    async def test_added_lock_version_cannot_anchor_an_unchanged_version(self, osv_requests):
+        before = (
+            json.dumps(
+                {
+                    "lockfileVersion": 3,
+                    "packages": {"node_modules/demo-package": {"version": "1.0.0"}},
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        data = json.loads(before)
+        added_path = "node_modules/parent/node_modules/demo-package"
+        data["packages"][added_path] = {"version": "2.0.0"}
+        after = json.dumps(data, indent=2) + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        comments = await scan_manifest_changes(
+            [_json_file_diff("package-lock.json", before, after)], fetcher
+        )
+
+        posts = [request for request in osv_requests if request.method == "POST"]
+        assert len(posts) == 1
+        assert json.loads(posts[0].content) == {
+            "queries": [
+                {"package": {"ecosystem": "npm", "name": "demo-package"}, "version": "2.0.0"}
+            ]
+        }
+        line, text = next(
+            (line, text) for line, text in enumerate(after.splitlines(), 1) if added_path in text
+        )
+        assert [(c.line, c.existing_code, c.title) for c in comments] == [
+            (line, text, "Known vulnerabilities in demo-package@2.0.0")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_package_mention_in_description_does_not_query_unchanged_dependency(
+        self, osv_requests
+    ):
+        data = {"description": "old", "dependencies": {"demo-package": "1.0.0"}}
+        before = json.dumps(data, indent=2) + "\n"
+        data["description"] = "demo-package 1.0.0 is mentioned here"
+        after = json.dumps(data, indent=2) + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        assert (
+            await scan_manifest_changes([_json_file_diff("package.json", before, after)], fetcher)
+            == []
+        )
+        assert osv_requests == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", ["^1.0.0", ">=1.0.0", "1.x", "file:../local"])
+    async def test_nonconcrete_npm_declaration_is_not_queried(self, osv_requests, version):
+        after = json.dumps({"dependencies": {"demo-package": version}}) + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        assert (
+            await scan_manifest_changes([_json_file_diff("package.json", "", after)], fetcher) == []
+        )
+        assert osv_requests == []
+
+    @pytest.mark.asyncio
+    async def test_nested_legacy_version_under_versionless_parent_is_anchored(self, osv_requests):
+        before = (
+            json.dumps(
+                {"lockfileVersion": 1, "dependencies": {"demo-package": {"version": "1.0.0"}}},
+                indent=2,
+            )
+            + "\n"
+        )
+        data = json.loads(before)
+        data["dependencies"]["parent"] = {"dependencies": {"demo-package": {"version": "2.0.0"}}}
+        after = json.dumps(data, indent=2) + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        comments = await scan_manifest_changes(
+            [_json_file_diff("package-lock.json", before, after)], fetcher
+        )
+
+        posts = [request for request in osv_requests if request.method == "POST"]
+        assert len(posts) == 1
+        assert json.loads(posts[0].content) == {
+            "queries": [
+                {"package": {"ecosystem": "npm", "name": "demo-package"}, "version": "2.0.0"}
+            ]
+        }
+        assert len(comments) == 1
+        assert comments[0].line == next(
+            i for i, text in enumerate(after.splitlines(), 1) if '"demo-package"' in text and i > 5
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("legacy", [False, True], ids=["modern", "legacy"])
+    async def test_version_only_lockfile_bump_anchors_the_version(self, osv_requests, legacy):
+        key = "dependencies" if legacy else "packages"
+        name = "demo-package" if legacy else "node_modules/demo-package"
+        data = {key: {name: {"version": "1.0.0"}}}
+        before = json.dumps(data, indent=2) + "\n"
+        data[key][name]["version"] = "2.0.0"
+        after = json.dumps(data, indent=2) + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        comments = await scan_manifest_changes(
+            [_json_file_diff("package-lock.json", before, after)], fetcher
+        )
+
+        assert len(comments) == 1
+        line, text = next(
+            (i, text) for i, text in enumerate(after.splitlines(), 1) if '"2.0.0"' in text
+        )
+        assert (comments[0].line, comments[0].existing_code) == (line, text)
+        posts = [r for r in osv_requests if r.method == "POST"]
+        assert json.loads(posts[0].content)["queries"] == [
+            {"package": {"ecosystem": "npm", "name": "demo-package"}, "version": "2.0.0"}
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "section", ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
+    )
+    async def test_scoped_declaration_version_on_next_line(self, osv_requests, section):
+        before = json.dumps({section: {"@scope/demo-package": "1.0.0"}}, indent=2) + "\n"
+        after = '{\n  "' + section + '": {\n    "@scope/demo-package":\n      "2.0.0"\n  }\n}\n'
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        comments = await scan_manifest_changes(
+            [_json_file_diff("nested/package.json", before, after)], fetcher
+        )
+
+        assert len(comments) == 1
+        # The added property line belongs to this exact version even when its value wraps.
+        assert (comments[0].path, comments[0].line) == ("nested/package.json", 3)
+        assert comments[0].title == "Known vulnerabilities in @scope/demo-package@2.0.0"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "before_data,after_data,path",
+        [
+            (
+                {"dependencies": {"demo-package": "1.0.0", "other": "2.0.0"}},
+                {"dependencies": {"other": "2.0.0", "demo-package": "1.0.0"}},
+                "package.json",
+            ),
+            (
+                {"dependencies": {"demo-package": "1.0.0"}},
+                {"devDependencies": {"demo-package": "1.0.0"}},
+                "package.json",
+            ),
+            (
+                {"packages": {"node_modules/demo-package": {"version": "1.0.0"}}},
+                {
+                    "packages": {
+                        "node_modules/parent/node_modules/demo-package": {"version": "1.0.0"}
+                    }
+                },
+                "package-lock.json",
+            ),
+            (
+                {"dependencies": {"demo-package": "1.0.0"}},
+                {"description": "demo-package 1.0.0 removed", "dependencies": {}},
+                "package.json",
+            ),
+        ],
+        ids=["reordered", "moved-to-dev", "moved-installation", "removed-only"],
+    )
+    async def test_existing_or_removed_tuple_is_not_introduced(
+        self, osv_requests, before_data, after_data, path
+    ):
+        before = json.dumps(before_data, indent=2) + "\n"
+        after = json.dumps(after_data, indent=2) + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        assert await scan_manifest_changes([_json_file_diff(path, before, after)], fetcher) == []
+        assert osv_requests == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            '{"dependencies":{"demo-package":"1.0.0","demo-package":"2.0.0"}}',
+            '{"dependencies":{"demo-package":"1.0.0","demo\\u002dpackage":"2.0.0"}}',
+            '{"packages":{"node_modules/demo-package":{"version":"1.0.0","version":"2.0.0"}}}',
+        ],
+    )
+    async def test_duplicate_json_keys_are_ambiguous(self, osv_requests, content):
+        path = "package-lock.json" if '"packages"' in content else "package.json"
+        after = content + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        assert await scan_manifest_changes([_json_file_diff(path, "", after)], fetcher) == []
+        assert osv_requests == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["source-mismatch", "truncated-hunk", "invalid-before"])
+    async def test_unproven_diff_source_relationship_is_omitted(self, osv_requests, failure):
+        before = json.dumps({"dependencies": {"demo-package": "1.0.0"}}, indent=2) + "\n"
+        after = before.replace("1.0.0", "2.0.0")
+        if failure == "invalid-before":
+            before = before.replace('"1.0.0"', '"1.0.0",')
+        diff = _json_file_diff("package.json", before, after)
+        if failure == "truncated-hunk":
+            hunk = diff.hunks[0]
+            diff = replace(diff, hunks=[replace(hunk, content=hunk.content.split("+    ")[0])])
+        content = after.replace("2.0.0", "3.0.0") if failure == "source-mismatch" else after
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=content)
+
+        assert await scan_manifest_changes([diff], fetcher) == []
+        assert osv_requests == []
+
+    @pytest.mark.asyncio
+    async def test_duplicate_tuple_keeps_the_eligible_installation_origin(self, osv_requests):
+        location = "node_modules/parent/node_modules/demo-package"
+        after = (
+            json.dumps(
+                {
+                    "packages": {
+                        "node_modules/demo-package": {"version": "1.0.0", "link": True},
+                        location: {"version": "1.0.0"},
+                    }
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        comments = await scan_manifest_changes(
+            [_json_file_diff("package-lock.json", "", after)], fetcher
+        )
+
+        assert len(comments) == 1
+        assert location in comments[0].existing_code
+        posts = [r for r in osv_requests if r.method == "POST"]
+        assert len(json.loads(posts[0].content)["queries"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_unrelated_first_manifest_cannot_capture_second_manifest_origin(
+        self, osv_requests
+    ):
+        before = '{"description":"old","dependencies":{"demo-package":"1.0.0"}}\n'
+        first = before.replace('"old"', '"demo-package 1.0.0"')
+        second = '{"dependencies":{"demo-package":"1.0.0"}}\n'
+        contents = {"first/package.json": first, "second/package.json": second}
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(side_effect=contents.get)
+
+        comments = await scan_manifest_changes(
+            [
+                _json_file_diff("first/package.json", before, first),
+                _json_file_diff("second/package.json", "", second),
+            ],
+            fetcher,
+        )
+
+        assert len(comments) == 1
+        assert comments[0].path == "second/package.json"
+
+    @pytest.mark.asyncio
+    async def test_unicode_separator_in_metadata_does_not_shift_the_diff_anchor(self, osv_requests):
+        after = (
+            json.dumps(
+                {"description": "one\u2028two", "dependencies": {"demo-package": "1.0.0"}},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        )
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        comments = await scan_manifest_changes(
+            [_json_file_diff("package.json", "", after)], fetcher
+        )
+
+        assert len(comments) == 1
+        assert comments[0].line == next(
+            i for i, line in enumerate(after.split("\n"), 1) if '"demo-package"' in line
+        )
+
+
 # ---------------------------------------------------------------------------
 # scan_manifest_changes integration tests
 # ---------------------------------------------------------------------------
@@ -243,17 +552,9 @@ class TestScanManifestChanges:
         )
 
         fetcher = MagicMock()
-        fetcher.fetch = AsyncMock(return_value=('{"dependencies": {"lodash": "4.17.20"}}'))
-
-        diff = _file_diff(
-            "package.json",
-            [
-                _hunk(
-                    target_start=2,
-                    content='@@ -1,2 +1,3 @@\n+    "lodash": "4.17.20"\n',
-                )
-            ],
-        )
+        content = '{"dependencies": {\n    "lodash": "4.17.20"\n}}\n'
+        fetcher.fetch = AsyncMock(return_value=content)
+        diff = _json_file_diff("package.json", '{"dependencies": {\n}}\n', content)
 
         with patch("mira.security.pr_scan.query_batch", fake_qb):
             comments = await scan_manifest_changes([diff], fetcher)
@@ -305,22 +606,15 @@ class TestScanManifestChanges:
         fake_qb = AsyncMock(side_effect=Exception("network fail"))
 
         fetcher = MagicMock()
-        fetcher.fetch = AsyncMock(return_value=('{"dependencies": {"lodash": "4.17.20"}}'))
-
-        diff = _file_diff(
-            "package.json",
-            [
-                _hunk(
-                    target_start=1,
-                    content='@@ -1,2 +1,3 @@\n+    "lodash": "4.17.20"\n',
-                )
-            ],
-        )
+        content = '{"dependencies": {"lodash": "4.17.20"}}\n'
+        fetcher.fetch = AsyncMock(return_value=content)
+        diff = _json_file_diff("package.json", "", content)
 
         with patch("mira.security.pr_scan.query_batch", fake_qb):
             comments = await scan_manifest_changes([diff], fetcher)
 
         assert comments == []
+        fake_qb.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fetcher_returns_none_skips_file(self):
@@ -508,10 +802,7 @@ class TestManifestQueryDeduplication:
         path = "package-lock.json"
         fetcher = MagicMock()
         fetcher.fetch = AsyncMock(return_value=content)
-        diff = _file_diff(
-            path,
-            [_hunk(1, "@@ -0,0 +1 @@\n" + "\n".join("+" + s for s in content.splitlines()))],
-        )
+        diff = _json_file_diff(path, "", content + "\n")
 
         comments = await scan_manifest_changes([diff], fetcher)
 
@@ -559,7 +850,7 @@ class TestManifestQueryDeduplication:
             ]
         }
         assert len(comments) == 1
-        first = cases[0]
+        first = cases[1] if first_version == "^1.0.0" and not reverse else cases[0]
         comment = comments[0]
         assert (comment.path, comment.line, comment.existing_code) == (
             first[0].path,
@@ -621,8 +912,8 @@ class TestManifestQueryDeduplication:
         self, osv_requests, path, content, ecosystem, name, version
     ):
         first = _origin_manifest("first/package.json", "demo-package")
-        last = _file_diff(path, [_hunk(7, f"@@ -6,0 +7 @@\n+{content}\n")])
-        contents = {first[0].path: first[1], path: content}
+        last = _json_file_diff(path, "\n" * 6, "\n" * 6 + content + "\n")
+        contents = {first[0].path: first[1], path: "\n" * 6 + content + "\n"}
         fetcher = MagicMock()
         fetcher.fetch = AsyncMock(side_effect=contents.get)
 

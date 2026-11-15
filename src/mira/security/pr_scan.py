@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from mira.index.manifests import parse_manifest
 from mira.models import FileDiff, ReviewComment, Severity
+from mira.security.npm_origins import added_npm_packages
 from mira.security.osv import (
     PackageQuery,
     normalize_version,
@@ -86,7 +87,11 @@ async def scan_manifest_changes(
     *,
     timeout_s: float = 15.0,
 ) -> list[ReviewComment]:
-    """Flag PR-added packages with known OSV vulnerabilities. Fails open."""
+    """Flag PR-added packages with known OSV vulnerabilities. Fails open.
+
+    Npm findings require a concrete version and a structural origin verified
+    against the fetched manifest and diff. Ambiguous npm origins are omitted.
+    """
     if not manifest_files:
         return []
 
@@ -99,15 +104,19 @@ async def scan_manifest_changes(
             content = await fetcher.fetch(f.path)
             if not content:
                 continue
-            packages = parse_manifest(f.path, content)
+            if f.path.rsplit("/", 1)[-1] in ("package.json", "package-lock.json"):
+                origins = added_npm_packages(f, content)
+            else:
+                origins = []
+                for pkg in parse_manifest(f.path, content):
+                    hits = _added_line_hits(f, pkg.name)
+                    if hits:
+                        origins.append((pkg, hits[0][0], hits[0][1]))
         except Exception as exc:
             logger.debug("Failed to parse manifest %s: %s", f.path, exc)
             continue
 
-        for pkg in packages:
-            hits = _added_line_hits(f, pkg.name)
-            if not hits:
-                continue
+        for pkg, line_no, line_text in origins:
             eco = osv_ecosystem(pkg.kind)
             if eco is None:
                 continue
@@ -118,7 +127,7 @@ async def scan_manifest_changes(
             if key in hit_map:
                 continue
             queries.append(PackageQuery(ecosystem=pkg.kind, name=pkg.name, version=ver))
-            hit_map[key] = (f.path, hits[0][0], hits[0][1])
+            hit_map[key] = (f.path, line_no, line_text)
 
     if not queries:
         return []
