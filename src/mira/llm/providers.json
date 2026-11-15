@@ -23,7 +23,10 @@
       "HTTP-Referer": "https://github.com/miracodeai/mira",
       "X-Title": "Mira Code Reviewer"
     },
-    "reasoning_effort_map": {}
+    "reasoning_effort_map": {},
+    "reasoning_off_payload": { "reasoning_effort": "none" },
+    "reasoning_off_payload_responses": { "reasoning": { "effort": "none" } },
+    "prompt_caching": "anthropic"
   },
 
   "deepseek": {
