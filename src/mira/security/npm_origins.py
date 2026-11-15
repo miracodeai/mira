@@ -149,6 +149,7 @@ def _before_content(diff: FileDiff, content: str) -> tuple[str, set[int]]:
 def _packages(
     data: dict[str, Any], path: str
 ) -> Iterator[tuple[ParsedPackage, tuple[str, ...], tuple[str, ...]]]:
+    record: tuple[str, ...]
     if path.rsplit("/", 1)[-1] == "package.json":
         for section in (
             "dependencies",
@@ -167,7 +168,7 @@ def _packages(
                     {"version": version.strip(), "dev": section == "devDependencies"},
                     path,
                 )
-                if pkg is not None and pkg.scan_eligible:
+                if pkg is not None:
                     record = (section, name)
                     yield pkg, record, record
         return
@@ -189,7 +190,7 @@ def _packages(
                 continue
             record = (*pending[-1][1], name)
             pkg = _npm_lock_package(name, info, path, legacy=True)
-            if pkg is not None and pkg.scan_eligible:
+            if pkg is not None:
                 yield pkg, record, (*record, "version")
             children = info.get("dependencies")
             if isinstance(children, dict):
@@ -202,7 +203,7 @@ def _packages(
         if not separator:
             continue
         pkg = _npm_lock_package(name, info, path)
-        if pkg is not None and pkg.scan_eligible:
+        if pkg is not None:
             record = ("packages", location)
             yield pkg, record, (*record, "version")
 
@@ -217,7 +218,8 @@ def added_npm_packages(diff: FileDiff, content: str) -> list[tuple[ParsedPackage
         lines = _lines(content)
         origins = []
         for pkg, record, version in _packages(head.data, diff.path):
-            if (pkg.name, pkg.version) in existing:
+            # Query eligibility cannot establish that an old tuple did not exist.
+            if not pkg.scan_eligible or (pkg.name, pkg.version) in existing:
                 continue
             for position in (head.fields[record].key_start, head.fields[version].value_start):
                 line = head.line(position)

@@ -438,6 +438,29 @@ class TestExactNpmOrigins:
             i for i, line in enumerate(after.split("\n"), 1) if '"demo-package"' in line
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("legacy", [False, True], ids=["modern", "legacy"])
+    @pytest.mark.parametrize(
+        "metadata", [{"inBundle": True}, {"link": True}, {"resolved": "file:../local"}]
+    )
+    async def test_eligibility_metadata_change_does_not_introduce_an_existing_version(
+        self, osv_requests, legacy, metadata
+    ):
+        key = "dependencies" if legacy else "packages"
+        name = "demo-package" if legacy else "node_modules/demo-package"
+        before = json.dumps({key: {name: {"version": "1.0.0", **metadata}}}) + "\n"
+        after = json.dumps({key: {name: {"version": "1.0.0"}}}) + "\n"
+        fetcher = MagicMock()
+        fetcher.fetch = AsyncMock(return_value=after)
+
+        assert (
+            await scan_manifest_changes(
+                [_json_file_diff("package-lock.json", before, after)], fetcher
+            )
+            == []
+        )
+        assert osv_requests == []
+
 
 # ---------------------------------------------------------------------------
 # scan_manifest_changes integration tests
