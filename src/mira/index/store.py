@@ -2061,6 +2061,74 @@ def list_vulnerabilities_org_wide_sqlite(limit: int = 1000) -> list[dict]:
     return rows[:limit]
 
 
+def _store_has_files(path: str) -> bool:
+    """Whether a per-repo SQLite store holds any indexed file."""
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("SELECT 1 FROM files LIMIT 1").fetchone() is not None
+    except sqlite3.OperationalError:  # no schema yet
+        return False
+    finally:
+        conn.close()
+
+
+def rename_repo_index(owner: str, old: str, new: str, platform: str = "github") -> None:
+    """Move a renamed repo's index (and relationship overrides) to its new name.
+
+    Mirrors ``IndexStore.open``: Postgres rows are re-keyed in place, a SQLite
+    store is a per-repo file that gets moved. Never overwrites an existing store.
+    """
+    key_owner = owner if platform == "github" else f"_{platform}/{owner}"
+    index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        from mira.index.pg_store import rename_repo_pg
+
+        rename_repo_pg(db_url, key_owner, old, new)
+    else:
+        src = os.path.join(index_dir, key_owner, f"{old}.db")
+        dst = os.path.join(index_dir, key_owner, f"{new}.db")
+        if os.path.exists(src):
+            if os.path.exists(dst):
+                if _store_has_files(dst):
+                    raise FileExistsError(f"Index store already exists for {owner}/{new}")
+                # An empty store, e.g. one created and then interrupted, is replaced.
+                for suffix in ("", "-wal", "-shm"):
+                    if os.path.exists(dst + suffix):
+                        os.remove(dst + suffix)
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(src + suffix):
+                    os.replace(src + suffix, dst + suffix)
+
+    rel_path = os.path.join(index_dir, "_relationships.db")
+    if os.path.exists(rel_path):
+        old_full, new_full = f"{owner}/{old}", f"{owner}/{new}"
+        conn = sqlite3.connect(rel_path)
+        try:
+            with conn:
+                for table in ("relationship_overrides", "custom_edges"):
+                    for col in ("source_repo", "target_repo"):
+                        conn.execute(
+                            f"UPDATE OR IGNORE {table} SET {col}=? WHERE {col}=?",
+                            (new_full, old_full),
+                        )
+                        # A row left behind duplicates one already under the new name,
+                        # which wins; dropping it keeps a reused old name clean.
+                        dropped = conn.execute(
+                            f"DELETE FROM {table} WHERE {col}=?", (old_full,)
+                        ).rowcount
+                        if dropped:
+                            logger.warning(
+                                "Dropped %d %s row(s) for %s that duplicate %s",
+                                dropped,
+                                table,
+                                old_full,
+                                new_full,
+                            )
+        finally:
+            conn.close()
+
+
 def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = None) -> list[dict]:
     """SQLite equivalent of pg_store.list_learned_rules_org_wide.
 

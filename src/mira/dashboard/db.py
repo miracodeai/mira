@@ -1126,6 +1126,51 @@ class AppDatabase:
                     (platform, owner, repo),
                 )
 
+    def rename_repo(self, owner: str, old: str, new: str, platform: str = "github") -> None:
+        """Move a renamed repo's registry row and PR/contribution history to its new name.
+
+        One transaction: if rows already exist under the new name with the same
+        key, it raises and leaves everything under the old name.
+        """
+        stmts: list[tuple[str, tuple[str, ...]]]
+        if self.get_repo(owner, new, platform):
+            # A sync already registered the new name; drop the stale registry row.
+            stmts = [
+                (
+                    "DELETE FROM repos WHERE platform=? AND owner=? AND repo=?",
+                    (platform, owner, old),
+                )
+            ]
+        else:
+            stmts = [
+                (
+                    "UPDATE repos SET repo=? WHERE platform=? AND owner=? AND repo=?",
+                    (new, platform, owner, old),
+                )
+            ]
+        stmts.append(
+            (
+                "UPDATE pr_review_progress SET repo=? WHERE platform=? AND owner=? AND repo=?",
+                (new, platform, owner, old),
+            )
+        )
+        for table in ("contributions", "pull_requests", "pr_reviewers"):
+            stmts.append((f"UPDATE {table} SET repo=? WHERE owner=? AND repo=?", (new, owner, old)))
+
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            with self._sqlite_conn:  # commits, or rolls back on error
+                for sql, params in stmts:
+                    self._sqlite_conn.execute(sql, params)
+            return
+        from mira.db.postgres import connect
+
+        # A dedicated connection: the shared cursor's reconnect-and-retry would commit
+        # the remaining statements outside this transaction.
+        with connect(self._url) as conn, conn.transaction():
+            for sql, params in stmts:
+                conn.execute(sql.replace("?", "%s"), params)
+
     def set_repo_file_count(
         self, owner: str, repo: str, count: int, platform: str = "github"
     ) -> None:
