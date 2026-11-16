@@ -22,7 +22,13 @@ _CLOSING_TAG_RE = re.compile(r"<\s*/\s*operator_instructions\s*>", re.IGNORECASE
 
 def render_operator_instructions(instructions: str | None) -> str:
     """Return the Operator Instructions block, or ``""`` when there is nothing to add."""
-    text = _CLOSING_TAG_RE.sub("", instructions or "").strip()
+    text = instructions or ""
+    while True:
+        stripped = _CLOSING_TAG_RE.sub("", text)
+        if stripped == text:
+            break
+        text = stripped
+    text = text.strip()
     if not text:
         return ""
     return _BLOCK_HEADER + text + _BLOCK_FOOTER
