@@ -149,7 +149,8 @@ class TestDeliverOne:
                 {"url": "https://receiver.example/hook"}, nf.REVIEW_COMPLETED, {}
             )
         assert result == (False, f"HTTP {status}")
-        assert requests == ["https://receiver.example/hook"]
+        # Pinned to the address the SSRF check resolved (the autouse stub).
+        assert requests == ["https://93.184.216.34/hook"]
 
     @pytest.mark.parametrize("status", [201, 202, 204])
     async def test_success_statuses_are_delivered(self, status):
@@ -272,6 +273,136 @@ class TestSsrfResolution:
         assert client.post.call_count == 0
 
 
+class TestPinnedDelivery:
+    """A delivery connects to the address the SSRF check vetted, with the Host
+    header and TLS server name kept on the original hostname, so a record that
+    flips to an internal address between check and connect (DNS rebinding)
+    cannot be reached."""
+
+    @staticmethod
+    def _capture(responder):
+        seen = []
+
+        def respond(request):
+            seen.append(
+                (
+                    str(request.url),
+                    request.headers["host"],
+                    request.extensions.get("sni_hostname"),
+                )
+            )
+            return responder(request)
+
+        client_type = httpx.AsyncClient
+        transport = httpx.MockTransport(respond)
+        patcher = patch(
+            "mira.outbound_webhooks.httpx.AsyncClient",
+            side_effect=lambda **kwargs: client_type(transport=transport, **kwargs),
+        )
+        return seen, patcher
+
+    async def test_connects_to_vetted_address_keeping_host_and_sni(self):
+        seen, patcher = self._capture(lambda _r: httpx.Response(200))
+        with patcher:
+            ok, detail = await nf.deliver_one(
+                {"url": "https://receiver.example:8443/hook?x=1"}, nf.REVIEW_COMPLETED, {}
+            )
+        assert (ok, detail) == (True, "HTTP 200")
+        assert seen == [
+            ("https://93.184.216.34:8443/hook?x=1", "receiver.example:8443", "receiver.example")
+        ]
+
+    async def test_plain_http_pins_without_sni(self):
+        seen, patcher = self._capture(lambda _r: httpx.Response(200))
+        with patcher:
+            await nf.deliver_one({"url": "http://receiver.example/hook"}, nf.REVIEW_COMPLETED, {})
+        assert seen == [("http://93.184.216.34/hook", "receiver.example", None)]
+
+    async def test_name_is_resolved_once_per_delivery(self, monkeypatch: pytest.MonkeyPatch):
+        resolve = _resolves_to("93.184.216.34")
+        lookups = []
+
+        def counting(host, *a, **k):
+            lookups.append(host)
+            return resolve(host, *a, **k)
+
+        monkeypatch.setattr(nf.socket, "getaddrinfo", counting)
+        factory, client = _mock_httpx(status=500)  # 5xx → retried once
+        with patch("mira.outbound_webhooks.httpx.AsyncClient", factory):
+            await nf.deliver_one({"url": "https://receiver.example/hook"}, nf.REVIEW_COMPLETED, {})
+        assert client.post.call_count == 2
+        assert lookups == ["receiver.example"]  # the retry reuses the vetted address
+
+    async def test_retry_rotates_through_vetted_addresses(self, monkeypatch: pytest.MonkeyPatch):
+        v6 = "2606:2800:220:1:248:1893:25c8:1946"
+        monkeypatch.setattr(
+            nf.socket,
+            "getaddrinfo",
+            lambda host, *a, **k: [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),  # dup
+                (socket.AF_INET6, socket.SOCK_STREAM, 0, "", (v6, 0, 0, 0)),
+            ],
+        )
+        assert nf.resolve_safe_webhook_url("https://receiver.example/hook") == ["93.184.216.34", v6]
+        seen, patcher = self._capture(lambda _r: httpx.Response(503))
+        with patcher:
+            ok, _ = await nf.deliver_one(
+                {"url": "https://receiver.example/hook"}, nf.REVIEW_COMPLETED, {}
+            )
+        assert ok is False
+        assert [u for u, _, _ in seen] == ["https://93.184.216.34/hook", f"https://[{v6}]/hook"]
+        assert {h for _, h, _ in seen} == {"receiver.example"}
+
+    def test_ipv4_is_tried_first_whatever_the_resolver_order(self, monkeypatch: pytest.MonkeyPatch):
+        # One address per attempt means no happy-eyeballs fallback, so a
+        # dual-stack target must not be pinned to IPv6 on an IPv4-only host.
+        v6 = "2606:2800:220:1:248:1893:25c8:1946"
+        monkeypatch.setattr(
+            nf.socket,
+            "getaddrinfo",
+            lambda host, *a, **k: [
+                (socket.AF_INET6, socket.SOCK_STREAM, 0, "", (v6, 0, 0, 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),
+            ],
+        )
+        assert nf.resolve_safe_webhook_url("https://receiver.example/") == ["93.184.216.34", v6]
+
+    def test_resolver_asks_only_for_families_this_host_has(self, monkeypatch: pytest.MonkeyPatch):
+        seen = {}
+
+        def record(host, *a, **k):
+            seen.update(k)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr(nf.socket, "getaddrinfo", record)
+        nf.resolve_safe_webhook_url("https://receiver.example/")
+        assert seen["flags"] & socket.AI_ADDRCONFIG
+
+    async def test_literal_and_allowlisted_hosts_are_sent_as_written(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("MIRA_WEBHOOK_ALLOWED_HOSTS", "mattermost")
+        monkeypatch.setattr(nf.socket, "getaddrinfo", _resolves_to("10.1.2.3"))
+        seen, patcher = self._capture(lambda _r: httpx.Response(200))
+        with patcher:
+            for url in ("http://mattermost:8065/hooks/x", "https://93.184.216.34/hook"):
+                ok, _ = await nf.deliver_one({"url": url}, nf.REVIEW_COMPLETED, {})
+                assert ok is True
+        assert seen == [
+            ("http://mattermost:8065/hooks/x", "mattermost:8065", None),
+            ("https://93.184.216.34/hook", "93.184.216.34", None),
+        ]
+
+    def test_resolver_contract(self, monkeypatch: pytest.MonkeyPatch):
+        assert nf.resolve_safe_webhook_url("http://169.254.169.254/") is None  # blocked literal
+        assert nf.resolve_safe_webhook_url("http://localhost/") is None
+        assert nf.resolve_safe_webhook_url("https://93.184.216.34/") == []  # no pinning needed
+        assert nf.resolve_safe_webhook_url("https://receiver.example/") == ["93.184.216.34"]
+        monkeypatch.setattr(nf.socket, "getaddrinfo", lambda *a, **k: [])
+        assert nf.resolve_safe_webhook_url("https://empty.example/") is None  # nothing to pin to
+
+
 class TestDispatch:
     @pytest.mark.parametrize(
         "url",
@@ -310,7 +441,7 @@ class TestDispatch:
             side_effect=lambda **kwargs: client_type(transport=transport, **kwargs),
         ):
             await nf.dispatch_event(nf.REVIEW_COMPLETED, {})
-        assert requests == ["https://receiver.example/hook"]
+        assert requests == ["https://93.184.216.34/hook"]
 
     async def test_only_enabled_and_subscribed(self, in_memory_db: AppDatabase):
         in_memory_db.set_webhooks(

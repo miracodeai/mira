@@ -17,7 +17,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { toast } from "@/components/ui/sonner"
 import { useDocumentTitle } from "@/lib/hooks"
 import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { normalizeRepoOwner, splitRepoKey } from "@/lib/repo-key"
 
 function parseDetail(e: unknown): string {

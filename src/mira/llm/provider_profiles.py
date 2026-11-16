@@ -45,6 +45,9 @@ DEFAULT_PROFILE: dict = {
     # ``max_tokens``.
     "max_tokens_field": "max_tokens",
     "api_key_env": None,
+    # "anthropic" when the endpoint forwards Anthropic ``cache_control``
+    # breakpoints (OpenRouter). None leaves requests untouched.
+    "prompt_caching": None,
 }
 
 

@@ -4,6 +4,7 @@ attribution, and the contributors API endpoints."""
 from __future__ import annotations
 
 import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -238,6 +239,29 @@ def test_api_get_contributor_detail(patched_api: AppDatabase) -> None:
     assert detail.repos[0].owner == "o"
     # No indexed repos → quality is zeroed but well-formed.
     assert detail.quality.accept_rate == 0.0
+
+
+def test_api_get_contributor_quality_matches_provider(
+    patched_api: AppDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    patched_api.upsert_contributor("github", "alice")
+    for platform, blockers in (("github", 1), ("gitlab", 2)):
+        patched_api.register_repo("o", "r", platform=platform)
+        with closing(IndexStore.open("o", "r", platform=platform)) as store:
+            store.record_review(
+                pr_number=1,
+                pr_title="Example change",
+                pr_url="https://example.invalid/review/1",
+                comments_posted=blockers,
+                blockers=blockers,
+                warnings=0,
+                author="alice",
+            )
+
+    detail = api.get_contributor("alice", _admin_request())
+
+    assert (detail.quality.reviews, detail.quality.blockers) == (1, 1)
 
 
 def test_api_get_contributor_404(patched_api: AppDatabase) -> None:

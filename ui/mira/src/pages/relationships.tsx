@@ -21,10 +21,15 @@ import {
 } from "@/components/ui/card"
 import { RelationshipGraph } from "@/components/dashboard/relationship-graph"
 import { api } from "@/lib/api"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function RelationshipsPage() {
   useDocumentTitle("Relationships")
+  // Overrides and custom edges rewrite the graph every blast-radius reads, so
+  // only admins may change them (the API rejects other users' writes with 403).
+  const { user } = useAuth()
+  const canEdit = !!user?.is_admin
   const { data, loading, error } = useAsync(api.getRelationships, [])
   const { data: repos } = useAsync(api.listRepos, [])
   const [refreshKey, setRefreshKey] = useState(0)
@@ -123,15 +128,17 @@ export function RelationshipsPage() {
                               e.target_repo,
                             ]),
                           ).size
-                        } repos. Approve, dismiss, or add your own.`}
+                        } repos.${canEdit ? " Approve, dismiss, or add your own." : ""}`}
                   </CardDescription>
                 </div>
-                <Button
-                  size="sm"
-                  onClick={() => setShowAddEdge(!showAddEdge)}
-                >
-                  <Plus className="mr-1 h-3 w-3" /> Add
-                </Button>
+                {canEdit && (
+                  <Button
+                    size="sm"
+                    onClick={() => setShowAddEdge(!showAddEdge)}
+                  >
+                    <Plus className="mr-1 h-3 w-3" /> Add
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -228,28 +235,30 @@ export function RelationshipsPage() {
                         <Badge variant="outline" className="ml-3 shrink-0">
                           {e.kind}
                         </Badge>
-                        <div className="ml-3 flex shrink-0 gap-1">
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                            onClick={() =>
-                              confirmEdge(e.source_repo, e.target_repo)
-                            }
-                          >
-                            <Check className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                            onClick={() =>
-                              denyEdge(e.source_repo, e.target_repo)
-                            }
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
+                        {canEdit && (
+                          <div className="ml-3 flex shrink-0 gap-1">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              onClick={() =>
+                                confirmEdge(e.source_repo, e.target_repo)
+                              }
+                            >
+                              <Check className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              onClick={() =>
+                                denyEdge(e.source_repo, e.target_repo)
+                              }
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     )
                   })}

@@ -38,8 +38,16 @@ def list_context(owner: str, repo: str) -> list[ReviewContextModel]:
         ]
 
 
+# ── Review context + rules (admin only) ────────────────────────────────────
+# Context entries and rules go straight into the review prompt, so writing them
+# is instance configuration: any authenticated user may read, only admins write.
+
+
 @router.post("/api/repos/{owner:path}/{repo}/context", response_model=ReviewContextModel)
-def create_context(owner: str, repo: str, body: ReviewContextCreate) -> ReviewContextModel:
+def create_context(
+    owner: str, repo: str, body: ReviewContextCreate, request: Request
+) -> ReviewContextModel:
+    _require_admin(request)
     with _open_store(owner, repo) as store:
         e = store.upsert_review_context(title=body.title, content=body.content)
         return ReviewContextModel(
@@ -55,8 +63,9 @@ def create_context(owner: str, repo: str, body: ReviewContextCreate) -> ReviewCo
     "/api/repos/{owner:path}/{repo}/context/{context_id}", response_model=ReviewContextModel
 )
 def update_context(
-    owner: str, repo: str, context_id: int, body: ReviewContextCreate
+    owner: str, repo: str, context_id: int, body: ReviewContextCreate, request: Request
 ) -> ReviewContextModel:
+    _require_admin(request)
     with _open_store(owner, repo) as store:
         existing = store.get_review_context(context_id)
         if not existing:
@@ -74,7 +83,8 @@ def update_context(
 
 
 @router.delete("/api/repos/{owner:path}/{repo}/context/{context_id}")
-def delete_context(owner: str, repo: str, context_id: int) -> dict:
+def delete_context(owner: str, repo: str, context_id: int, request: Request) -> dict:
+    _require_admin(request)
     with _open_store(owner, repo) as store:
         store.delete_review_context(context_id)
         return {"ok": True}
@@ -288,7 +298,8 @@ def list_repo_rules(owner: str, repo: str) -> list[RuleModel]:
 
 
 @router.post("/api/repos/{owner:path}/{repo}/rules", response_model=RuleModel)
-def create_repo_rule(owner: str, repo: str, body: RuleCreate) -> RuleModel:
+def create_repo_rule(owner: str, repo: str, body: RuleCreate, request: Request) -> RuleModel:
+    _require_admin(request)
     with _open_store(owner, repo) as store:
         e = store.upsert_review_context(title=body.title, content=body.content)
         return RuleModel(
@@ -302,7 +313,10 @@ def create_repo_rule(owner: str, repo: str, body: RuleCreate) -> RuleModel:
 
 
 @router.put("/api/repos/{owner:path}/{repo}/rules/{rule_id}", response_model=RuleModel)
-def update_repo_rule(owner: str, repo: str, rule_id: int, body: RuleCreate) -> RuleModel:
+def update_repo_rule(
+    owner: str, repo: str, rule_id: int, body: RuleCreate, request: Request
+) -> RuleModel:
+    _require_admin(request)
     with _open_store(owner, repo) as store:
         existing = store.get_review_context(rule_id)
         if not existing:
@@ -319,7 +333,8 @@ def update_repo_rule(owner: str, repo: str, rule_id: int, body: RuleCreate) -> R
 
 
 @router.delete("/api/repos/{owner:path}/{repo}/rules/{rule_id}")
-def delete_repo_rule(owner: str, repo: str, rule_id: int) -> dict:
+def delete_repo_rule(owner: str, repo: str, rule_id: int, request: Request) -> dict:
+    _require_admin(request)
     with _open_store(owner, repo) as store:
         store.delete_review_context(rule_id)
         return {"ok": True}
@@ -342,7 +357,8 @@ def list_global_rules() -> list[RuleModel]:
 
 
 @router.post("/api/rules/global", response_model=RuleModel)
-def create_global_rule(body: RuleCreate) -> RuleModel:
+def create_global_rule(body: RuleCreate, request: Request) -> RuleModel:
+    _require_admin(request)
     r = _api._app_db.upsert_global_rule(title=body.title, content=body.content)
     return RuleModel(
         id=r.id,
@@ -355,7 +371,8 @@ def create_global_rule(body: RuleCreate) -> RuleModel:
 
 
 @router.put("/api/rules/global/{rule_id}", response_model=RuleModel)
-def update_global_rule(rule_id: int, body: RuleCreate) -> RuleModel:
+def update_global_rule(rule_id: int, body: RuleCreate, request: Request) -> RuleModel:
+    _require_admin(request)
     existing = _api._app_db.get_global_rule(rule_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -371,13 +388,15 @@ def update_global_rule(rule_id: int, body: RuleCreate) -> RuleModel:
 
 
 @router.delete("/api/rules/global/{rule_id}")
-def delete_global_rule(rule_id: int) -> dict:
+def delete_global_rule(rule_id: int, request: Request) -> dict:
+    _require_admin(request)
     _api._app_db.delete_global_rule(rule_id)
     return {"ok": True}
 
 
 @router.patch("/api/rules/global/{rule_id}/toggle", response_model=RuleModel)
-def toggle_global_rule(rule_id: int) -> RuleModel:
+def toggle_global_rule(rule_id: int, request: Request) -> RuleModel:
+    _require_admin(request)
     r = _api._app_db.toggle_global_rule(rule_id)
     if not r:
         raise HTTPException(status_code=404, detail="Rule not found")

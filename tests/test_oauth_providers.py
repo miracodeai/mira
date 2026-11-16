@@ -303,6 +303,16 @@ async def test_claude_drops_temperature_when_model_rejects_it(monkeypatch):
     assert len(seen) == 3  # the second call already omits temperature
 
 
+async def test_claude_omits_temperature_when_asked(monkeypatch):
+    await _add("anthropic")
+    seen = _route(monkeypatch, lambda r: httpx.Response(200, json=_CLAUDE_OK))
+    provider = AnthropicOAuthProvider(LLMConfig(model="claude-x"))
+
+    await provider.complete([{"role": "user", "content": "u"}], omit_temperature=True)
+
+    assert "temperature" not in json.loads(seen[0].content)
+
+
 async def test_claude_falls_back_to_auto_tool_choice(monkeypatch):
     await _add("anthropic")
     tool_use = {"type": "tool_use", "id": "x", "name": "custom_submit_review", "input": {"a": 1}}

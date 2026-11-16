@@ -439,6 +439,84 @@ async def _post(client: AsyncClient, event: str, payload: dict) -> dict:
 
 @patch("mira.platforms.github.webhook.load_config")
 @patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_base_branch_filtered(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(
+        filter=FilterConfig(allowed_base_branches=["main", "release/*"])
+    )
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    payload["pull_request"]["base"] = {"ref": "develop"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "ignored"
+    mock_handler.assert_not_awaited()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_base_branch_allowed(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(
+        filter=FilterConfig(allowed_base_branches=["main", "release/*"])
+    )
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    payload["pull_request"]["base"] = {"ref": "main"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_no_base_branch_policy_reviews_by_default(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig()
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    # No base ref in the payload and no policy configured → reviewed.
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_pr_opened_repo_branch_override_replaces_default(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig(
+        filter=FilterConfig(
+            allowed_base_branches=["main"],
+            allowed_base_branch_overrides={"testowner/testrepo": ["dev*"]},
+        )
+    )
+    payload = _make_pr_payload()
+    payload["sender"] = {"login": "alice"}
+    payload["pull_request"]["base"] = {"ref": "dev-feature"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
+async def test_pr_comment_review_ignores_branch_policy(
+    mock_handler: AsyncMock, mock_load_config, client: AsyncClient
+) -> None:
+    # Manual commands are never gated by the branch policy.
+    mock_load_config.return_value = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    payload = _comment_payload("@mira-bot review")
+    result = await _post(client, "issue_comment", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_opened_blocked_author_filtered(
     mock_handler: AsyncMock, mock_load_config, client: AsyncClient
 ) -> None:

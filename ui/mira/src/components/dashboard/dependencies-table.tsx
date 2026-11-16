@@ -1,9 +1,9 @@
-import { ShieldAlert, Search } from "lucide-react"
-import { useMemo, useState } from "react"
+import { ChevronRight, ShieldAlert, Search } from "lucide-react"
+import { Fragment, useMemo, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
-import type { PackageModel, VulnerabilityModel } from "@/lib/api"
+import type { PackageModel, PackageVersionModel, VulnerabilityModel } from "@/lib/api"
 
 const SEVERITY_RANK: Record<string, number> = {
   critical: 0,
@@ -46,6 +46,47 @@ function kindBadgeVariant(kind: string) {
 
 type DevFilter = "all" | "prod" | "dev"
 
+function indexedVersions(pkg: PackageModel): PackageVersionModel[] {
+  return pkg.versions?.length
+    ? pkg.versions
+    : [
+        {
+          version: pkg.version,
+          sources: [
+            { name: pkg.name, file_path: pkg.file_path, is_dev: pkg.is_dev },
+          ],
+        },
+      ]
+}
+
+function vulnerabilityKey(kind: string, name: string, version: string): string {
+  return JSON.stringify([kind, name, version])
+}
+
+function VulnerabilityBadge({ items }: { items: VulnerabilityModel[] }) {
+  if (!items.length) return null
+  const { severity } = items.reduce((highest, item) =>
+    (SEVERITY_RANK[item.severity] ?? 9) < (SEVERITY_RANK[highest.severity] ?? 9)
+      ? item
+      : highest
+  )
+  const count = new Set(items.map((item) => item.cve_id)).size
+  return (
+    <Badge
+      variant="outline"
+      className={`gap-1 text-[10px] ${SEVERITY_STYLE[severity] ?? ""}`}
+      title={items
+        .map(
+          (item) => `${item.package_version} · ${item.cve_id}: ${item.summary}`
+        )
+        .join("\n")}
+    >
+      <ShieldAlert className="h-3 w-3" />
+      {count} {severity}
+    </Badge>
+  )
+}
+
 export function DependenciesTable({
   packages,
   vulnerabilities = [],
@@ -56,27 +97,20 @@ export function DependenciesTable({
   const [query, setQuery] = useState("")
   const [activeKind, setActiveKind] = useState<string | null>(null)
   const [devFilter, setDevFilter] = useState<DevFilter>("all")
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
 
   // Group vulnerabilities by (ecosystem, package, version) for fast lookup
   // when rendering each table row.
   const vulnsByKey = useMemo(() => {
     const map = new Map<string, VulnerabilityModel[]>()
     for (const v of vulnerabilities) {
-      const key = `${v.ecosystem}::${v.package_name}::${v.package_version}`
+      const key = vulnerabilityKey(v.ecosystem, v.package_name, v.package_version)
       const list = map.get(key)
       if (list) list.push(v)
       else map.set(key, [v])
     }
     return map
   }, [vulnerabilities])
-
-  const highestSeverity = (key: string): string | null => {
-    const list = vulnsByKey.get(key)
-    if (!list || list.length === 0) return null
-    return [...list].sort(
-      (a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9),
-    )[0].severity
-  }
 
   const availableKinds = useMemo(() => {
     const kinds = new Set<string>()
@@ -85,24 +119,42 @@ export function DependenciesTable({
   }, [packages])
 
   const devCounts = useMemo(() => {
-    const prod = packages.filter((p) => !p.is_dev).length
-    return { prod, dev: packages.length - prod }
+    let prod = 0
+    let dev = 0
+    for (const pkg of packages) {
+      const sources = indexedVersions(pkg).flatMap((version) => version.sources)
+      if (sources.some((source) => !source.is_dev)) prod++
+      if (sources.some((source) => source.is_dev)) dev++
+    }
+    return { prod, dev }
   }, [packages])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return packages.filter((p) => {
-      if (activeKind && p.kind !== activeKind) return false
-      if (devFilter === "prod" && p.is_dev) return false
-      if (devFilter === "dev" && !p.is_dev) return false
-      if (!q) return true
-      return (
-        p.name.toLowerCase().includes(q) ||
-        p.version.toLowerCase().includes(q) ||
-        p.file_path.toLowerCase().includes(q)
-      )
+    return packages.flatMap((pkg) => {
+      if (activeKind && pkg.kind !== activeKind) return []
+      const matchesName = pkg.name.toLowerCase().includes(q)
+      const versions = indexedVersions(pkg).flatMap((version) => {
+        const matchesVersion =
+          matchesName || version.version.toLowerCase().includes(q)
+        const sources = version.sources.filter((source) => {
+          if (devFilter === "prod" && source.is_dev) return false
+          if (devFilter === "dev" && !source.is_dev) return false
+          return matchesVersion || source.file_path.toLowerCase().includes(q)
+        })
+        return sources.length ? [{ ...version, sources }] : []
+      })
+      return versions.length ? [{ pkg, versions }] : []
     })
   }, [packages, query, activeKind, devFilter])
+
+  const toggleExpanded = (key: string) => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (!next.delete(key)) next.add(key)
+      return next
+    })
+  }
 
   if (packages.length === 0) {
     return (
@@ -164,8 +216,8 @@ export function DependenciesTable({
           {(
             [
               ["all", "All", packages.length],
-              ["prod", "Prod", devCounts.prod],
-              ["dev", "Dev", devCounts.dev],
+              ["prod", "Has prod sources", devCounts.prod],
+              ["dev", "Has dev sources", devCounts.dev],
             ] as const
           ).map(([value, label, count]) => {
             const active = devFilter === value
@@ -213,52 +265,138 @@ export function DependenciesTable({
                 </td>
               </tr>
             ) : (
-              filtered.map((p, i) => {
-                const key = `${p.kind}::${p.name}::${p.version}`
-                const vulns = vulnsByKey.get(key) ?? []
-                const sev = highestSeverity(key)
+              filtered.map(({ pkg: p, versions }) => {
+                const key = JSON.stringify([p.kind, p.name.toLowerCase()])
+                const version = versions[0]
+                const source =
+                  version.sources.find(
+                    (item) =>
+                      item.name === p.name &&
+                      item.file_path === p.file_path &&
+                      item.is_dev === p.is_dev
+                  ) ?? version.sources[0]
+                const allDev = versions.every((entry) =>
+                  entry.sources.every((item) => item.is_dev)
+                )
+                const expandable =
+                  versions.length > 1 || version.sources.length > 1
+                const isExpanded = expanded.has(key)
+                const vulnerabilitiesFor = (entry: PackageVersionModel) =>
+                  [...new Set(entry.sources.map((item) => item.name))].flatMap(
+                    (name) =>
+                      vulnsByKey.get(
+                        vulnerabilityKey(p.kind, name, entry.version)
+                      ) ?? []
+                  )
                 return (
-                  <tr
-                    key={`${p.kind}-${p.name}-${p.file_path}-${i}`}
-                    className="border-t"
-                  >
-                    <td className="px-4 py-2.5">
-                      <Badge
-                        variant="outline"
-                        className={`text-[10px] ${kindBadgeVariant(p.kind)}`}
-                      >
-                        {KIND_LABELS[p.kind] ?? p.kind}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{p.name}</span>
-                        {p.is_dev && (
-                          <span className="text-[10px] tracking-wide text-muted-foreground">
-                            dev
-                          </span>
-                        )}
-                        {sev && (
-                          <Badge
-                            variant="outline"
-                            className={`gap-1 text-[10px] ${SEVERITY_STYLE[sev] ?? ""}`}
-                            title={vulns
-                              .map((v) => `${v.cve_id}: ${v.summary}`)
-                              .join("\n")}
+                  <Fragment key={key}>
+                    <tr className="border-t">
+                      <td className="px-4 py-2.5">
+                        <Badge
+                          variant="outline"
+                          className={`text-[10px] ${kindBadgeVariant(p.kind)}`}
+                        >
+                          {KIND_LABELS[p.kind] ?? p.kind}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{p.name}</span>
+                          {allDev && (
+                            <span className="text-[10px] tracking-wide text-muted-foreground">
+                              dev
+                            </span>
+                          )}
+                          <VulnerabilityBadge
+                            items={versions.flatMap(vulnerabilitiesFor)}
+                          />
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-xs break-all text-muted-foreground">
+                        {expandable ? (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1.5 rounded-sm text-left hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                            aria-expanded={isExpanded}
+                            onClick={() => toggleExpanded(key)}
                           >
-                            <ShieldAlert className="h-3 w-3" />
-                            {vulns.length} {sev}
-                          </Badge>
+                            <ChevronRight
+                              aria-hidden="true"
+                              className={`size-3.5 shrink-0 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                            />
+                            <span className="sr-only">
+                              {isExpanded ? "Hide" : "Show"} versions and
+                              sources for {p.name}{" "}
+                            </span>
+                            <span className="min-w-0 break-all">
+                              {version.version || "—"}
+                            </span>
+                            {versions.length > 1 && (
+                              <span className="shrink-0 text-[10px]">
+                                +{versions.length - 1}
+                              </span>
+                            )}
+                          </button>
+                        ) : (
+                          version.version || "—"
                         )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">
-                      {p.version || "—"}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-muted-foreground">
-                      {p.file_path}
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-xs break-all text-muted-foreground">
+                        {source.file_path}
+                      </td>
+                    </tr>
+                    {expandable && isExpanded && (
+                      <tr className="border-t bg-muted/20">
+                        <td colSpan={4} className="px-4 py-3">
+                          <dl className="space-y-2 text-xs">
+                            {versions.map((entry) => (
+                              <div
+                                key={entry.version}
+                                className="grid gap-1.5 sm:grid-cols-[10rem_minmax(0,1fr)] sm:gap-3"
+                              >
+                                <dt className="flex min-w-0 flex-wrap items-start gap-2 font-mono">
+                                  <span className="break-all">
+                                    {entry.version || "—"}
+                                  </span>
+                                  <VulnerabilityBadge
+                                    items={vulnerabilitiesFor(entry)}
+                                  />
+                                </dt>
+                                <dd>
+                                  <ul className="space-y-1 text-muted-foreground">
+                                    {entry.sources.map((item) => (
+                                      <li
+                                        key={JSON.stringify([
+                                          item.file_path,
+                                          item.name,
+                                          item.is_dev,
+                                        ])}
+                                        className="flex flex-wrap items-baseline gap-2"
+                                      >
+                                        <span className="font-mono break-all">
+                                          {item.file_path}
+                                        </span>
+                                        {item.name !== p.name && (
+                                          <span className="font-mono break-all">
+                                            {item.name}
+                                          </span>
+                                        )}
+                                        {item.is_dev && (
+                                          <span className="text-[10px]">
+                                            dev
+                                          </span>
+                                        )}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </dd>
+                              </div>
+                            ))}
+                          </dl>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })
             )}

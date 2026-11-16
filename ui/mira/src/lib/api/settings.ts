@@ -31,6 +31,8 @@ export type ConnectedProvider = {
   has_key: boolean
 }
 
+export type IndexingTemperature = number | "omit"
+
 // Model selection, cost estimate, and admin review-config overrides.
 export const settingsApi = {
   getLlmAccounts: () => fetchJson<LlmAccounts>("/api/llm-accounts"),
@@ -81,6 +83,9 @@ export const settingsApi = {
   getModels: () =>
     fetchJson<{
       indexing_model: string
+      indexing_temperature: IndexingTemperature
+      indexing_temperature_source: "dashboard" | "config"
+      config_indexing_temperature: IndexingTemperature
       review_model: string
       security_model: string
       backend: string
@@ -127,6 +132,7 @@ export const settingsApi = {
     security_model: string,
     review_thinking_mode: string = "off",
     api_style: string = "chat",
+    indexing_temperature?: IndexingTemperature | null,
     // Omitted fields keep their current value (dashboard setting or mira.yaml).
     extra?: Partial<{
       indexing_fallbacks: string[]
@@ -142,6 +148,7 @@ export const settingsApi = {
       security_model,
       review_thinking_mode,
       api_style,
+      indexing_temperature,
       ...extra,
     }),
 
@@ -157,13 +164,13 @@ export const settingsApi = {
   getGlobalSettings: () =>
     fetchJson<{
       overrides: {
-        filter?: Record<string, number | boolean | string>
-        review?: Record<string, number | boolean | string>
+        filter?: Record<string, number | boolean | string | string[]>
+        review?: Record<string, number | boolean | string | string[]>
       }
       effective: Record<string, unknown>
     }>("/api/admin/settings"),
 
   saveGlobalSettings: (
-    overrides: Record<string, Record<string, number | boolean | string>>
+    overrides: Record<string, Record<string, number | boolean | string | string[]>>
   ) => putJson<{ ok: boolean }>("/api/admin/settings", { overrides }),
 }

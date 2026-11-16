@@ -6,8 +6,9 @@ import logging
 
 from mira.llm.prompts.verify_fixes import build_verify_fixes_prompt, parse_verify_fixes_response
 from mira.llm.provider import LLMProvider
-from mira.models import PRInfo, ThreadDecision, UnresolvedThread
+from mira.models import PRInfo, Severity, ThreadDecision, UnresolvedThread
 from mira.providers.base import BaseProvider
+from mira.providers.formatting import parse_bot_comment_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,29 @@ def short_thread_description(body: str) -> str:
             return s.strip("* ")[:160]
         return s[:160]
     return ""
+
+
+def thread_severity(body: str) -> Severity | None:
+    """Severity of a bot review comment, read back from its posted badge line.
+
+    Returns None when the body carries no recognisable badge (a hand-edited or
+    pre-badge comment), so callers can leave such threads out of a count
+    rather than guess.
+    """
+    label = parse_bot_comment_metadata(body or "").get("severity", "")
+    if not label:
+        return None
+    return Severity.from_str(label)
+
+
+def thread_title(body: str) -> str:
+    """Title of a bot review comment: the bold line after its category and badge.
+
+    Falls back to ``short_thread_description`` for a body without the badge
+    layout.
+    """
+    title = parse_bot_comment_metadata(body or "").get("title", "")
+    return title or short_thread_description(body)
 
 
 def _number_lines(content: str) -> str:

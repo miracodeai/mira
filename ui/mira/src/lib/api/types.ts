@@ -29,6 +29,11 @@ export interface FileModel {
   loc?: number
 }
 
+export interface BaseBranchPolicy {
+  mode: "inherit" | "override" | "disable"
+  branches: string[]
+}
+
 export interface RepoDetail {
   owner: string
   repo: string
@@ -39,6 +44,7 @@ export interface RepoDetail {
   external_refs_count: number
   lines_count: number
   last_indexed: string | null
+  base_branch_policy?: BaseBranchPolicy | null
 }
 
 export interface ImportEdge {
@@ -63,12 +69,18 @@ export interface ExternalRefModel {
   description: string
 }
 
+export interface PackageVersionModel {
+  version: string
+  sources: { name: string; file_path: string; is_dev: boolean }[]
+}
+
 export interface PackageModel {
   name: string
   kind: string
   version: string
   file_path: string
   is_dev: boolean
+  versions?: PackageVersionModel[]
 }
 
 export interface PackageSearchHit {

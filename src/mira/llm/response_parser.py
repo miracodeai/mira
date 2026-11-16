@@ -8,7 +8,6 @@ import re
 
 from pydantic import BaseModel, Field, ValidationError
 
-from mira.core.context import extract_hunk_lines
 from mira.exceptions import ResponseParseError
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.models import (
@@ -102,12 +101,38 @@ def _repair_json(text: str) -> str:
 
 
 def loads_lenient(text: str) -> object | None:
-    """Parse JSON, repairing leaked tool-call XML / missing braces. None on failure."""
+    """Parse JSON, repairing leaked tool-call XML / missing braces. None on failure.
+
+    As a last resort the first complete JSON value in the text is taken: some
+    hosts hand back tool arguments with reasoning or tool-call markup leaked
+    *after* a well-formed object (``{...}</think> <｜DSML｜ calls>…``), which
+    is a complete answer with junk behind it, not a broken one.
+    """
     for candidate in (text, _repair_json(text)):
         try:
             return json.loads(candidate, strict=False)
         except (json.JSONDecodeError, TypeError):
             continue
+    return _first_json_value(text)
+
+
+def _first_json_value(text: str, max_starts: int = 20) -> object | None:
+    """The first complete JSON object or array in ``text``, ignoring what follows."""
+    if not isinstance(text, str):
+        return None
+    decoder = json.JSONDecoder(strict=False)
+    starts = 0
+    for i, ch in enumerate(text):
+        if ch not in "{[":
+            continue
+        starts += 1
+        if starts > max_starts:
+            break
+        try:
+            value, _ = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue
+        return value
     return None
 
 
@@ -171,6 +196,62 @@ def _snap_to_diff(line: int, ranges: list[tuple[int, int]]) -> int | None:
     return best
 
 
+_WS_RE = re.compile(r"\s+")
+# A quoted line this short (after stripping) is too generic — `}`, `end`,
+# `return` — to count as locating the citation on its own.
+_MIN_ANCHOR_LINE_CHARS = 12
+
+
+def _squash_ws(text: str) -> str:
+    return _WS_RE.sub(" ", text).strip()
+
+
+def _hunk_views(file_diff: FileDiff) -> tuple[str, str, str]:
+    """Three readings of a file's hunks: interleaved, new-file side, old-file side.
+
+    Models quote code as it reads in the *new* file (context + added lines),
+    which is not a contiguous substring of the raw hunk whenever a removed
+    line sits between them; reviewers of a deletion quote the old side.
+    """
+    full: list[str] = []
+    target: list[str] = []
+    source: list[str] = []
+    for hunk in file_diff.hunks:
+        for line in hunk.content.splitlines():
+            if line.startswith("@@"):
+                continue
+            marker = line[0] if line else " "
+            body = line[1:] if line and marker in ("+", "-", " ") else line
+            full.append(body)
+            if marker != "-":
+                target.append(body)
+            if marker != "+":
+                source.append(body)
+    return "\n".join(full), "\n".join(target), "\n".join(source)
+
+
+def citation_in_hunks(existing_code: str, views: tuple[str, str, str]) -> bool:
+    """Whether a quoted ``existing_code`` snippet is locatable in the diff.
+
+    Exact substring first, then whitespace-insensitive, on each view; as a
+    last resort every substantive quoted line must appear verbatim (the
+    quote skipped blank lines or a removed line in the middle).
+    """
+    quote = (existing_code or "").strip()
+    if not quote:
+        return True
+    for view in views:
+        if quote in view:
+            return True
+    squashed = _squash_ws(quote)
+    if squashed and any(squashed in _squash_ws(view) for view in views):
+        return True
+    hunk_lines = {ln.strip() for ln in views[0].splitlines() if ln.strip()}
+    quoted = [ln.strip() for ln in quote.splitlines() if ln.strip()]
+    anchors = [ln for ln in quoted if len(ln) >= _MIN_ANCHOR_LINE_CHARS]
+    return bool(anchors) and all(ln in hunk_lines for ln in anchors)
+
+
 def convert_to_review_comments(
     response: LLMReviewResponse,
     valid_paths: set[str] | None = None,
@@ -179,11 +260,14 @@ def convert_to_review_comments(
     """Convert LLM response comments to ReviewComment models.
 
     Filters out comments with hallucinated file paths if valid_paths is provided.
-    When diff_files is given, validates existing_code against actual hunk content,
-    checks for no-op suggestions, and ensures line numbers are within diff ranges.
+    When diff_files is given, ensures line numbers are within diff ranges and
+    checks ``existing_code`` against the hunks: a quote that cannot be located
+    is cleared (along with any suggestion anchored on it) rather than taking
+    the finding down with it — the line number and body are still valid, and
+    self-critique grades the claim against the real hunk.
     """
-    hunk_index: dict[str, str] = (
-        {f.path: extract_hunk_lines(f) for f in diff_files} if diff_files else {}
+    views_index: dict[str, tuple[str, str, str]] = (
+        {f.path: _hunk_views(f) for f in diff_files} if diff_files else {}
     )
     diff_ranges: dict[str, list[tuple[int, int]]] = (
         _build_diff_line_ranges(diff_files) if diff_files else {}
@@ -210,14 +294,22 @@ def convert_to_review_comments(
         if c.suggestion and not c.body.strip():
             continue
 
-        # Drop hallucinated citations (present existing_code that isn't in the diff).
-        if hunk_index and c.existing_code:
-            hunk_text = hunk_index.get(c.path, "")
-            if c.existing_code.strip() not in hunk_text:
-                continue
-
+        existing_code = c.existing_code or ""
         suggestion = c.suggestion
-        if suggestion and c.existing_code and suggestion.strip() == c.existing_code.strip():
+        if (
+            views_index
+            and existing_code
+            and not citation_in_hunks(existing_code, views_index.get(c.path, ("", "", "")))
+        ):
+            logger.debug(
+                "Citation for %s:%d not found in diff; keeping comment without it",
+                c.path,
+                c.line,
+            )
+            existing_code = ""
+            suggestion = None
+
+        if suggestion and existing_code and suggestion.strip() == existing_code.strip():
             suggestion = None
 
         result.append(
@@ -232,7 +324,7 @@ def convert_to_review_comments(
                 confidence=c.confidence,
                 suggestion=suggestion,
                 agent_prompt=c.agent_prompt,
-                existing_code=c.existing_code,
+                existing_code=existing_code,
             )
         )
 

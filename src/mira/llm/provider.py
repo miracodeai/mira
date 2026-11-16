@@ -14,11 +14,12 @@ from typing import ClassVar
 
 import httpx
 
-from mira.exceptions import LLMError
+from mira.exceptions import LLMError, NonRetriableLLMError, StructuredOutputError
 from mira.llm.base import (
     OpenAICompatibleProvider,
     _strip_model_prefix,
 )
+from mira.llm.prompt_cache import apply_cache_control, caching_enabled
 from mira.llm.utils import _ensure_json_hint
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,11 @@ class LLMProvider(OpenAICompatibleProvider):
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
 
+    def _apply_prompt_caching(self, body: dict, *, conversation: bool = False) -> None:
+        """Add Anthropic cache breakpoints when this endpoint and model support them."""
+        if caching_enabled(self.config, self.profile, body["model"]):
+            apply_cache_control(body, conversation=conversation)
+
     async def _call_llm(
         self,
         model: str,
@@ -44,6 +50,8 @@ class LLMProvider(OpenAICompatibleProvider):
         json_mode: bool,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         """Make a single LLM call with retries against the /chat/completions endpoint.
 
@@ -65,7 +73,11 @@ class LLMProvider(OpenAICompatibleProvider):
             body["response_format"] = {"type": "json_object"}
             # Copied container — caller-owned ``messages`` stay untouched.
             body["messages"] = _ensure_json_hint(messages)
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
+        self._apply_prompt_caching(body)
+        if omit_temperature:
+            body.pop("temperature", None)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
@@ -73,11 +85,63 @@ class LLMProvider(OpenAICompatibleProvider):
                 headers=self._build_headers(),
                 json=body,
             )
+            if (
+                resp.status_code == 400
+                and self._has_reasoning(body)
+                and "reasoning" in resp.text.lower()
+            ):
+                self._drop_rejected_reasoning(body, body["model"])
+                if omit_temperature:
+                    body.pop("temperature", None)
+                else:
+                    body["temperature"] = (
+                        temperature if temperature is not None else self.config.temperature
+                    )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            # Twice: the limit the error names, then the floor if that is refused too.
+            for _ in range(2):
+                if resp.status_code != 400 or not self._lower_rejected_budget(body, resp.text):
+                    break
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
+            # A caller that set its own budget asked for a short answer; only
+            # the config default is raised when the model ran out of room.
+            retry_body = self._budget_exhausted_retry(body, data) if max_tokens is None else None
+            if retry_body is not None:
+                if omit_temperature:
+                    retry_body.pop("temperature", None)
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
-        return data["choices"][0]["message"].get("content") or ""
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message.get("content") or ""
+        if not content.strip():
+            refusal = message.get("refusal")
+            if (isinstance(refusal, str) and refusal) or choice.get(
+                "finish_reason"
+            ) == "content_filter":
+                raise NonRetriableLLMError("completion_blocked", protocol="chat")
+            finish_reason = choice.get("finish_reason")
+            if finish_reason not in (
+                "stop",
+                "length",
+                "tool_calls",
+                "function_call",
+                "content_filter",
+            ):
+                finish_reason = "other"
+            raise LLMError(
+                "empty_response",
+                detail=f"protocol=chat status={resp.status_code} finish_reason={finish_reason} content_len={len(content)}",
+            )
+        return content
 
     async def _call_llm_with_tools(
         self,
@@ -85,18 +149,21 @@ class LLMProvider(OpenAICompatibleProvider):
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
         """Make an LLM call with tool/function calling and retries.
 
         The LLM returns structured data by 'calling' a tool. We extract the
-        tool arguments as the JSON response.
+        tool arguments as the JSON response. ``force_tool`` forces a named
+        tool and rejects prose with ``StructuredOutputError``.
         """
         api_model = _strip_model_prefix(model, self.config.base_url)
         if not tools:
             raise LLMError("no_tools")
+        forced_tool_name = force_tool or tools[0]["function"]["name"]
         forced_choice: dict | str = {
             "type": "function",
-            "function": {"name": tools[0]["function"]["name"]},
+            "function": {"name": forced_tool_name},
         }
         body: dict = {
             "model": api_model,
@@ -108,7 +175,9 @@ class LLMProvider(OpenAICompatibleProvider):
             "temperature": temperature if temperature is not None else self.config.temperature,
             self._max_tokens_field(): self.config.max_tokens,
         }
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
+        self._apply_prompt_caching(body)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             started = time.monotonic()
@@ -148,29 +217,53 @@ class LLMProvider(OpenAICompatibleProvider):
                 and self._has_reasoning(body)
                 and "reasoning" in resp.text.lower()
             ):
-                # Reasoning effort unsupported on this model/endpoint — drop it
-                # and review without thinking instead of failing the review.
-                # Re-apply the provider's explicit off payload where one exists
-                # (DeepSeek), so removing the field doesn't leave default-on
-                # thinking in place.
-                logger.info("Model %s rejected reasoning effort; retrying without it", api_model)
-                self._no_reasoning.add(api_model)
-                self._remove_reasoning(body)
-                self._apply_reasoning_off(body)
+                # Reasoning unsupported on this model/endpoint — strip what was
+                # refused and review without thinking instead of failing.
+                self._drop_rejected_reasoning(body, api_model)
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
                 resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            # Twice: the limit the error names, then the floor if that is refused too.
+            for _ in range(2):
+                if resp.status_code != 400 or not self._lower_rejected_budget(body, resp.text):
+                    break
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
+            retry_body = self._budget_exhausted_retry(body, data)
+            if retry_body is not None:
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
 
         choice = data["choices"][0]
         message = choice["message"]
-        tool_calls = message.get("tool_calls")
+        tool_calls = message.get("tool_calls") or []
 
-        if tool_calls and len(tool_calls) > 0:
+        if force_tool:
+            matching = [
+                call
+                for call in tool_calls
+                if (call.get("function") or {}).get("name") == force_tool
+            ]
+            if matching:
+                return (matching[0].get("function") or {}).get("arguments") or ""
+            content = message.get("content") or ""
+            excerpt = " ".join(content.split())[:300]
+            raise StructuredOutputError(
+                "structured_output",
+                model=api_model,
+                tool=force_tool,
+                excerpt=excerpt or "(empty response)",
+            )
+
+        if tool_calls:
             return tool_calls[0]["function"]["arguments"]
 
         # Fallback: if the model returned content instead of a tool call,
@@ -218,7 +311,9 @@ class LLMProvider(OpenAICompatibleProvider):
             "temperature": temperature if temperature is not None else self.config.temperature,
             self._max_tokens_field(): self.config.max_tokens,
         }
+        self._cap_output_budget(body)
         self._apply_reasoning(body)
+        self._apply_prompt_caching(body, conversation=True)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             resp = await client.post(
@@ -226,8 +321,35 @@ class LLMProvider(OpenAICompatibleProvider):
                 headers=self._build_headers(),
                 json=body,
             )
+            if (
+                resp.status_code == 400
+                and self._has_reasoning(body)
+                and "reasoning" in resp.text.lower()
+            ):
+                self._drop_rejected_reasoning(body, body["model"])
+                body["temperature"] = (
+                    temperature if temperature is not None else self.config.temperature
+                )
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
+            # Twice: the limit the error names, then the floor if that is refused too.
+            for _ in range(2):
+                if resp.status_code != 400 or not self._lower_rejected_budget(body, resp.text):
+                    break
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             self._handle_error(resp)
             data = resp.json()
+            retry_body = self._budget_exhausted_retry(body, data)
+            if retry_body is not None:
+                self._account_usage(data)
+                resp = await client.post(
+                    self._chat_url(), headers=self._build_headers(), json=retry_body
+                )
+                self._handle_error(resp)
+                data = resp.json()
 
         self._account_usage(data)
-        return data["choices"][0]["message"]
+        choice = data["choices"][0]
+        message = dict(choice["message"])
+        if choice.get("finish_reason"):
+            message["finish_reason"] = choice["finish_reason"]
+        return message

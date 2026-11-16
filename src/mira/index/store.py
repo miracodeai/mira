@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from mira.index._package_search import PackageGroups, matching_sqlite_packages
 from mira.index._store_shared import _StoreSharedMixin
@@ -21,6 +23,12 @@ logger = logging.getLogger(__name__)
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS index_runs (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    token TEXT NOT NULL,
+    pending INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
     language TEXT NOT NULL DEFAULT '',
@@ -185,7 +193,8 @@ CREATE TABLE IF NOT EXISTS package_manifests (
     file_path TEXT NOT NULL DEFAULT '',
     is_dev INTEGER NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0,
-    UNIQUE(name, kind, file_path)
+    scan_eligible INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(name, kind, version, file_path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pkg_manifest_name ON package_manifests(name);
@@ -351,6 +360,7 @@ class PackageManifestRow:
     file_path: str
     is_dev: bool = False
     updated_at: float = 0.0
+    scan_eligible: bool = True
 
 
 @dataclass
@@ -376,11 +386,46 @@ class BlastRadiusEntry:
     depth: int
 
 
+def _manifest_packages_for_write(
+    file_path: str, packages: list[dict], *, replace_order: bool = False
+) -> list[dict]:
+    """Retain npm lockfile versions and preserve last-value semantics elsewhere."""
+    npm_lockfile = file_path.rsplit("/", 1)[-1] == "package-lock.json"
+    rows: dict[tuple[str, str, str], dict] = {}
+    for pkg in packages:
+        if pkg["file_path"] != file_path:
+            raise ValueError("Manifest package belongs to a different file")
+        kind = pkg["kind"]
+        keep_versions = npm_lockfile and kind == "npm"
+        version = pkg["version"] if keep_versions else ""
+        key = (kind, pkg["name"], version)
+        previous = rows.pop(key, None) if replace_order or keep_versions else rows.get(key)
+        if version and previous is not None and previous.get("scan_eligible", True):
+            pkg = {**pkg, "scan_eligible": True}
+        rows[key] = pkg
+    return list(rows.values())
+
+
+class ManifestPackageMigrationError(RuntimeError):
+    """Package identity validation or migration could not complete safely."""
+
+
+@dataclass(frozen=True)
+class IndexRun:
+    token: str
+    needs_reconciliation: bool
+
+
+class IndexingSuperseded(Exception):
+    """A newer indexing run owns this repository."""
+
+
 class IndexStore(_StoreSharedMixin):
     """SQLite-backed index for a single repository."""
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
+        self._index_write_active = False
         self._conn = sqlite3.connect(db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -415,9 +460,122 @@ class IndexStore(_StoreSharedMixin):
                 "ALTER TABLE learned_rules ADD COLUMN created_by TEXT NOT NULL DEFAULT ''"
             )
         self._conn.commit()
+        try:
+            self._migrate_manifest_package_version_identity()
+        except Exception as exc:
+            self._conn.close()
+            if isinstance(exc, ManifestPackageMigrationError):
+                raise
+            raise ManifestPackageMigrationError(
+                f"Package manifest migration failed: {exc}"
+            ) from exc
+
+    def _migrate_manifest_package_version_identity(self) -> None:
+        def has_legacy_identity(table: str, *, allow_legacy: bool = True) -> bool:
+            legacy = ("name", "kind", "file_path")
+            current = ("name", "kind", "version", "file_path")
+            expected = {legacy, current} if allow_legacy else {current}
+            identities: set[tuple] = set()
+            indexes = self._conn.execute("SELECT * FROM pragma_index_list(?)", (table,)).fetchall()
+            for index in indexes:
+                if not index[2]:
+                    continue
+                keys = self._conn.execute(
+                    'SELECT name, coll FROM pragma_index_xinfo(?) WHERE "key"=1 ORDER BY seqno',
+                    (index[1],),
+                ).fetchall()
+                columns = tuple(row[0] for row in keys)
+                if index[3] == "pk" and columns == ("id",):
+                    continue
+                if (
+                    index[3] != "u"
+                    or index[4]
+                    or columns not in expected
+                    or any(collation != "BINARY" for _, collation in keys)
+                ):
+                    raise ManifestPackageMigrationError("Unsupported package manifest uniqueness")
+                identities.add(columns)
+            if not identities:
+                raise ManifestPackageMigrationError("Unsupported package manifest identity schema")
+            return legacy in identities
+
+        if not has_legacy_identity("package_manifests"):
+            return
+        if self._conn.in_transaction:
+            raise ManifestPackageMigrationError(
+                "Package manifest migration must run outside a transaction"
+            )
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                if not has_legacy_identity("package_manifests"):
+                    return
+                schema = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='package_manifests'"
+                ).fetchone()[0]
+                schema, count = re.subn(
+                    r"UNIQUE\s*\(\s*name\s*,\s*kind\s*,\s*file_path\s*\)",
+                    "UNIQUE(name, kind, version, file_path)",
+                    schema,
+                    flags=re.IGNORECASE,
+                )
+                if count != 1:
+                    raise ManifestPackageMigrationError(
+                        "Unsupported package manifest identity schema"
+                    )
+                schema, count = re.subn(
+                    r'^(CREATE TABLE\s+)(?:"package_manifests"|package_manifests)(?=\s*\()',
+                    r"\1package_manifests_version_identity",
+                    schema,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                if count != 1:
+                    raise ManifestPackageMigrationError("Unsupported package manifest table schema")
+                objects = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE tbl_name='package_manifests' "
+                    "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+                ).fetchall()
+                sequence = self._conn.execute(
+                    "SELECT seq FROM sqlite_sequence WHERE name='package_manifests'"
+                ).fetchone()
+                self._conn.execute(schema)
+                has_legacy_identity("package_manifests_version_identity", allow_legacy=False)
+                self._conn.execute(
+                    "INSERT INTO package_manifests_version_identity SELECT * FROM package_manifests"
+                )
+                self._conn.execute("DROP TABLE package_manifests")
+                self._conn.execute(
+                    "ALTER TABLE package_manifests_version_identity RENAME TO package_manifests"
+                )
+                self._conn.execute(
+                    "ALTER TABLE package_manifests ADD COLUMN scan_eligible "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+                for (sql,) in objects:
+                    self._conn.execute(sql)
+                if sequence is not None:
+                    updated = self._conn.execute(
+                        "UPDATE sqlite_sequence SET seq=MAX(seq, ?) WHERE name='package_manifests'",
+                        sequence,
+                    )
+                    if not updated.rowcount:
+                        self._conn.execute(
+                            "INSERT INTO sqlite_sequence(name, seq) VALUES ('package_manifests', ?)",
+                            sequence,
+                        )
+                if self._conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise ManifestPackageMigrationError(
+                        "Package manifest migration violates foreign keys"
+                    )
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
 
     @classmethod
-    def open(cls, owner: str, repo: str, platform: str = "github"):  # type: ignore[no-untyped-def]
+    def open(  # type: ignore[no-untyped-def]
+        cls, owner: str, repo: str, platform: str = "github", *, allow_fallback: bool = True
+    ):
         """Open (or create) the index store for a repo.
 
         Returns a PgIndexStore if DATABASE_URL is set, otherwise an IndexStore
@@ -432,7 +590,11 @@ class IndexStore(_StoreSharedMixin):
                 from mira.index.pg_store import PgIndexStore
 
                 return PgIndexStore(key_owner, repo, db_url)
+            except ManifestPackageMigrationError:
+                raise
             except Exception as exc:
+                if not allow_fallback:
+                    raise
                 logger.warning("Postgres store unavailable (%s), falling back to SQLite", exc)
 
         index_dir = os.environ.get("MIRA_INDEX_DIR", _INDEX_DIR)
@@ -440,6 +602,45 @@ class IndexStore(_StoreSharedMixin):
         os.makedirs(repo_dir, exist_ok=True)
         db_path = os.path.join(repo_dir, f"{repo}.db")
         return cls(db_path)
+
+    def claim_index_run(self) -> IndexRun:
+        """Persist a new owner before acquiring any index input."""
+        if self._conn.in_transaction:
+            raise RuntimeError("Cannot claim an index run inside another transaction")
+        token = uuid4().hex
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            previous = self._conn.execute("SELECT pending FROM index_runs WHERE id=1").fetchone()
+            self._conn.execute(
+                "INSERT INTO index_runs (id, token, pending) VALUES (1, ?, 1) "
+                "ON CONFLICT(id) DO UPDATE SET token=excluded.token, pending=1",
+                (token,),
+            )
+        return IndexRun(token, bool(previous and previous[0]))
+
+    @contextmanager
+    def index_write(self, run: IndexRun) -> Iterator[None]:
+        """Hold ownership and publish a synchronous batch in one transaction."""
+        if self._conn.in_transaction:
+            raise RuntimeError("Nested index write")
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute("SELECT token FROM index_runs WHERE id=1").fetchone()
+            if row != (run.token,):
+                raise IndexingSuperseded
+            self._index_write_active = True
+            try:
+                yield
+            finally:
+                self._index_write_active = False
+
+    def finish_index_run(self, run: IndexRun) -> None:
+        with self.index_write(run):
+            self._conn.execute("UPDATE index_runs SET pending=0 WHERE id=1")
+
+    def _commit_index_write(self) -> None:
+        if not self._index_write_active:
+            self._conn.commit()
 
     def get_summary(self, path: str) -> FileSummary | None:
         """Get the summary for a single file."""
@@ -537,7 +738,7 @@ class IndexStore(_StoreSharedMixin):
                 "VALUES (?, ?, ?, ?)",
                 (summary.path, ref.kind, ref.target, ref.description),
             )
-        self._conn.commit()
+        self._commit_index_write()
 
     def upsert_directory(self, summary: DirectorySummary) -> None:
         """Insert or update a directory summary."""
@@ -551,13 +752,13 @@ class IndexStore(_StoreSharedMixin):
                  updated_at=excluded.updated_at""",
             (summary.path, summary.summary, summary.file_count, now),
         )
-        self._conn.commit()
+        self._commit_index_write()
 
     def remove_paths(self, paths: list[str]) -> None:
         """Remove files (and their symbols/imports via CASCADE) from the index."""
         for path in paths:
             self._conn.execute("DELETE FROM files WHERE path = ?", (path,))
-        self._conn.commit()
+        self._commit_index_write()
 
     def all_paths(self) -> set[str]:
         """Return all indexed file paths."""
@@ -1301,6 +1502,13 @@ class IndexStore(_StoreSharedMixin):
         if existing:
             # Keep the existing approval status — re-synthesis (more samples)
             # must never silently re-activate a rejected rule or auto-approve.
+            if existing[1] == "rejected":
+                # An admin rejected this rule: leave their decision, and the
+                # text they rejected, untouched rather than re-describing it
+                # under the same verdict.
+                rejected = self.get_learned_rule(existing[0])
+                if rejected is not None:
+                    return rejected
             self._conn.execute(
                 "UPDATE learned_rules SET rule_text = ?, source_signal = ?, "
                 "sample_count = ?, updated_at = ? WHERE id = ?",
@@ -1462,34 +1670,35 @@ class IndexStore(_StoreSharedMixin):
         to exactly mirror the file. Returns the number of rows inserted.
         """
         now = time.time()
-        self._conn.execute(
-            "DELETE FROM package_manifests WHERE file_path = ?",
-            (file_path,),
-        )
-        if packages:
-            rows = [
-                (
-                    p["name"],
-                    p["kind"],
-                    p["version"],
-                    p["file_path"],
-                    1 if p.get("is_dev") else 0,
-                    now,
-                )
-                for p in packages
-            ]
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO package_manifests "
-                "(name, kind, version, file_path, is_dev, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                rows,
+        rows = [
+            (
+                p["name"],
+                p["kind"],
+                p["version"],
+                file_path,
+                int(bool(p.get("is_dev"))),
+                now,
+                int(p.get("scan_eligible", True)),
             )
-        self._conn.commit()
+            for p in _manifest_packages_for_write(file_path, packages, replace_order=True)
+        ]
+        with nullcontext() if self._index_write_active else self._conn:
+            self._conn.execute(
+                "DELETE FROM package_manifests WHERE file_path = ?",
+                (file_path,),
+            )
+            if rows:
+                self._conn.executemany(
+                    "INSERT INTO package_manifests "
+                    "(name, kind, version, file_path, is_dev, updated_at, scan_eligible) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
         return len(packages)
 
     def list_manifest_packages(self) -> list[PackageManifestRow]:
         rows = self._conn.execute(
-            "SELECT id, name, kind, version, file_path, is_dev, updated_at "
+            "SELECT id, name, kind, version, file_path, is_dev, updated_at, scan_eligible "
             "FROM package_manifests ORDER BY name COLLATE NOCASE"
         ).fetchall()
         return [
@@ -1501,6 +1710,7 @@ class IndexStore(_StoreSharedMixin):
                 file_path=r[4],
                 is_dev=bool(r[5]),
                 updated_at=r[6],
+                scan_eligible=bool(r[7]),
             )
             for r in rows
         ]
@@ -1524,7 +1734,7 @@ class IndexStore(_StoreSharedMixin):
             "DELETE FROM package_manifests WHERE file_path = ?",
             [(p,) for p in stale],
         )
-        self._conn.commit()
+        self._commit_index_write()
         return len(stale)
 
     def replace_vulnerabilities_for_package(

@@ -80,8 +80,14 @@ class ModelChain:
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
-        return await self._run(lambda p: p.complete(messages, json_mode, temperature, max_tokens))
+        return await self._run(
+            lambda p: p.complete(
+                messages, json_mode, temperature, max_tokens, omit_temperature=omit_temperature
+            )
+        )
 
     async def complete_with_tools(
         self,
@@ -107,7 +113,10 @@ def create_llm(config: LLMConfig) -> LLMProviderProtocol:
     """Create the provider for config.model, wrapped in a ModelChain when fallbacks are set."""
     extra = [config.fallback_model] if config.fallback_model else []
     models = list(dict.fromkeys([config.model, *config.fallback_models, *extra]))
-    if len(models) == 1:
+    # A lone `fallback_model` keeps its provider-level rules (a 4xx is not retried on the
+    # fallback); only model ids a single provider cannot route need the chain.
+    routed = any(m.startswith((*SUBSCRIPTION_PREFIXES, "@")) for m in models)
+    if len(models) == 1 or (not config.fallback_models and not routed):
         return _create_one(config)
     single: dict[str, Any] = {"fallback_model": None, "fallback_models": []}
     chain_models, providers = [], []

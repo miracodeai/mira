@@ -76,6 +76,26 @@ class TestCodexConfigValidation:
             LLMConfig(provider="codex-cli", codex_timeout_seconds=0)
 
 
+class TestIndexingTemperature:
+    @pytest.mark.parametrize(
+        "value", [-1, float("nan"), float("inf"), True, False, None, "0.4", "off", {}]
+    )
+    def test_invalid_policy_rejected(self, value):
+        from mira.config import LLMConfig
+
+        with pytest.raises(ValueError):
+            LLMConfig(indexing_temperature=value)
+
+    @pytest.mark.parametrize("value", [0, 0.4, 3, "omit"])
+    def test_policy_does_not_change_global_temperature_or_effort(self, value):
+        from mira.config import LLMConfig
+
+        config = LLMConfig(indexing_temperature=value, reasoning_effort="low")
+        assert config.indexing_temperature == value
+        assert config.temperature == 0.2
+        assert config.reasoning_effort == "low"
+
+
 class TestLoadConfig:
     def test_default_config(self):
         config = load_config()

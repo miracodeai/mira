@@ -48,19 +48,28 @@ class TestGetReviewThinkingMode:
         cfg = LLMConfig(review_reasoning_effort="medium")
         assert get_review_thinking_mode(cfg, None) == "medium"
 
-    def test_default_is_none(self):
-        assert get_review_thinking_mode(LLMConfig(), None) is None
+    def test_default_is_medium(self):
+        # The published benchmark's setting; "off" has to be chosen.
+        assert get_review_thinking_mode(LLMConfig(), None) == "medium"
 
     @pytest.mark.parametrize("value", ["off", ""])
-    def test_off_and_empty_normalize_to_none(self, value: str):
-        assert get_review_thinking_mode(LLMConfig(), value) is None
+    def test_db_off_is_explicit_and_empty_falls_through(self, value: str):
+        expected = None if value == "off" else "medium"
+        assert get_review_thinking_mode(LLMConfig(), value) == expected
 
-    @pytest.mark.parametrize("db_value", ["off", "", None])
-    def test_off_db_value_does_not_shadow_config(self, db_value: str | None):
-        # Saving the models form always writes "off" by default; that must not
-        # permanently disable a mira.yaml-level reasoning effort.
+    def test_config_off_turns_thinking_off(self):
+        assert get_review_thinking_mode(LLMConfig(review_reasoning_effort="off"), None) is None
+
+    @pytest.mark.parametrize("db_value", ["", None])
+    def test_unset_db_value_does_not_shadow_config(self, db_value: str | None):
         cfg = LLMConfig(review_reasoning_effort="high")
         assert get_review_thinking_mode(cfg, db_value) == "high"
+
+    def test_db_off_wins_over_config(self):
+        # The models form shows the resolved mode and round-trips it, so a
+        # stored "off" is the admin's explicit choice.
+        cfg = LLMConfig(review_reasoning_effort="high")
+        assert get_review_thinking_mode(cfg, "off") is None
 
 
 class TestLLMConfigFor:
@@ -74,9 +83,13 @@ class TestLLMConfigFor:
         resolved = llm_config_for("indexing", LLMConfig())
         assert resolved.reasoning_effort is None
 
-    def test_review_default_off_is_none(self, in_memory_db: AppDatabase):
+    def test_review_default_is_medium(self, in_memory_db: AppDatabase):
         resolved = llm_config_for("review", LLMConfig())
-        assert resolved.reasoning_effort is None
+        assert resolved.reasoning_effort == "medium"
+
+    def test_security_pass_shares_the_review_thinking_mode(self, in_memory_db: AppDatabase):
+        resolved = llm_config_for("security", LLMConfig())
+        assert resolved.reasoning_effort == "medium"
 
 
 class TestSetModelsThinkingValidation:
@@ -108,18 +121,17 @@ class TestSetModelsThinkingValidation:
         assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_thinking_mode") == "xhigh"
 
-    def test_off_clears_setting_so_config_can_win(self, in_memory_db: AppDatabase):
-        # "off" must not be persisted as a literal — it'd shadow a mira.yaml
-        # override. It's stored as "" (the column is NOT NULL) and reads as unset.
+    def test_off_is_persisted_and_wins_over_config(self, in_memory_db: AppDatabase):
+        # The form shows the resolved mode, so "off" coming back is the admin's
+        # choice: it is stored as-is and beats both the config and the default.
         body = ModelsUpdate(
             indexing_model="anthropic/claude-haiku-4-5",
             review_model="anthropic/claude-sonnet-4-6",
             review_thinking_mode="off",
         )
         assert set_models(body, _admin_req()) == {"ok": True}
-        assert in_memory_db.get_setting("review_thinking_mode") == ""
+        assert in_memory_db.get_setting("review_thinking_mode") == "off"
         cfg = LLMConfig(review_reasoning_effort="high")
         assert (
-            get_review_thinking_mode(cfg, in_memory_db.get_setting("review_thinking_mode"))
-            == "high"
+            get_review_thinking_mode(cfg, in_memory_db.get_setting("review_thinking_mode")) is None
         )
