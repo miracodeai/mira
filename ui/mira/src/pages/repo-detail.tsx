@@ -26,7 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
 import { api, type BaseBranchPolicy, type ReviewContextModel } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { splitRepoKey } from "@/lib/repo-key"
 
@@ -136,6 +136,7 @@ function RepoDetailPageContent({
 
   const [indexing, setIndexing] = useState(false)
   const [indexStatus, setIndexStatus] = useState("")
+  const [cancelling, setCancelling] = useState(false)
 
   // Auto-review destination-branch policy for this repo.
   const [policy, setPolicy] = useState<BaseBranchPolicy | null>(null)
@@ -150,16 +151,20 @@ function RepoDetailPageContent({
 
   // Keyed by owner/repo: a late response for a previous repo must not
   // populate the form, and navigating repos resets the draft.
-  useEffect(() => {
-    if (!owner || !repo) return
-    let cancelled = false
-    currentRepoRef.current = `${owner}/${repo}`
+  const [policyRepo, setPolicyRepo] = useState(`${owner}/${repo}`)
+  if (policyRepo !== `${owner}/${repo}`) {
+    setPolicyRepo(`${owner}/${repo}`)
     setPolicy(null)
     setPolicyLoadError(false)
     setPolicyBranchesDraft("")
     setSavingPolicy(false)
     setPolicySaved(false)
     setPolicyError("")
+  }
+  useEffect(() => {
+    if (!owner || !repo) return
+    let cancelled = false
+    currentRepoRef.current = `${owner}/${repo}`
     api
       .getBranchPolicy(owner, repo)
       .then((p) => {
@@ -230,14 +235,17 @@ function RepoDetailPageContent({
           setIndexStatus(`Done — ${job.files_done} files indexed`)
           if (indexing) {
             setIndexing(false)
+            setCancelling(false)
             setTimeout(() => window.location.reload(), 1000)
           }
         } else if (job && job.status === "failed") {
           setIndexStatus(`Failed: ${job.error}`)
           setIndexing(false)
+          setCancelling(false)
         } else if (job && job.status === "cancelled") {
           setIndexStatus(`Cancelled — ${job.files_done} files indexed before stopping`)
           setIndexing(false)
+          setCancelling(false)
         }
       } catch {
         // ignore
@@ -255,6 +263,7 @@ function RepoDetailPageContent({
   const triggerIndex = async (full: boolean) => {
     if (!owner || !repo) return
     setIndexing(true)
+    setCancelling(false)
     setIndexStatus(full ? "Starting full re-index..." : "Starting index update...")
     try {
       await api.triggerIndex(owner, repo, full)
@@ -263,8 +272,6 @@ function RepoDetailPageContent({
       setIndexing(false)
     }
   }
-
-  const [cancelling, setCancelling] = useState(false)
 
   const cancelIndex = async () => {
     if (!owner || !repo) return
@@ -277,10 +284,6 @@ function RepoDetailPageContent({
       setCancelling(false)
     }
   }
-
-  useEffect(() => {
-    if (!indexing) setCancelling(false)
-  }, [indexing])
 
   if (loading) {
     return <div className="p-6 text-sm text-muted-foreground">Loading...</div>
