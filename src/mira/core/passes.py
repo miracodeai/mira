@@ -19,6 +19,7 @@ from mira.dashboard.models_config import llm_config_for
 from mira.exceptions import ResponseParseError, StructuredOutputError
 from mira.llm import create_llm
 from mira.llm.base import LLMProviderProtocol
+from mira.llm.prompts.operator import with_operator_instructions
 from mira.llm.prompts.review import (
     build_dependency_review_prompt,
     build_security_review_prompt,
@@ -550,6 +551,7 @@ async def security_review_pass(
     security_llm: LLMProviderProtocol | None = None,
     agentic_executor_factory: Callable[[], object] | None = None,
     max_hops: int = DEFAULT_AGENTIC_MAX_HOPS,
+    custom_instructions: str = "",
 ) -> PassResult:
     """Dedicated security review on the security tier (``security_model`` → review model).
 
@@ -591,6 +593,7 @@ async def security_review_pass(
             pr_title,
             executor=agentic_executor_factory() if agentic_executor_factory else None,
             max_hops=max_hops,
+            custom_instructions=custom_instructions,
         )
         single_failures = [outcome.failure] if outcome.failure else []
         return PassResult(outcome.comments, single_failures)
@@ -612,6 +615,7 @@ async def security_review_pass(
                 pr_title,
                 executor=agentic_executor_factory() if agentic_executor_factory else None,
                 max_hops=max_hops,
+                custom_instructions=custom_instructions,
             )
 
     results = await asyncio.gather(*[_bounded(c.files) for c in chunks])
@@ -632,6 +636,7 @@ async def _security_scan_once(
     pr_title: str,
     executor: object | None = None,
     max_hops: int = DEFAULT_AGENTIC_MAX_HOPS,
+    custom_instructions: str = "",
 ) -> _SecurityScanOutcome:
     """Run the security scan on a single chunk of files.
 
@@ -641,7 +646,9 @@ async def _security_scan_once(
     ``fallback_llm``. A total failure is returned as metadata so the main
     review can surface a security-incomplete notice without failing itself.
     """
-    messages = build_security_review_prompt(files=files, pr_title=pr_title)
+    messages = build_security_review_prompt(
+        files=files, pr_title=pr_title, custom_instructions=custom_instructions
+    )
     raw = ""
     hops: int | None = None
     loop_error = ""
@@ -762,6 +769,7 @@ async def dependency_review_pass(
     existing_packages: list[str] | None = None,
     pr_title: str = "",
     indexing_llm: LLMProviderProtocol | None = None,
+    custom_instructions: str = "",
 ) -> PassResult:
     """Flag newly-added dependencies that duplicate an existing one.
 
@@ -783,6 +791,7 @@ async def dependency_review_pass(
         files=manifest_files,
         existing_packages=existing_packages,
         pr_title=pr_title,
+        custom_instructions=custom_instructions,
     )
     try:
         raw = await dep_llm.complete_with_tools(
@@ -1112,6 +1121,7 @@ async def regenerate_summary(
     pr_description: str,
     fallback: str,
     indexing_llm: LLMProviderProtocol | None = None,
+    custom_instructions: str = "",
 ) -> str:
     """Rewrite the review summary from the final filed outputs.
 
@@ -1152,7 +1162,9 @@ async def regenerate_summary(
 
     try:
         text = await summary_llm.complete(
-            messages=[{"role": "user", "content": prompt}],
+            messages=with_operator_instructions(
+                [{"role": "user", "content": prompt}], custom_instructions
+            ),
             json_mode=False,
             temperature=0.0,
             max_tokens=_MAX_REVIEW_SUMMARY_TOKENS,
@@ -1170,6 +1182,7 @@ async def generate_pr_summary(
     pr_title: str,
     pr_description: str,
     indexing_llm: LLMProviderProtocol | None = None,
+    custom_instructions: str = "",
 ) -> str:
     """Generate release-notes-style grouped bullet summary for the PR description.
 
@@ -1206,7 +1219,9 @@ async def generate_pr_summary(
     summary_llm = indexing_llm or _indexing_llm(llm)
     try:
         text = await summary_llm.complete(
-            messages=[{"role": "user", "content": prompt}],
+            messages=with_operator_instructions(
+                [{"role": "user", "content": prompt}], custom_instructions
+            ),
             json_mode=False,
             temperature=0.0,
         )

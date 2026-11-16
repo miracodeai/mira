@@ -94,6 +94,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - Cross-PR overlap tuning (`review.overlap`): candidate cap, confidence floor, title-similarity threshold
 - Opt-in ensemble mode (`review.ensemble_runs`): review each chunk N times and keep majority-vote findings
 - Thread auto-resolution toggle (`review.auto_resolve_conversations`)
+- Operator instructions (`review.custom_instructions`): free-form text, such as an output language, added to every user-facing prompt (review, security/dependency passes, walkthrough, PR and review summaries, `@mira` answers, thread replies, overlap, fix verification) without changing response formats
 - `context_lines`, `max_concurrent_chunks`, and `index.max_file_size` tuning knobs
 
 ## Storage and deployment
