@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from typing import ClassVar, Protocol, runtime_checkable
 
 import httpx
@@ -17,6 +18,12 @@ from mira.llm import provider_profiles as profiles
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 
 logger = logging.getLogger(__name__)
+
+# Models that rejected a reasoning effort, per endpoint. Process-wide because every review
+# builds fresh providers; without it each review would re-learn the rejection.
+_NO_REASONING: dict[str, set[str]] = {}
+# Models that only accept their default temperature, per endpoint (same reasoning as above).
+_NO_TEMPERATURE: dict[str, set[str]] = {}
 
 
 @runtime_checkable
@@ -31,11 +38,17 @@ class LLMProviderProtocol(Protocol):
         supports_tool_calling: Provider supports function/tool calling.
     """
 
-    supports_json_mode: bool
-    supports_tool_calling: bool
-
-    total_prompt_tokens: int
-    total_completion_tokens: int
+    # Read-only to callers; providers may implement these as plain or class attributes.
+    @property
+    def config(self) -> LLMConfig: ...
+    @property
+    def supports_json_mode(self) -> bool: ...
+    @property
+    def supports_tool_calling(self) -> bool: ...
+    @property
+    def total_prompt_tokens(self) -> int: ...
+    @property
+    def total_completion_tokens(self) -> int: ...
 
     async def complete(
         self,
@@ -80,12 +93,15 @@ class LLMProviderProtocol(Protocol):
 def _get_api_key(config: LLMConfig, profile: dict | None = None) -> str:
     """Resolve the API key for the configured endpoint.
 
-    Reads `config.api_key_env` first, then the matched provider profile's
+    A direct `config.api_key` (set for providers connected in Settings) wins.
+    Otherwise reads `config.api_key_env`, then the matched provider profile's
     `api_key_env`, then the legacy `OPENROUTER_API_KEY` / `OPENAI_API_KEY`
     lookup for backward compatibility. If `api_key_env` is explicitly "" the
     empty string is returned without error — useful for local endpoints
     (Ollama, llama.cpp server) that don't require auth.
     """
+    if config.api_key:
+        return config.api_key
     if config.api_key_env == "":
         return ""
     key = os.environ.get(config.api_key_env, "")
@@ -179,7 +195,8 @@ class OpenAICompatibleProvider:
         self.total_cache_read_tokens = 0
         self.total_cache_write_tokens = 0
         self._no_forced_tool_choice: set[str] = set()
-        self._no_reasoning: set[str] = set()
+        self._no_reasoning = _NO_REASONING.setdefault(config.base_url, set())
+        self._no_temperature = _NO_TEMPERATURE.setdefault(config.base_url, set())
         # Per-model output budget after an endpoint rejected the configured one.
         self._budget_caps: dict[str, int] = {}
 
@@ -213,6 +230,12 @@ class OpenAICompatibleProvider:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         headers.update(self.profile.get("extra_headers", {}))
+        if "://opencode.ai/" in self.config.base_url:
+            # OpenCode Go rejects requests without these: opencode.ai/docs/go/#where-can-i-use-it
+            from mira import __version__
+
+            headers["User-Agent"] = f"mira/{__version__}"
+            headers["x-opencode-session"] = uuid.uuid4().hex  # cached: one session per provider
         self._cached_headers = headers
         return dict(headers)
 

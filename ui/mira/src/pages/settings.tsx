@@ -1,7 +1,8 @@
-import { Loader2 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { Loader2, X } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 
 import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
+import { ProvidersPanel } from "@/components/providers-panel"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -18,12 +19,123 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { useParams } from "react-router"
+import { Link, useParams } from "react-router"
 
 import { api } from "@/lib/api"
 import type { IndexingTemperature } from "@/lib/api/settings"
 import { useAuth } from "@/lib/auth-context"
 import { useDocumentTitle } from "@/lib/hooks"
+
+function ReasoningSelect({
+  value,
+  onChange,
+  model,
+  options,
+  thinkingOptions,
+  label,
+}: {
+  value: string
+  onChange: (value: string) => void
+  model: string
+  options: ModelOption[]
+  thinkingOptions: ModelOption[]
+  label: string
+}) {
+  const levels = options.find(
+    (option) => option.value === model
+  )?.reasoning_levels
+  const choices = thinkingOptions.filter(
+    (option) => !levels || levels.includes(option.value)
+  )
+  return (
+    <Select
+      value={value || "default"}
+      onValueChange={(level) => onChange(level === "default" ? "" : level)}
+    >
+      <SelectTrigger aria-label={label} className="w-28 shrink-0">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="default">Default</SelectItem>
+        {value && !choices.some((option) => option.value === value) && (
+          <SelectItem value={value} disabled>
+            {value} (saved)
+          </SelectItem>
+        )}
+        {choices.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+// Ordered models tried when the one above fails (quota, outage); mixes providers freely.
+function FallbackList({
+  value,
+  onChange,
+  options,
+  thinkingOptions,
+  label,
+  title = "Fallbacks, tried in order when the model above fails.",
+}: {
+  value: string[]
+  onChange: (v: string[]) => void
+  options: ModelOption[]
+  thinkingOptions: ModelOption[]
+  label: string
+  title?: string
+}) {
+  const modelLabel = (id: string) =>
+    options.find((o) => o.value === id)?.label ?? id
+  return (
+    <div className="space-y-1.5 border-l pl-3">
+      <p className="text-xs text-muted-foreground">{title}</p>
+      {value.map((entry, i) => {
+        const [id, effort = ""] = entry.split("#")
+        return (
+          <div key={`${id}-${i}`} className="flex items-center gap-2 text-sm">
+            <span className="w-4 text-xs text-muted-foreground">{i + 1}.</span>
+            <span className="min-w-0 flex-1 truncate">{modelLabel(id)}</span>
+            <ReasoningSelect
+              value={effort}
+              onChange={(level) =>
+                onChange(
+                  value.map((m, index) =>
+                    index === i ? id + (level ? `#${level}` : "") : m
+                  )
+                )
+              }
+              model={id}
+              options={options}
+              thinkingOptions={thinkingOptions}
+              label={`${label} ${i + 1} reasoning level for ${modelLabel(id)}`}
+            />
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={`Remove ${modelLabel(id)}`}
+              onClick={() => onChange(value.filter((_, index) => index !== i))}
+            >
+              <X />
+            </Button>
+          </div>
+        )
+      })}
+      <ModelCombobox
+        value=""
+        onChange={(id) =>
+          id &&
+          !value.some((m) => m.split("#")[0] === id.split("#")[0]) &&
+          onChange([...value, id])
+        }
+        options={options}
+      />
+    </div>
+  )
+}
 
 export function SettingsPage() {
   useDocumentTitle("Settings")
@@ -37,17 +149,35 @@ export function SettingsPage() {
   const [configIndexingModel, setConfigIndexingModel] = useState("")
   const [configReviewModel, setConfigReviewModel] = useState("")
   const [configSecurityModel, setConfigSecurityModel] = useState("")
+  const [securityInheritsReview, setSecurityInheritsReview] = useState(true)
   const [backend, setBackend] = useState("")
+  const [missingApiKey, setMissingApiKey] = useState("")
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
   const [securityOptions, setSecurityOptions] = useState<ModelOption[]>([])
-  const [thinkingMode, setThinkingMode] = useState("off")
+  const [fallbacks, setFallbacks] = useState({
+    indexing_fallbacks: [] as string[],
+    review_fallbacks: [] as string[],
+    security_fallbacks: [] as string[],
+  })
+  const [critiqueModel, setCritiqueModel] = useState("")
+  const [ensembleModels, setEnsembleModels] = useState<string[]>([])
+  const [thinkingMode, setThinkingMode] = useState("")
+  const [reasoning, setReasoning] = useState({
+    indexing_reasoning: "",
+    security_reasoning: "",
+    critique_reasoning: "",
+  })
   const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
   const [apiStyle, setApiStyle] = useState("chat")
   const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsLoaded, setModelsLoaded] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
+  // Fallback/critic/second-opinion values as loaded. They may come from mira.yaml, so
+  // saving sends only the ones the user changed instead of pinning them as overrides.
+  const loadedAux = useRef<Record<string, unknown>>({})
+  const modelsRequest = useRef(0)
   const [temperatureMode, setTemperatureMode] = useState("inherit")
   const [temperatureInput, setTemperatureInput] = useState("")
   const [configTemperature, setConfigTemperature] =
@@ -79,47 +209,74 @@ export function SettingsPage() {
   // the resetPending hint in strListField.
   const [resetFields, setResetFields] = useState<Set<string>>(new Set())
 
-  useEffect(() => {
-    if (!currentUser?.is_admin) return
-    api
-      .getModels()
-      .then((m) => {
-        setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
-        setReviewModel(m.review_source === "config" ? "" : m.review_model)
-        setSecurityModel(m.security_source === "config" ? "" : m.security_model)
-        setConfigIndexingModel(m.config_indexing_model)
-        setConfigReviewModel(m.config_review_model)
-        setConfigSecurityModel(m.config_security_model)
+  // Provider changes refresh only the catalog so unsaved picks survive.
+  const loadModels = (withSelections = true) => {
+    const request = ++modelsRequest.current
+    return api.getModels().then((m) => {
+      // Only the newest catalog applies, so a slow earlier response can't overwrite it.
+      if (request === modelsRequest.current) {
         setBackend(m.backend)
+        setMissingApiKey(m.missing_api_key ?? "")
         setIndexingOptions(m.indexing_options)
         setReviewOptions(m.review_options)
         setSecurityOptions(m.security_options)
-        setThinkingMode(m.review_thinking_mode)
-        setThinkingOptions(m.thinking_options)
-        setApiStyle(m.api_style ?? "chat")
-        setApiStyleOptions(m.api_style_options ?? [])
-        const temperature = m.indexing_temperature
-        setConfigTemperature(m.config_indexing_temperature)
-        setTemperatureSource(m.indexing_temperature_source)
-        setTemperatureMode(
-          m.indexing_temperature_source === "config"
-            ? "inherit"
-            : temperature === "omit"
-              ? "omit"
-              : "custom"
-        )
-        setTemperatureInput(
-          typeof temperature === "number" ? String(temperature) : ""
-        )
-        setModelsError("")
-        setModelsLoaded(true)
+      }
+      if (!withSelections) return
+      setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
+      setReviewModel(m.review_source === "config" ? "" : m.review_model)
+      setSecurityModel(m.security_source === "config" ? "" : m.security_model)
+      setConfigIndexingModel(m.config_indexing_model)
+      setConfigReviewModel(m.config_review_model)
+      setConfigSecurityModel(m.config_security_model)
+      setSecurityInheritsReview(m.security_inherits_review)
+      setThinkingMode(m.reasoning_overrides.review_thinking_mode)
+      setReasoning({
+        indexing_reasoning: m.reasoning_overrides.indexing_reasoning,
+        security_reasoning: m.reasoning_overrides.security_reasoning,
+        critique_reasoning: m.reasoning_overrides.critique_reasoning,
       })
-      .catch(() => {
-        setModelsLoaded(false)
-        setModelsError(
-          "Could not load model settings. Reload the page to retry."
-        )
+      setThinkingOptions(m.thinking_options)
+      setApiStyle(m.api_style ?? "chat")
+      setApiStyleOptions(m.api_style_options ?? [])
+      const temperature = m.indexing_temperature
+      setConfigTemperature(m.config_indexing_temperature)
+      setTemperatureSource(m.indexing_temperature_source)
+      setTemperatureMode(
+        m.indexing_temperature_source === "config"
+          ? "inherit"
+          : temperature === "omit"
+            ? "omit"
+            : "custom"
+      )
+      setTemperatureInput(
+        typeof temperature === "number" ? String(temperature) : ""
+      )
+      const aux = {
+        indexing_fallbacks: m.indexing_fallbacks ?? [],
+        review_fallbacks: m.review_fallbacks ?? [],
+        security_fallbacks: m.security_fallbacks ?? [],
+        critique_model: m.critique_model ?? "",
+        ensemble_models: m.ensemble_models ?? [],
+      }
+      loadedAux.current = aux
+      setFallbacks({
+        indexing_fallbacks: aux.indexing_fallbacks,
+        review_fallbacks: aux.review_fallbacks,
+        security_fallbacks: aux.security_fallbacks,
       })
+      setCritiqueModel(aux.critique_model)
+      setEnsembleModels(aux.ensemble_models)
+      setModelsError("")
+      setModelsLoaded(true)
+    })
+  }
+
+  useEffect(() => {
+    if (!currentUser?.is_admin) return
+    loadModels().catch(() => {
+      setModelsLoaded(false)
+      setModelsError("Could not load model settings. Reload the page to retry.")
+    })
     api.getGlobalSettings().then((s) => {
       setEffective(
         (s.effective as {
@@ -143,6 +300,9 @@ export function SettingsPage() {
     )
   }
 
+  const securityDefaultModel = securityInheritsReview
+    ? reviewModel || configReviewModel
+    : configSecurityModel
   const httpBackend =
     modelsLoaded && backend !== "bedrock" && backend !== "codex-cli"
 
@@ -164,14 +324,28 @@ export function SettingsPage() {
     setSavingModels(true)
     setModelsSaved(false)
     try {
+      const aux = {
+        ...fallbacks,
+        critique_model: critiqueModel,
+        ensemble_models: ensembleModels,
+      }
+      const edited = Object.fromEntries(
+        Object.entries(aux).filter(
+          ([key, value]) =>
+            JSON.stringify(value) !== JSON.stringify(loadedAux.current[key])
+        )
+      )
       await api.saveModels(
         indexingModel,
         reviewModel,
         securityModel,
         thinkingMode,
         apiStyle,
-        httpBackend ? temperature : undefined
+        httpBackend ? temperature : undefined,
+        // Reasoning levels are stored overrides (not inherited values), so they always go.
+        { ...edited, ...reasoning }
       )
+      loadedAux.current = aux
       if (httpBackend) {
         setTemperatureSource(temperature === null ? "config" : "dashboard")
       }
@@ -513,6 +687,10 @@ export function SettingsPage() {
         </p>
       </div>
 
+      {section === "providers" && (
+        <ProvidersPanel onChanged={() => loadModels(false)} />
+      )}
+
       {section === "models" && (
         <Card>
           <CardHeader>
@@ -520,21 +698,61 @@ export function SettingsPage() {
             <CardDescription>
               Choose models for indexing and PR reviews
               {backend &&
+                !missingApiKey &&
                 ` — listed from ${
-                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
-                    backend
-                  ] ?? "your configured endpoint"
-                }`}
+                  {
+                    openrouter: "OpenRouter",
+                    bedrock: "AWS Bedrock",
+                  }[backend] ?? "your configured endpoint"
+                } plus any subscriptions signed in under Providers`}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <p className="text-xs text-muted-foreground">
+              Reasoning defaults: review uses the deployment setting; security
+              inherits review; indexing and critic are off. Fallbacks and second
+              opinions inherit their slot&apos;s level.
+            </p>
+            {missingApiKey && (
+              <p className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
+                Connect API-key or local providers under{" "}
+                <Link to="/settings/providers" className="underline">
+                  Providers
+                </Link>{" "}
+                to add their models. The server&apos;s default endpoint also
+                needs <code className="font-mono">{missingApiKey}</code>.
+              </p>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-medium">Indexing Model</label>
-              <ModelCombobox
-                value={indexingModel}
-                onChange={setIndexingModel}
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <ModelCombobox
+                    value={indexingModel}
+                    onChange={setIndexingModel}
+                    options={indexingOptions}
+                    configModel={configIndexingModel}
+                  />
+                </div>
+                <ReasoningSelect
+                  value={reasoning.indexing_reasoning}
+                  onChange={(level) =>
+                    setReasoning((r) => ({ ...r, indexing_reasoning: level }))
+                  }
+                  model={indexingModel || configIndexingModel}
+                  options={indexingOptions}
+                  thinkingOptions={thinkingOptions}
+                  label="Indexing reasoning level"
+                />
+              </div>
+              <FallbackList
+                value={fallbacks.indexing_fallbacks}
+                onChange={(v) =>
+                  setFallbacks((f) => ({ ...f, indexing_fallbacks: v }))
+                }
                 options={indexingOptions}
-                configModel={configIndexingModel}
+                thinkingOptions={thinkingOptions}
+                label="Indexing fallback"
               />
               <p className="text-xs text-muted-foreground">
                 Used to summarize files when building the code index. A cheaper
@@ -616,11 +834,32 @@ export function SettingsPage() {
             ) : null}
             <div className="space-y-2">
               <label className="text-sm font-medium">Review Model</label>
-              <ModelCombobox
-                value={reviewModel}
-                onChange={setReviewModel}
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <ModelCombobox
+                    value={reviewModel}
+                    onChange={setReviewModel}
+                    options={reviewOptions}
+                    configModel={configReviewModel}
+                  />
+                </div>
+                <ReasoningSelect
+                  value={thinkingMode}
+                  onChange={setThinkingMode}
+                  model={reviewModel || configReviewModel}
+                  options={reviewOptions}
+                  thinkingOptions={thinkingOptions}
+                  label="Review reasoning level"
+                />
+              </div>
+              <FallbackList
+                value={fallbacks.review_fallbacks}
+                onChange={(v) =>
+                  setFallbacks((f) => ({ ...f, review_fallbacks: v }))
+                }
                 options={reviewOptions}
-                configModel={configReviewModel}
+                thinkingOptions={thinkingOptions}
+                label="Review fallback"
               />
               <p className="text-xs text-muted-foreground">
                 Used to analyze PRs and post review comments. A more powerful
@@ -629,11 +868,34 @@ export function SettingsPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Security Model</label>
-              <ModelCombobox
-                value={securityModel}
-                onChange={setSecurityModel}
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <ModelCombobox
+                    value={securityModel}
+                    onChange={setSecurityModel}
+                    options={securityOptions}
+                    configModel={securityDefaultModel}
+                  />
+                </div>
+                <ReasoningSelect
+                  value={reasoning.security_reasoning}
+                  onChange={(level) =>
+                    setReasoning((r) => ({ ...r, security_reasoning: level }))
+                  }
+                  model={securityModel || securityDefaultModel}
+                  options={securityOptions}
+                  thinkingOptions={thinkingOptions}
+                  label="Security reasoning level"
+                />
+              </div>
+              <FallbackList
+                value={fallbacks.security_fallbacks}
+                onChange={(v) =>
+                  setFallbacks((f) => ({ ...f, security_fallbacks: v }))
+                }
                 options={securityOptions}
-                configModel={configSecurityModel}
+                thinkingOptions={thinkingOptions}
+                label="Security fallback"
               />
               <p className="text-xs text-muted-foreground">
                 Used for the dedicated security pass. Defaults to the review
@@ -642,33 +904,57 @@ export function SettingsPage() {
               </p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">
-                Review Thinking Mode
-              </label>
-              <Select value={thinkingMode} onValueChange={setThinkingMode}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {thinkingOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <label className="text-sm font-medium">Critic Model</label>
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <ModelCombobox
+                    value={critiqueModel}
+                    onChange={setCritiqueModel}
+                    options={reviewOptions}
+                    configModel={indexingModel || configIndexingModel}
+                    inheritLabel="Use the indexing model"
+                  />
+                </div>
+                <ReasoningSelect
+                  value={reasoning.critique_reasoning}
+                  onChange={(level) =>
+                    setReasoning((r) => ({ ...r, critique_reasoning: level }))
+                  }
+                  model={critiqueModel || indexingModel || configIndexingModel}
+                  options={[...reviewOptions, ...indexingOptions]}
+                  thinkingOptions={thinkingOptions}
+                  label="Critic reasoning level"
+                />
+              </div>
               <p className="text-xs text-muted-foreground">
-                Extended reasoning budget for reviews — improves depth on
-                capable models at the cost of latency and tokens. Works on
-                OpenRouter and Bedrock (Claude); on other endpoints it's skipped
-                automatically when unsupported.
+                Checks each drafted comment against the code and drops the
+                unsupported ones. A model from a different family than the
+                review model catches mistakes the reviewer keeps repeating.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Second-opinion Models
+              </label>
+              <FallbackList
+                value={ensembleModels}
+                onChange={setEnsembleModels}
+                options={reviewOptions}
+                thinkingOptions={thinkingOptions}
+                label="Second opinion"
+                title="Also review each PR with these; a finding is kept only when most models report it."
+              />
+              <p className="text-xs text-muted-foreground">
+                Posts fewer comments and adds one review per model. With one
+                extra model both must agree, which drops many real findings; use
+                two or more.
               </p>
             </div>
             {backend !== "bedrock" && (
               <div className="space-y-2">
                 <label className="text-sm font-medium">API Protocol</label>
                 <Select value={apiStyle} onValueChange={setApiStyle}>
-                  <SelectTrigger>
+                  <SelectTrigger aria-label="API protocol">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>

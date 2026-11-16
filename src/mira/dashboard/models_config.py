@@ -34,11 +34,7 @@ def resolve_indexing_temperature(
     return config.indexing_temperature, "config"
 
 
-MODEL_PRICING: dict[str, tuple[float, float]] = {
-    model_id: registry.pricing(model_id) for model_id in registry.all_models()
-}
-
-# Thinking-mode options for the review model. "off" disables extended thinking
+# Thinking-mode options for each model slot. "off" disables extended thinking
 # (today's behavior); low/medium/high/xhigh map to the provider's unified
 # ``reasoning.effort``; "max" is a top level remapped per provider (OpenRouter
 # sends it as "xhigh"). Single source for the dashboard dropdown and validation.
@@ -82,7 +78,7 @@ def estimate_indexing_cost(file_count: int, model: str) -> dict:
     if file_count == 0:
         return {"estimated_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
 
-    input_price, output_price = MODEL_PRICING.get(model, (3.00, 15.00))
+    input_price, output_price = registry.pricing(model)
 
     # File summarization batches
     batches = (file_count + 4) // 5  # ceil div
@@ -174,12 +170,16 @@ def llm_config_for(purpose: str, base: LLMConfig, *, use_dashboard: bool = True)
     db_thinking: str | None = None
     db_review: str | None = None
     db_style: str | None = None
+    db_fallbacks: str | None = None
     db_temperature: str | None = None
     if use_dashboard:
         try:
             from mira.dashboard.api import _app_db
 
             if _app_db is not None:
+                db_fallbacks = _app_db.get_setting(f"{purpose}_fallback_models")
+                if purpose == "security" and db_fallbacks is None:
+                    db_fallbacks = _app_db.get_setting("review_fallback_models")
                 if purpose == "indexing":
                     db_model = _app_db.get_setting("indexing_model")
                     db_temperature = _app_db.get_setting("indexing_temperature")
@@ -194,7 +194,6 @@ def llm_config_for(purpose: str, base: LLMConfig, *, use_dashboard: bool = True)
         except Exception:
             pass  # DB not available — resolve from config fields alone
 
-    # Thinking mode only applies to reviews; other purposes leave it off.
     thinking_mode: str | None = None
     resolved_style = resolve_api_style(base, db_style)
     if purpose == "indexing":
@@ -211,17 +210,69 @@ def llm_config_for(purpose: str, base: LLMConfig, *, use_dashboard: bool = True)
     else:
         return base.model_copy(update={"reasoning_effort": None, "api_style": resolved_style})
 
+    if purpose != "review":
+        stored_effort = _db_setting(f"{purpose}_reasoning") if use_dashboard else None
+        effort = stored_effort or thinking_mode
+        thinking_mode = None if effort == "off" else effort
+
     source = "dashboard setting" if db_model else ("mira.yaml" if config_model else "default")
     logger.info("%s model: %s (source: %s)", purpose.capitalize(), resolved, source)
-    return base.model_copy(
+    update: dict = {
+        "model": resolved,
+        "reasoning_effort": thinking_mode,
+        "api_style": resolved_style,
+        "indexing_temperature": (
+            resolve_indexing_temperature(base, db_temperature)[0]
+            if purpose == "indexing"
+            else base.indexing_temperature
+        ),
+    }
+    # A saved "" is an explicit empty list; only a missing setting falls back to mira.yaml.
+    if db_fallbacks is not None:
+        update["fallback_models"] = parse_fallbacks(db_fallbacks)
+    return base.model_copy(update=update)
+
+
+def parse_fallbacks(value: str | None) -> list[str]:
+    """Comma-separated fallback ids as stored in the settings table."""
+    return [m.strip() for m in (value or "").split(",") if m.strip()]
+
+
+def _db_setting(key: str) -> str | None:
+    try:
+        from mira.dashboard.api import _app_db
+
+        return _app_db.get_setting(key) if _app_db is not None else None
+    except Exception:
+        return None
+
+
+def critique_config(base: LLMConfig, *, use_dashboard: bool = True) -> LLMConfig | None:
+    """Critic config, or None when the indexing provider already has the same effort."""
+    stored = _db_setting("critique_model") if use_dashboard else None
+    model = stored if stored is not None else base.critique_model
+    indexing = llm_config_for("indexing", base, use_dashboard=use_dashboard)
+    effort = (_db_setting("critique_reasoning") if use_dashboard else None) or None
+    effort = None if effort == "off" else effort
+    if not model and effort == indexing.reasoning_effort:
+        return None
+    return indexing.model_copy(
         update={
-            "model": resolved,
-            "reasoning_effort": thinking_mode,
-            "api_style": resolved_style,
-            "indexing_temperature": (
-                resolve_indexing_temperature(base, db_temperature)[0]
-                if purpose == "indexing"
-                else base.indexing_temperature
-            ),
+            "model": model or indexing.model,
+            "reasoning_effort": effort,
+            "fallback_model": None,
+            "fallback_models": [],
         }
     )
+
+
+def ensemble_configs(base: LLMConfig, *, use_dashboard: bool = True) -> list[LLMConfig]:
+    """Review-tier configs for each second-opinion model (DB -> mira.yaml)."""
+    stored = _db_setting("ensemble_models") if use_dashboard else None
+    models = parse_fallbacks(stored) if stored is not None else base.ensemble_models
+    if not models:
+        return []
+    review = llm_config_for("review", base, use_dashboard=use_dashboard)
+    # No fallbacks at all: a failed second opinion must not vote with another model.
+    single = {"fallback_models": [], "fallback_model": None}
+    return [review.model_copy(update={"model": m, **single}) for m in models]

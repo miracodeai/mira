@@ -42,6 +42,13 @@ class TestBuildOptions:
         assert "us.anthropic.claude-sonnet-4-6-v1:0" not in openrouter
         assert "us.anthropic.claude-sonnet-4-6-v1:0" in bedrock
         assert "anthropic/claude-sonnet-4-6" not in bedrock
+        assert build_options("bedrock", None, "review")[0]["reasoning_levels"] == [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "max",
+        ]
 
     def test_codex_backend_only_offers_codex_models(self):
         values = [m["value"] for m in build_options("codex-cli", None, "review")]
@@ -53,7 +60,11 @@ class TestBuildOptions:
 
     def test_dynamic_merged_and_deduped_against_registry(self):
         dynamic = [
-            {"value": "anthropic/claude-sonnet-4.6", "label": "Anthropic: Claude Sonnet 4.6"},
+            {
+                "value": "anthropic/claude-sonnet-4.6",
+                "label": "Anthropic: Claude Sonnet 4.6",
+                "reasoning_levels": ["off", "low", "high"],
+            },
             {"value": "mistralai/mistral-large-3", "label": "Mistral Large 3"},
         ]
         options = build_options("openrouter", dynamic, "review")
@@ -62,6 +73,9 @@ class TestBuildOptions:
         assert "anthropic/claude-sonnet-4.6" not in values
         assert "anthropic/claude-sonnet-4-6" in values
         assert "mistralai/mistral-large-3" in values
+        assert next(o for o in options if o["value"] == "anthropic/claude-sonnet-4-6")[
+            "reasoning_levels"
+        ] == ["off", "low", "high"]
 
     def test_generic_endpoint_uses_dynamic_only(self):
         dynamic = [{"value": "llama-3.3-70b", "label": "llama-3.3-70b"}]
@@ -95,17 +109,36 @@ class TestFetchCatalog:
 
     @pytest.mark.asyncio
     async def test_result_is_cached(self, monkeypatch: pytest.MonkeyPatch):
-        calls = 0
+        from unittest.mock import AsyncMock
 
-        async def fake(config, tools_only):
-            nonlocal calls
-            calls += 1
-            return [{"value": "m", "label": "m"}]
+        import httpx
 
-        monkeypatch.setattr(model_catalog, "_fetch_openai_style", fake)
-        assert await fetch_catalog(LLMConfig()) == [{"value": "m", "label": "m"}]
-        assert await fetch_catalog(LLMConfig()) == [{"value": "m", "label": "m"}]
-        assert calls == 1
+        get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                request=httpx.Request("GET", "https://openrouter.ai/api/v1/models"),
+                json={
+                    "data": [
+                        {
+                            "id": "m",
+                            "supported_parameters": ["tools", "reasoning"],
+                            "reasoning": {"supported_efforts": ["high", "xhigh"]},
+                        },
+                        {"id": "plain", "supported_parameters": ["tools"]},
+                        {"id": "unknown", "supported_parameters": ["tools", "reasoning"]},
+                    ]
+                },
+            )
+        )
+        monkeypatch.setattr(httpx.AsyncClient, "get", get)
+        expected = [
+            {"value": "m", "label": "m", "reasoning_levels": ["off", "high", "xhigh", "max"]},
+            {"value": "plain", "label": "plain", "reasoning_levels": ["off"]},
+            {"value": "unknown", "label": "unknown", "reasoning_levels": None},
+        ]
+        assert await fetch_catalog(LLMConfig()) == expected
+        assert await fetch_catalog(LLMConfig()) == expected
+        get.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_concurrent_cold_fetches_coalesce(self, monkeypatch: pytest.MonkeyPatch):
