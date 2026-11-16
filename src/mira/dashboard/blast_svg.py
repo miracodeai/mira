@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+from xml.sax.saxutils import escape as _escape
 
 _COLORS = {
     "text": "#e4e4e7",
@@ -27,7 +28,10 @@ def generate_blast_svg(
     edges: list[tuple[str, str]] | None = None,
     width: int = 600,
     height: int = 380,
+    caption: str = "",
 ) -> str:
+    """Render the badge. ``caption`` is drawn in the centre when given — used
+    in place of the node labels when the viewer may not see them."""
     cx, cy = width // 2, height // 2 - 10
 
     # Build node list with positions
@@ -130,6 +134,12 @@ def generate_blast_svg(
     # Nodes
     for node in nodes:
         parts.append(_render_node(node))
+
+    if caption:
+        parts.append(
+            f'<text x="{cx}" y="{cy + 4}" fill="{_COLORS["text_muted"]}" font-size="12" '
+            f'font-family="system-ui" text-anchor="middle">{_escape(caption)}</text>'
+        )
 
     # Legend
     ly = height - 16

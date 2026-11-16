@@ -10,6 +10,11 @@ from mira.llm.prompts.review import (
 from mira.models import FileChangeType, FileDiff, HunkInfo
 
 
+def _system_text(messages: list[dict]) -> str:
+    """All system-message text, joined (review prompts split it for caching)."""
+    return "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+
+
 class TestBuildReviewPrompt:
     def test_returns_two_messages(self):
         files = [
@@ -24,9 +29,9 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig()
         messages = build_review_prompt(files, config)
-        assert len(messages) == 2
-        assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
+        # Stable instructions, then per-PR context, then the diffs.
+        assert [m["role"] for m in messages] == ["system", "system", "user"]
+        assert "MIRA_CACHE_BOUNDARY" not in _system_text(messages)
 
     def test_system_message_contains_instructions(self):
         files = [
@@ -41,7 +46,7 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig()
         messages = build_review_prompt(files, config)
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "Mira" in system
         assert "submit_review" in system
         assert "blocker" in system
@@ -65,7 +70,7 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig()
         messages = build_review_prompt(files, config)
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "src/app.py" in system
         assert "src/utils.py" in system
 
@@ -86,7 +91,7 @@ class TestBuildReviewPrompt:
             pr_title="Add feature X",
             pr_description="This PR adds feature X",
         )
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "Add feature X" in system
         assert "This PR adds feature X" in system
 
@@ -103,7 +108,7 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig()
         messages = build_review_prompt(files, config)
-        user = messages[1]["content"]
+        user = messages[-1]["content"]
         assert "test.py" in user
         assert "content here" in user
 
@@ -120,7 +125,7 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig()  # default: focus_only_on_problems=False
         messages = build_review_prompt(files, config)
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "You may suggest improvements" in system
         assert "Only comment on critical problems" not in system
 
@@ -137,7 +142,7 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig(review={"focus_only_on_problems": True})
         messages = build_review_prompt(files, config)
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "Only comment on critical problems" in system
         assert "You may suggest improvements" not in system
 
@@ -154,7 +159,7 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig()
         messages = build_review_prompt(files, config)
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "not the entire codebase" in system
         assert "scope boundary" in system
 
@@ -171,7 +176,7 @@ class TestBuildReviewPrompt:
         ]
         config = MiraConfig()
         messages = build_review_prompt(files, config)
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "existing_code" in system
 
 

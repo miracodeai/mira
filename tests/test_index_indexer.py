@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from mira.config import MiraConfig
@@ -21,6 +23,7 @@ from mira.index.indexer import (
     index_repo,
 )
 from mira.index.store import IndexStore
+from mira.llm import create_llm
 
 
 class TestShouldIndex:
@@ -210,6 +213,164 @@ class _FakeFetcher:
 
 @pytest.mark.asyncio
 class TestIndexRepo:
+    @pytest.mark.parametrize("api_style", ["chat", "responses"])
+    @pytest.mark.parametrize("policy", ["default", "omit", 0.7])
+    @pytest.mark.parametrize("incremental", [False, True])
+    async def test_indexing_temperature(
+        self, tmp_path, monkeypatch, api_style, policy, incremental
+    ):
+        requests = []
+        payload = {
+            "files": [{"path": "src/main.py", "summary": "Adds integers."}],
+            "directories": [{"path": "src", "summary": "Arithmetic helpers."}],
+            "summary": "Arithmetic helpers.",
+        }
+
+        def respond(request):
+            body = json.loads(request.content)
+            requests.append(body)
+            if policy == "omit" and "temperature" in body:
+                return httpx.Response(400, json={"error": {"param": "temperature"}})
+            text = json.dumps(payload)
+            envelope = (
+                {"choices": [{"message": {"content": text}}]}
+                if api_style == "chat"
+                else {
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    ]
+                }
+            )
+            return httpx.Response(200, json=envelope)
+
+        client_class = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kw: client_class(transport=httpx.MockTransport(respond), **kw),
+        )
+        llm_config = {
+            "model": "test-model",
+            "api_key_env": "",
+            "api_style": api_style,
+            "temperature": 0.9,
+        }
+        if policy != "default":
+            llm_config["indexing_temperature"] = policy
+        config = MiraConfig(llm=llm_config)
+        store = IndexStore(str(tmp_path / "index.db"))
+        content = "def add(a, b):\n    return a + b\n" + "# arithmetic helper\n" * 40
+        fetcher = _FakeFetcher(tree=["src/main.py"], contents={"src/main.py": content})
+        try:
+            if incremental:
+                count = await index_diff(
+                    "example",
+                    "project",
+                    config=config,
+                    store=store,
+                    llm=create_llm(config.llm),
+                    fetcher=fetcher,
+                    changed_paths=["src/main.py"],
+                )
+            else:
+                count = await index_repo(
+                    "example",
+                    "project",
+                    config=config,
+                    store=store,
+                    llm=create_llm(config.llm),
+                    fetcher=fetcher,
+                )
+            assert count == 1
+            assert store.get_summary("src/main.py").summary == "Adds integers."
+            assert store.get_directory_summaries(["src"])["src"].summary == "Arithmetic helpers."
+            assert len(requests) == 2
+            if policy == "omit":
+                assert all("temperature" not in body for body in requests)
+            else:
+                expected = 0.0 if policy == "default" else policy
+                assert all(body["temperature"] == expected for body in requests)
+            assert config.llm.temperature == 0.9
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize("policy", ["omit", 0.7])
+    async def test_bedrock_keeps_existing_indexing_temperature(self, tmp_path, policy):
+        pytest.importorskip("boto3")
+        config = MiraConfig(llm={"provider": "bedrock", "indexing_temperature": policy})
+        payload = {
+            "files": [{"path": "src/main.py", "summary": "Arithmetic."}],
+            "directories": [{"path": "src", "summary": "Helpers."}],
+        }
+        with patch("boto3.Session") as session:
+            client = session.return_value.client.return_value
+            client.converse.return_value = {
+                "output": {
+                    "message": {
+                        "content": [{"toolUse": {"name": "submit_json_response", "input": payload}}]
+                    }
+                }
+            }
+            store = IndexStore(str(tmp_path / "index.db"))
+            try:
+                count = await index_repo(
+                    "example",
+                    "project",
+                    config=config,
+                    store=store,
+                    llm=create_llm(config.llm),
+                    fetcher=_FakeFetcher(
+                        tree=["src/main.py"], contents={"src/main.py": "# helper\n" * 100}
+                    ),
+                )
+                assert count == 1
+                assert client.converse.call_count == 2
+                assert all(
+                    call.kwargs["inferenceConfig"]["temperature"] == 0.0
+                    for call in client.converse.call_args_list
+                )
+            finally:
+                store.close()
+
+    @pytest.mark.parametrize("provider", ["codex-cli", "codex_cli", "codex"])
+    async def test_codex_keeps_sampling_out_of_argv(self, tmp_path, provider):
+        payload = {
+            "files": [{"path": "src/main.py", "summary": "Arithmetic."}],
+            "directories": [{"path": "src", "summary": "Helpers."}],
+        }
+        script = tmp_path / "fake_codex.py"
+        argv_file = tmp_path / "argv.json"
+        script.write_text(
+            f"#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n"
+            + f"Path({str(argv_file)!r}).write_text(json.dumps(sys.argv))\n"
+            + f"Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text({json.dumps(payload)!r})\n"
+        )
+        script.chmod(0o700)
+        config = MiraConfig(
+            llm={"provider": provider, "codex_command": str(script), "indexing_temperature": "omit"}
+        )
+        store = IndexStore(str(tmp_path / "index.db"))
+        try:
+            count = await index_repo(
+                "example",
+                "project",
+                config=config,
+                store=store,
+                llm=create_llm(config.llm),
+                fetcher=_FakeFetcher(
+                    tree=["src/main.py"], contents={"src/main.py": "# helper\n" * 100}
+                ),
+            )
+            assert count == 1
+            assert store.get_directory_summaries(["src"])["src"].summary == "Helpers."
+            assert "temperature" not in " ".join(json.loads(argv_file.read_text()))
+        finally:
+            store.close()
+
     async def test_index_repo_basic(self, tmp_path):
         """Test full repo indexing with mocked GitHub API and LLM."""
         store = IndexStore(str(tmp_path / "test.db"))
@@ -492,16 +653,22 @@ class TestIndexConventionsCacheMiss:
             contents={"AGENTS.md": "# Team rules\n\n- Always flag bare excepts.\n"}
         )
 
-        with patch("mira.dashboard.api._app_db") as app_db:
-            await _index_conventions(
-                "o",
-                "r",
-                fetcher,
-                "main",
-                ["AGENTS.md", "main.py"],
-                asyncio.Semaphore(4),
-                cached_contents={"main.py": "print()"},
-            )
+        store = IndexStore(":memory:")
+        try:
+            with patch("mira.dashboard.api._app_db") as app_db:
+                await _index_conventions(
+                    "o",
+                    "r",
+                    fetcher,
+                    "main",
+                    ["AGENTS.md", "main.py"],
+                    asyncio.Semaphore(4),
+                    cached_contents={"main.py": "print()"},
+                    store=store,
+                    run=store.claim_index_run(),
+                )
+        finally:
+            store.close()
 
         app_db.set_repo_conventions.assert_called_once()
         owner, repo, extracted = app_db.set_repo_conventions.call_args.args

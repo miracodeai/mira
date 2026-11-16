@@ -2,8 +2,26 @@
 
 from __future__ import annotations
 
+import re
+
 from mira.config import FilterConfig
 from mira.models import ReviewComment, Severity
+
+# Comments of one category anchored this close in the same file, whose text
+# overlaps this much, are one finding (the higher-ranked one is kept).
+_NEAR_LINE_DISTANCE = 3
+_NEAR_LINE_TEXT_THRESHOLD = 0.25
+_MIN_TEXT_TOKENS = 8
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Jaccard over identifier-ish tokens; 0 when either text is too short to judge."""
+    ta = set(_TOKEN_RE.findall(a.lower()))
+    tb = set(_TOKEN_RE.findall(b.lower()))
+    if min(len(ta), len(tb)) < _MIN_TEXT_TOKENS:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
 
 
 def _jaccard_similarity(a: str, b: str) -> float:
@@ -56,6 +74,19 @@ def _is_duplicate(
     end_b = b.end_line or b.line
     same_line = (a.line == b.line) and (end_a == end_b)
     if same_line and a.category == b.category:
+        return True
+
+    # Same category a couple of lines apart, describing the same code: two
+    # passes (or the model and its own second look) anchoring one bug on
+    # adjacent lines of a statement. Titles rarely agree ("dead fallback" vs
+    # "predicate compares to itself"), so compare title+body, and only when
+    # both are substantial — two distinct bugs can sit two lines apart.
+    if (
+        a.category == b.category
+        and abs(a.line - b.line) <= _NEAR_LINE_DISTANCE
+        and _text_similarity(f"{a.title} {a.body}", f"{b.title} {b.body}")
+        >= _NEAR_LINE_TEXT_THRESHOLD
+    ):
         return True
 
     # Overlapping lines — lower title similarity bar

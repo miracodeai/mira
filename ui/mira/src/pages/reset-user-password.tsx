@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "react-router"
 import { PasswordForm } from "@/components/password-form"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync } from "@/lib/hooks"
 
 export function ResetUserPasswordPage() {

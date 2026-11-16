@@ -226,12 +226,19 @@ class AnthropicOAuthProvider:
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
+        sampling = (
+            {}
+            if omit_temperature
+            else {"temperature": self.config.temperature if temperature is None else temperature}
+        )
         data = await self._send(
             messages,
             extra_system=_JSON_ONLY if json_mode else "",
-            temperature=self.config.temperature if temperature is None else temperature,
             max_tokens=max_tokens or self.config.max_tokens,
+            **sampling,
         )
         text = self._text(data)
         return _json_object(text) if json_mode else text

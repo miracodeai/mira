@@ -18,6 +18,7 @@ import httpx
 from mira.config import load_config
 from mira.platforms import profiles
 from mira.platforms.auth import PlatformAuth
+from mira.platforms.base_branch_policy import base_branch_is_filtered_for_repo
 from mira.platforms.command_policy import is_command_allowed
 from mira.platforms.fetch import _next_link, make_fetcher
 from mira.platforms.mentions import (
@@ -351,6 +352,20 @@ async def dispatch_gitlab_event(
             cfg = load_config()
             if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
                 logger.debug("MR skipped — author %s filtered by author filter", actor)
+                return "ignored"
+            # Destination-branch gate (see dispatch_github_event).
+            owner, repo = _split_project_path(
+                payload.get("project", {}).get("path_with_namespace", "")
+            )
+            target_branch = attrs.get("target_branch", "")
+            if base_branch_is_filtered_for_repo(owner, repo, target_branch, cfg, platform="gitlab"):
+                logger.info(
+                    "MR %s/%s!%s skipped — target branch %r not in auto-review policy",
+                    owner,
+                    repo,
+                    attrs.get("iid", 0),
+                    target_branch,
+                )
                 return "ignored"
             # Same opt-out as GitHub's `synchronize`: new commits on an already
             # open MR only get reviewed on an explicit `@bot review` comment.

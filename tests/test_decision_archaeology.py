@@ -19,6 +19,11 @@ def _file(path: str) -> FileDiff:
 # ── Provider: get_file_history ──
 
 
+def _system_text(messages: list[dict]) -> str:
+    """All system-message text, joined (review prompts split it for caching)."""
+    return "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+
+
 class TestGetFileHistory:
     @pytest.mark.asyncio
     async def test_parses_recent_commits(self):
@@ -173,7 +178,7 @@ class TestPromptRendersFileHistory:
             config=config,
             file_history=history,
         )
-        system = messages[0]["content"]
+        system = _system_text(messages)
 
         assert "File History" in system
         assert "Why Does This Code Exist?" in system
@@ -185,13 +190,13 @@ class TestPromptRendersFileHistory:
         config = MiraConfig()
         files = [_file("src/auth.py")]
         messages = build_review_prompt(files=files, config=config)
-        assert "File History" not in messages[0]["content"]
+        assert "File History" not in _system_text(messages)
 
     def test_empty_dict_treated_as_no_history(self):
         config = MiraConfig()
         files = [_file("src/auth.py")]
         messages = build_review_prompt(files=files, config=config, file_history={})
-        assert "File History" not in messages[0]["content"]
+        assert "File History" not in _system_text(messages)
 
     def test_multiple_files_rendered_separately(self):
         config = MiraConfig()
@@ -204,7 +209,7 @@ class TestPromptRendersFileHistory:
             "b.py": [FileHistoryEntry(sha="b1", message="msg-B", author="Y", date="d")],
         }
         messages = build_review_prompt(files=files, config=config, file_history=history)
-        system = messages[0]["content"]
+        system = _system_text(messages)
         assert "msg-A" in system
         assert "msg-B" in system
         assert "`a.py`" in system

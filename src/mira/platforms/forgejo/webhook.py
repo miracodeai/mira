@@ -20,6 +20,7 @@ import httpx
 from mira.config import load_config
 from mira.platforms import profiles
 from mira.platforms.auth import PlatformAuth
+from mira.platforms.base_branch_policy import base_branch_is_filtered_for_repo
 from mira.platforms.command_policy import is_command_allowed
 from mira.platforms.fetch import make_fetcher
 from mira.platforms.mentions import (
@@ -428,6 +429,19 @@ async def dispatch_forgejo_event(
                     repo_name,
                     number,
                     actor,
+                )
+                return "ignored"
+            # Destination-branch gate (see dispatch_github_event).
+            base_branch = (payload.get("pull_request", {}).get("base") or {}).get("ref", "")
+            if base_branch_is_filtered_for_repo(
+                owner, repo_name, base_branch, cfg, platform="forgejo"
+            ):
+                logger.info(
+                    "PR %s/%s#%s skipped — base branch %r not in auto-review policy",
+                    owner,
+                    repo_name,
+                    number,
+                    base_branch,
                 )
                 return "ignored"
             background_tasks.add_task(handle_forgejo_pr, payload, auth, bot_name)

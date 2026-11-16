@@ -7,6 +7,7 @@ import json
 import pytest
 
 from mira.index.manifests import (
+    ParsedPackage,
     _is_lockfile_path,
     is_manifest,
     parse_composer_json,
@@ -159,6 +160,28 @@ class TestDockerfile:
         assert pkgs[0].version == "20.10-alpine"
         assert pkgs[0].kind == "docker"
 
+    @pytest.mark.parametrize(
+        ("image", "name", "version"),
+        [
+            ("registry.example:5000/team/app", "registry.example:5000/team/app", ""),
+            ("localhost:5000/team/sub/app:1.2", "localhost:5000/team/sub/app", "1.2"),
+            ("[2001:db8::1]:5000/team/app", "[2001:db8::1]:5000/team/app", ""),
+            ("team/app:1.2", "team/app", "1.2"),
+        ],
+    )
+    def test_registry_port_and_image_tag_are_distinct(self, image, name, version):
+        path = "images/Dockerfile"
+        (pkg,) = parse_manifest(path, f"FROM {image} AS base")
+        assert (pkg.name, pkg.version, pkg.kind, pkg.file_path) == (name, version, "docker", path)
+
+    @pytest.mark.parametrize("name", ["ubuntu", "registry.example:5000/team/app:1.2"])
+    def test_digest_reference_is_kept_intact(self, name):
+        image = f"{name}@sha256:{'a' * 64}"
+        path = "images/Dockerfile"
+        assert parse_manifest(path, f"FROM {image} AS base") == [
+            ParsedPackage(image, "docker", "", path)
+        ]
+
     def test_multistage_from_as(self):
         content = "FROM python:3.11 AS builder\nFROM alpine:3.18\n"
         pkgs = parse_dockerfile(content, "Dockerfile")
@@ -170,6 +193,23 @@ class TestDockerfile:
         pkgs = parse_dockerfile(content, "Dockerfile")
         assert pkgs[0].name == "scratch"
         assert pkgs[0].version == ""
+
+    def test_from_with_platform_options(self):
+        content = (
+            "FROM --platform=linux/amd64 python:3.12 AS builder\n"
+            "  from\t--platform=$BUILDPLATFORM alpine\n"
+            "FROM --platform=${TARGETPLATFORM} scratch AS empty\n"
+        )
+        path = "images/Dockerfile"
+        assert parse_manifest(path, content) == [
+            ParsedPackage("python", "docker", "3.12", path),
+            ParsedPackage("alpine", "docker", "", path),
+            ParsedPackage("scratch", "docker", "", path),
+        ]
+
+    def test_platform_option_without_image_is_ignored(self):
+        content = "FROM --platform=linux/amd64\nFROM --platform=$BUILDPLATFORM AS builder\n"
+        assert parse_manifest("Dockerfile", content) == []
 
 
 class TestComposerJson:

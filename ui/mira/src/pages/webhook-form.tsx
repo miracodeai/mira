@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { ConfirmButton } from "@/components/ui/confirm-button"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 
 type EventOption = { value: string; label: string; description: string }
 
