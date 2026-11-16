@@ -36,7 +36,9 @@ def active_backend(config: LLMConfig) -> str:
     if config.provider in {"codex-cli", "codex_cli", "codex"}:
         return "codex-cli"
     profile = profiles.resolve(config.base_url)
-    return "openrouter" if profile.get("name") == "openrouter" else "openai-compatible"
+    if profile.get("name") in {"openrouter", "requesty"}:
+        return profile["name"]
+    return "openai-compatible"
 
 
 def _norm(model_id: str) -> str:
@@ -64,6 +66,44 @@ async def _fetch_openai_style(config: LLMConfig, tools_only: bool) -> list[dict]
         if tools_only and "tools" not in (m.get("supported_parameters") or []):
             continue
         out.append({"value": m["id"], "label": m.get("name") or m["id"]})
+    return out
+
+
+async def _fetch_requesty(config: LLMConfig) -> list[dict]:
+    """GET {base_url}/models/managed, then {base_url}/models. Managed policies
+    come first; both keep only tool-calling chat models, like OpenRouter."""
+    headers = {}
+    try:
+        key = _get_api_key(config, profiles.resolve(config.base_url))
+    except Exception as exc:
+        logger.warning("Could not retrieve API key for model catalog fetch: %s", exc)
+        key = ""
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    base = config.base_url.rstrip("/")
+    models: list[dict] = []
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            resp = await client.get(f"{base}/models/managed", headers=headers)
+            resp.raise_for_status()
+            models += resp.json().get("data", [])
+        except httpx.HTTPError as exc:
+            logger.warning("Requesty managed models fetch failed: %s", exc)
+        try:
+            resp = await client.get(f"{base}/models", headers=headers)
+            resp.raise_for_status()
+            models += resp.json().get("data", [])
+        except httpx.HTTPError as exc:
+            if not models:
+                raise
+            logger.warning("Requesty models fetch failed, using managed list only: %s", exc)
+    out, seen = [], set()
+    for m in models:
+        if m.get("api", "chat") != "chat" or not m.get("supports_tool_calling"):
+            continue
+        if m["id"] not in seen:
+            seen.add(m["id"])
+            out.append({"value": m["id"], "label": m["id"]})
     return out
 
 
@@ -123,6 +163,8 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
                 models = await asyncio.to_thread(_fetch_bedrock_sync, config)
             elif backend == "openrouter":
                 models = await _fetch_openai_style(config, tools_only=True)
+            elif backend == "requesty":
+                models = await _fetch_requesty(config)
             else:
                 models = await _fetch_openai_style(config, tools_only=False)
         except Exception as exc:
@@ -139,8 +181,9 @@ def build_options(backend: str, dynamic: list[dict] | None, purpose: str) -> lis
     Dynamic-only models have unknown capabilities, so they're offered for both
     purposes. On a generic endpoint only its own list is trustworthy — registry
     ids are OpenRouter-style — so the registry is used there only as fallback.
+    Requesty is treated the same way, since not every registry id is served.
     """
-    if backend == "openai-compatible" and dynamic is not None:
+    if backend in {"openai-compatible", "requesty"} and dynamic is not None:
         options = [{**d, "recommended": False} for d in dynamic]
         options.sort(key=lambda m: m["label"].lower())
         return options
