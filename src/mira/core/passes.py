@@ -14,8 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from mira.analysis.severity import mentions_security
-from mira.config import load_config
-from mira.dashboard.models_config import llm_config_for
+from mira.config import LLMConfig, load_config
+from mira.dashboard.models_config import critique_config, ensemble_configs, llm_config_for
 from mira.exceptions import ResponseParseError, StructuredOutputError
 from mira.llm import create_llm
 from mira.llm.base import LLMProviderProtocol
@@ -519,6 +519,28 @@ def _security_llm(fallback: LLMProviderProtocol) -> LLMProviderProtocol:
         return fallback
 
 
+def _critique_llm(base: LLMConfig, *, use_dashboard: bool = True) -> LLMProviderProtocol | None:
+    """The configured critic model, or None to grade on the indexing tier."""
+    try:
+        config = critique_config(base, use_dashboard=use_dashboard)
+        return create_llm(config) if config else None
+    except Exception:
+        return None
+
+
+def second_opinion_llms(
+    base: LLMConfig, *, use_dashboard: bool = True
+) -> list[LLMProviderProtocol]:
+    """Providers for the configured second-opinion review models (may be empty)."""
+    providers = []
+    for config in ensemble_configs(base, use_dashboard=use_dashboard):
+        try:
+            providers.append(create_llm(config))
+        except Exception as exc:
+            logger.warning("Second-opinion model %s unavailable: %s", config.model, exc)
+    return providers
+
+
 @dataclass
 class _SecurityScanOutcome:
     comments: list[ReviewComment] = field(default_factory=list)
@@ -947,6 +969,8 @@ async def self_critique(
     indexing_llm: LLMProviderProtocol | None = None,
     diff_files: list | None = None,
     audit: list[dict] | None = None,
+    llm_config: LLMConfig | None = None,
+    critic_llm: LLMProviderProtocol | None = None,
     held_back: list[ReviewComment] | None = None,
 ) -> list[ReviewComment]:
     """Grade each draft comment's evidence and drop the unsupported ones.
@@ -1029,7 +1053,12 @@ async def self_critique(
         + "\n".join(draft_lines)
     )
 
-    critic_llm = indexing_llm or _indexing_llm(llm)
+    critic_llm = (
+        critic_llm
+        or _critique_llm(llm_config or load_config().llm)
+        or indexing_llm
+        or _indexing_llm(llm)
+    )
 
     try:
         raw = await critic_llm.complete_with_tools(
