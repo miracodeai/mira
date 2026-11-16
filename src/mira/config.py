@@ -281,6 +281,7 @@ class ReviewConfig(BaseModel):
     # from the walkthrough's per-file analysis).
     pr_summary: Literal["disable", "append", "replace"] = "disable"
     code_context: bool = True
+    python_call_verification: bool = False
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
     # Review each chunk N times and keep only majority-vote findings.

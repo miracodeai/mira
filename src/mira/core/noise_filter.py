@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from mira.config import FilterConfig
+from mira.core.python_calls import SOURCE_PASS
 from mira.models import ReviewComment, Severity
 
 # Comments of one category anchored this close in the same file, whose text
@@ -58,6 +59,9 @@ def _is_duplicate(
       `open()` call — so different categories are kept apart)
     - Same file + non-overlapping lines but near-identical titles (>= title_threshold)
     """
+    if SOURCE_PASS in (a.source_pass, b.source_pass):
+        return a.source_pass == b.source_pass and (a.path, a.line) == (b.path, b.line)
+
     title_sim = _jaccard_similarity(a.title, b.title)
 
     # Cross-file: near-identical title + similar body → same conceptual issue

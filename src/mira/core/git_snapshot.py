@@ -24,15 +24,18 @@ class GitSnapshot:
 
         self._blobs: dict[str, str] = {}
         self._reads: dict[str, asyncio.Task[str | None]] = {}
+        self._tree_paths: set[str] = set()
         for entry in self._git("ls-tree", "--full-tree", "-rlz", self._head).split(b"\0"):
             if not entry:
                 continue
-            metadata, path = entry.split(b"\t", 1)
+            metadata, raw_path = entry.split(b"\t", 1)
             mode, _, oid, size = metadata.split()
+            path = raw_path.decode("utf-8", errors="surrogateescape")
+            self._tree_paths.add(path)
             if mode in (b"100644", b"100755") and size.isdigit() and int(size) <= _MAX_SOURCE_BYTES:
-                self._blobs[path.decode("utf-8", errors="surrogateescape")] = oid.decode("ascii")
+                self._blobs[path] = oid.decode("ascii")
 
-    def _git(self, *args: str) -> bytes:
+    def _git(self, *args: str, allow_no_match: bool = False, timeout: float | None = None) -> bytes:
         try:
             result = subprocess.run(
                 ["git", "--no-replace-objects", *args],
@@ -40,10 +43,13 @@ class GitSnapshot:
                 env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
                 capture_output=True,
                 check=True,
+                timeout=timeout,
             )
         except FileNotFoundError as exc:
             raise MiraError("Git is required for local branch review.") from exc
         except subprocess.CalledProcessError as exc:
+            if allow_no_match and exc.returncode == 1 and not exc.stderr:
+                return b""
             detail = exc.stderr.decode("utf-8", errors="replace").strip()
             raise MiraError(
                 f"Could not read the local Git snapshot: {detail or 'no result'}"
@@ -71,6 +77,59 @@ class GitSnapshot:
     def paths(self) -> list[str]:
         """List regular source candidates from the pinned tree."""
         return list(self._blobs)
+
+    def tree_paths(self) -> set[str]:
+        """Include tracked paths whose contents cannot be read as source."""
+        return set(self._tree_paths)
+
+    async def unchanged_importers(self, modules: list[str]) -> list[str]:
+        """Find a bounded set of unchanged Python files mentioning these modules."""
+        patterns = [arg for module in modules for arg in ("-e", module)]
+        if not patterns:
+            return []
+        matches = await asyncio.to_thread(
+            self._git,
+            "grep",
+            "-l",
+            "-z",
+            "-F",
+            "--full-name",
+            *patterns,
+            self._head,
+            "--",
+            ":(top,glob)**/*.py",
+            allow_no_match=True,
+            timeout=4,
+        )
+        prefix = f"{self._head}:".encode("ascii")
+        paths = [
+            entry[len(prefix) :].decode("utf-8", errors="surrogateescape")
+            for entry in matches.split(b"\0")
+            if entry.startswith(prefix)
+        ]
+        candidates = [path for path in paths if path in self._blobs][:32]
+        if not candidates:
+            return []
+        previous = await asyncio.to_thread(
+            self._git,
+            "--literal-pathspecs",
+            "ls-tree",
+            "--full-tree",
+            "-rz",
+            self._base,
+            "--",
+            *candidates,
+        )
+        unchanged = []
+        for entry in previous.split(b"\0"):
+            if not entry:
+                continue
+            metadata, raw_path = entry.split(b"\t", 1)
+            mode, _, oid = metadata.split()
+            path = raw_path.decode("utf-8", errors="surrogateescape")
+            if mode in (b"100644", b"100755") and self._blobs.get(path) == oid.decode("ascii"):
+                unchanged.append(path)
+        return unchanged[:6]
 
     async def fetch(self, path: str) -> str | None:
         """Read a committed regular file by its exact tree path."""
