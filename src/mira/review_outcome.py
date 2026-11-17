@@ -43,6 +43,12 @@ class DeliveryReceipt:
             item = self._items[index]
             item.uncertain_attempts = max(0, item.uncertain_attempts - 1)
 
+    def interrupted_copy(self) -> DeliveryReceipt:
+        """Detach evidence from a cancelled worker that may still finish its writes."""
+        receipt = DeliveryReceipt(0, tracked=self.tracked, attempted=self.attempted)
+        receipt._items = [_DeliveryItem(item.confirmed, 1, item.comment_id) for item in self._items]
+        return receipt
+
     @property
     def delivered(self) -> int:
         return sum(item.confirmed for item in self._items)

@@ -581,10 +581,13 @@ class GitHubProvider(BaseProvider):
                     )
                     delivery.begin(i)
                     created = pr.create_review_comment(**kwargs)
-                    ids[i] = getattr(created, "id", 0) or 0
                     delivery.acknowledge(i)
-                    delivery.set_comment_id(i, ids[i])
                     posted += 1
+                    try:
+                        ids[i] = getattr(created, "id", 0) or 0
+                        delivery.set_comment_id(i, ids[i])
+                    except Exception:
+                        logger.debug("Could not read review comment ID", exc_info=True)
                 except GithubException as exc:
                     if 400 <= exc.status < 500:
                         delivery.reject(i)

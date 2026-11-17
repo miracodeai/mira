@@ -1420,6 +1420,8 @@ class ReviewEngine:
         result.thread_decisions = thread_decisions
 
         delivery = result.delivery or DeliveryReceipt(len(result.comments), tracked=False)
+        if isinstance(delivery_error, _asyncio.CancelledError):
+            delivery = delivery.interrupted_copy()
         result.delivery = delivery
         for index, comment_id in enumerate(posted_comment_ids[: len(result.comments)]):
             delivery.set_comment_id(index, comment_id)

@@ -391,3 +391,73 @@ async def test_cancellation_preserves_partial_delivery_without_swallowing_cancel
         outcome = ReviewOutcome.from_json(events[0].outcome_json)
         assert outcome is not None
         assert (outcome.delivered, outcome.unknown, outcome.status) == (1, 1, "partial")
+
+
+@pytest.mark.asyncio
+async def test_individual_acknowledgement_survives_lazy_id_lookup_failure(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    provider = GitHubProvider("synthetic-token")
+    client = MagicMock()
+    pr = client.get_repo.return_value.get_pull.return_value
+    pr.get_commits.return_value = [SimpleNamespace(sha="a" * 40)]
+    pr.create_review.side_effect = GithubException(422, {}, {})
+
+    class UnreadableID:
+        @property
+        def id(self):
+            raise RuntimeError("Synthetic lazy ID lookup failure")
+
+    pr.create_review_comment.side_effect = [UnreadableID(), SimpleNamespace(id=102)]
+    monkeypatch.setattr(provider, "_make_client", lambda _: client)
+    result = _result()
+    result.comments.append(
+        ReviewComment("other.py", 2, None, Severity.WARNING, "bug", "Other", "Details", 1.0)
+    )
+    info = PRInfo(
+        "Test", "", "main", "change", "https://github.com/acme/app/pull/1", 1, "acme", "app"
+    )
+    assert await provider.post_review(info, result) == [0, 102]
+    assert result.delivery is not None
+    assert (result.delivery.delivered, result.delivery.unknown) == (2, 0)
+    assert pr.create_review_comment.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_pending_writes_are_not_recorded_as_definitely_failed(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    native = GitHubProvider("synthetic-token")
+    client = MagicMock()
+    pr = client.get_repo.return_value.get_pull.return_value
+
+    def wait_before_submission(*_args, **_kwargs):
+        started.set()
+        assert release.wait(5)
+        finished.set()
+        return [SimpleNamespace(sha="a" * 40)]
+
+    pr.get_commits.side_effect = wait_before_submission
+    pr.create_review.return_value.get_comments.return_value = []
+    monkeypatch.setattr(native, "_make_client", lambda _: client)
+    engine, _provider, _model = _engine(tmp_path, monkeypatch, native.post_review)
+    task = asyncio.create_task(engine.review_pr("https://github.com/acme/app/pull/1"))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with closing(IndexStore.open("acme", "app")) as store:
+            event = store.list_review_events_for_pr(1)[0]
+        outcome = ReviewOutcome.from_json(event.outcome_json)
+        assert outcome is not None
+        assert (outcome.delivered, outcome.failed, outcome.unknown) == (0, 0, 2)
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
