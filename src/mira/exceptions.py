@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mira.models import ReviewResult
+
 # Import directly from the module, not the mira.llm package, to avoid a
 # circular import: mira.llm.__init__ imports mira.config which imports
 # mira.exceptions.
@@ -75,6 +80,16 @@ class ResponseParseError(MiraError):
 
 class ProviderError(MiraError):
     """Error communicating with a code hosting provider (GitHub, etc.)."""
+
+    status_code: int | None = None
+
+
+class ReviewDeliveryError(ProviderError):
+    """Posting failed after computation; retain the result for final status."""
+
+    def __init__(self, result: ReviewResult) -> None:
+        super().__init__("Review finding delivery did not complete.")
+        self.result = result
 
 
 class WebhookError(MiraError):

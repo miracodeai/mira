@@ -508,11 +508,12 @@ class BitbucketProvider(BaseProvider):
         lines. A comment Bitbucket does reject (e.g. a path not in the PR)
         falls back to a plain PR comment naming the file and line.
         """
+        delivery = result.begin_delivery()
         if not result.comments:
             return []
 
         ids: list[int] = []
-        for comment in result.comments:
+        for index, comment in enumerate(result.comments):
             body = format_comment_body(comment, bot_name=bot_name)
             line = (
                 comment.end_line
@@ -520,13 +521,18 @@ class BitbucketProvider(BaseProvider):
                 else comment.line
             )
             try:
+                delivery.begin(index)
                 ids.append(
                     await self._post_pr_comment(
                         pr_info,
                         {"content": {"raw": body}, "inline": {"path": comment.path, "to": line}},
                     )
                 )
+                delivery.acknowledge(index)
+                delivery.set_comment_id(index, ids[-1])
             except ProviderError as exc:
+                if exc.status_code is not None and 400 <= exc.status_code < 500:
+                    delivery.reject(index)
                 logger.warning(
                     "Inline comment failed for %s:%s (%s); posting as a PR comment",
                     comment.path,
@@ -535,8 +541,15 @@ class BitbucketProvider(BaseProvider):
                 )
                 note = f"**`{comment.path}:{line}`**\n\n{body}"
                 try:
+                    delivery.begin(index)
                     await self.post_comment(pr_info, note)
-                except ProviderError:
+                    delivery.acknowledge(index)
+                except ProviderError as fallback_error:
+                    if (
+                        fallback_error.status_code is not None
+                        and 400 <= fallback_error.status_code < 500
+                    ):
+                        delivery.reject(index)
                     logger.warning(
                         "Plain-comment fallback also failed for %s:%s", comment.path, line
                     )

@@ -74,6 +74,28 @@ def _mock_httpx(status: int = 200, side_effect=None):
 # ── Pure helpers ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("fmt", ["slack", "teams"])
+@pytest.mark.parametrize("status", ["partial", "failed", "unknown"])
+def test_review_notification_does_not_claim_complete_finding_delivery(fmt, status):
+    outcome = {
+        "drafted": 3,
+        "retained": 2,
+        "delivered": 1 if status == "partial" else 0,
+        "failed": 1 if status == "partial" else 2 if status == "failed" else 0,
+        "unknown": 2 if status == "unknown" else 0,
+        "status": status,
+        "coverage": "complete",
+    }
+    payload = nf.render(
+        nf.REVIEW_COMPLETED, {"repo": "acme/app", "comments": 2, "outcome": outcome}, fmt
+    )
+    title = payload["text"] if fmt == "slack" else payload["title"]
+    assert title.startswith("⚠"), "Completed computation must not imply complete finding delivery"
+    body = payload["blocks"][0]["text"]["text"] if fmt == "slack" else payload["text"]
+    assert "confirmed delivered" in body
+    assert "2 retained" in body
+
+
 class TestFormatDetection:
     def test_slack(self):
         assert nf.detect_format("https://hooks.slack.com/services/T/B/X") == "slack"

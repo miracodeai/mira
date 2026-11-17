@@ -154,6 +154,19 @@ def _message(event: str, data: dict[str, Any]) -> tuple[str, str, str]:
     if event == REVIEW_COMPLETED:
         comments = data.get("comments", 0)
         issues = data.get("key_issues", 0)
+        outcome = data.get("outcome")
+        if isinstance(outcome, dict):
+            warning = outcome.get("status") != "complete" or outcome.get("coverage") != "complete"
+            title = f"{'⚠️' if warning else '✅'} Mira reviewed {pr_ref}"
+            body = (
+                f"*<{pr_url}|{pr_ref}>* — {outcome.get('retained', comments)} retained, "
+                f"{outcome.get('delivered', 0)} confirmed delivered, "
+                f"{outcome.get('failed', 0)} not delivered, "
+                f"{outcome.get('unknown', 0)} unconfirmed. "
+                f"Review {outcome.get('coverage', 'unknown')}; "
+                f"finding delivery {outcome.get('status', 'unknown')}."
+            )
+            return title, body, "ECB22E" if warning else "2EB67D"
         title = f"✅ Mira reviewed {pr_ref}"
         body = f"*<{pr_url}|{pr_ref}>* — {comments} comment(s), {issues} key issue(s)"
         return title, body, "2EB67D"

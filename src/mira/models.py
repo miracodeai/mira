@@ -5,6 +5,8 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
+from mira.review_outcome import DeliveryReceipt, ReviewOutcome
+
 WALKTHROUGH_MARKER = "<!-- mira-walkthrough -->"
 PR_SUMMARY_START = "<!-- mira-pr-summary-start -->"
 PR_SUMMARY_END = "<!-- mira-pr-summary-end -->"
@@ -519,6 +521,14 @@ class ReviewResult:
     # in this push" instead of a bare count that reads as the whole PR.
     incremental_since: str = ""
     pr_file_count: int = 0
+    delivery: DeliveryReceipt | None = field(default=None, repr=False)
+    drafted_count: int | None = None
+    outcome: ReviewOutcome | None = None
+
+    def begin_delivery(self) -> DeliveryReceipt:
+        """Start one provider call; internal retries retain the same receipt."""
+        self.delivery = DeliveryReceipt(len(self.comments))
+        return self.delivery
 
 
 @dataclass

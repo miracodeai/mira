@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from mira.dashboard import api as _api
 from mira.dashboard.db import RepoRecord
 from mira.index.store import IndexStore
+from mira.review_outcome import ReviewOutcome
 
 if TYPE_CHECKING:
     from mira.index.store import ReviewEvent
@@ -53,6 +54,7 @@ def review_event_model(e: ReviewEvent) -> _api.ReviewEventModel:
         pr_title=e.pr_title,
         pr_url=e.pr_url,
         comments_posted=e.comments_posted,
+        outcome=ReviewOutcome.from_json(e.outcome_json),
         blockers=e.blockers,
         warnings=e.warnings,
         suggestions=e.suggestions,
@@ -119,6 +121,7 @@ def collect_activity(
                                 pr_title=e.pr_title,
                                 pr_url=e.pr_url,
                                 comments_posted=e.comments_posted,
+                                outcome=ReviewOutcome.from_json(e.outcome_json),
                                 blockers=e.blockers,
                                 warnings=e.warnings,
                                 suggestions=e.suggestions,

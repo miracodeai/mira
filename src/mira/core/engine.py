@@ -37,7 +37,12 @@ from mira.core.threads import (
     thread_severity,
     thread_title,
 )
-from mira.exceptions import MiraError, ResponseParseError, StructuredOutputError
+from mira.exceptions import (
+    MiraError,
+    ResponseParseError,
+    ReviewDeliveryError,
+    StructuredOutputError,
+)
 from mira.index.context import SourceFetcher, build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
@@ -73,6 +78,7 @@ from mira.models import (
     build_review_stats,
 )
 from mira.providers.base import BaseProvider, CheckConclusion
+from mira.review_outcome import DeliveryReceipt, DeliveryStatus, ReviewOutcome
 from mira.security.secrets_scan import scan_secrets
 
 logger = logging.getLogger(__name__)
@@ -646,6 +652,21 @@ class ReviewEngine:
             logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
     _CHECK_CONCLUSIONS: dict[str, tuple[CheckConclusion, str, str]] = {
+        "delivery_failed": (
+            "failure",
+            "Finding Delivery Failed",
+            "The review produced findings, but their delivery did not complete. See review details.",
+        ),
+        "delivery_partial": (
+            "neutral",
+            "Finding Delivery Incomplete",
+            "Some findings were delivered; others failed or could not be confirmed. See review details.",
+        ),
+        "delivery_unknown": (
+            "neutral",
+            "Finding Delivery Unconfirmed",
+            "Finding delivery could not be confirmed. See review details.",
+        ),
         "success": (
             "success",
             "Code Review Complete",
@@ -654,7 +675,7 @@ class ReviewEngine:
         "failure": (
             "failure",
             "Code Review Failed",
-            "The review stopped due to an unexpected error and did not produce findings.",
+            "The review did not complete successfully. Check review details for its recorded results.",
         ),
         "neutral": (
             "neutral",
@@ -690,6 +711,13 @@ class ReviewEngine:
         failed = len(result.failed_chunks)
         if failed and result.total_chunks and failed >= result.total_chunks:
             return "review_failed"
+        if result.outcome is not None:
+            if result.outcome.status == DeliveryStatus.PARTIAL:
+                return "delivery_partial"
+            if result.outcome.status == DeliveryStatus.FAILED or result.outcome.delivery_error:
+                return "delivery_failed"
+            if result.outcome.status == DeliveryStatus.UNKNOWN:
+                return "delivery_unknown"
         if failed or result.security_failures:
             return "incomplete"
         # Neutral only when a walkthrough was enabled AND generation was
@@ -725,6 +753,15 @@ class ReviewEngine:
         if result is None:
             return ""
         parts: list[str] = []
+        if result.outcome is not None:
+            outcome = result.outcome
+            drafted = str(outcome.drafted) if outcome.drafted is not None else "unrecorded"
+            parts.append(
+                f"Findings: {drafted} drafted · {outcome.retained} retained · "
+                f"{outcome.delivered} confirmed delivered · {outcome.failed} not delivered · "
+                f"{outcome.unknown} unconfirmed. Finding delivery: {outcome.status}. "
+                f"Review coverage: {outcome.coverage}."
+            )
         if result.incremental_since and result.pr_file_count:
             parts.append(
                 f"{result.pr_file_count} file{'s' if result.pr_file_count != 1 else ''} in PR"
@@ -888,6 +925,11 @@ class ReviewEngine:
         run_id = await self._start_check(pr_info)
         try:
             result = await self._review_pr(pr_info)
+        except ReviewDeliveryError as exc:
+            await self._finish_check(
+                pr_info, run_id, self._check_status_key(exc.result), exc.result
+            )
+            raise
         except BaseException:
             await self._finish_check(pr_info, run_id, "failure", None)
             raise
@@ -1346,6 +1388,10 @@ class ReviewEngine:
         )
 
         posted_comment_ids: list[int] = []
+        delivery_error: BaseException | None = None
+        result.delivery = DeliveryReceipt(
+            len(result.comments), tracked=False, attempted=not self.dry_run
+        )
         if result.comments:
             if self.dry_run:
                 logger.info(
@@ -1354,9 +1400,12 @@ class ReviewEngine:
                     pr_info.url,
                 )
             else:
-                posted_comment_ids = (
-                    await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
-                )
+                try:
+                    ids = await self.provider.post_review(pr_info, result, bot_name=self.bot_name)
+                    if isinstance(ids, list):
+                        posted_comment_ids = ids
+                except BaseException as exc:
+                    delivery_error = exc
         elif result.failed_chunks:
             logger.warning(
                 "Review incomplete for PR %s: %d of %d chunk(s) failed; "
@@ -1369,6 +1418,34 @@ class ReviewEngine:
             logger.info("No code suggestions for PR %s", pr_info.url)
 
         result.thread_decisions = thread_decisions
+
+        delivery = result.delivery or DeliveryReceipt(len(result.comments), tracked=False)
+        if isinstance(delivery_error, _asyncio.CancelledError):
+            delivery = delivery.interrupted_copy()
+        result.delivery = delivery
+        for index, comment_id in enumerate(posted_comment_ids[: len(result.comments)]):
+            delivery.set_comment_id(index, comment_id)
+        posted_comment_ids = delivery.comment_ids
+        failed = len(result.failed_chunks)
+        coverage = (
+            "skipped"
+            if result.skipped_reason
+            else "failed"
+            if failed and result.total_chunks and failed >= result.total_chunks
+            else "incomplete"
+            if failed or result.security_failures
+            else "complete"
+        )
+        result.outcome = ReviewOutcome(
+            result.drafted_count,
+            len(result.comments),
+            delivery.delivered,
+            delivery.failed,
+            delivery.unknown,
+            delivery.status,
+            coverage,
+            delivery_error is not None,
+        )
 
         try:
             import json as _json
@@ -1400,9 +1477,10 @@ class ReviewEngine:
                 author=pr_info.author,
                 author_avatar_url=pr_info.author_avatar_url,
                 reviewed_paths=reviewed_paths_json,
+                outcome_json=result.outcome.to_json(),
             )
-            # Persist each comment Mira posted so the dashboard can show the
-            # actual review conversation, not just aggregate counts.
+            # Persist retained findings, including intended comments whose delivery
+            # failed or is unconfirmed; the event outcome carries the receipt.
             store.add_review_comments(
                 review_event.id,
                 pr_info.number,
@@ -1468,6 +1546,11 @@ class ReviewEngine:
                 logger.debug("Failed to persist review progress: %s", progress_err)
         except Exception as exc:
             logger.debug("Failed to record review event: %s", exc)
+
+        if delivery_error is not None:
+            if not isinstance(delivery_error, Exception):
+                raise delivery_error
+            raise ReviewDeliveryError(result) from delivery_error
 
         # Anchor the SHA even on zero-finding rounds; without it round 2 has
         # nothing to compare against and falls back to a full review.
@@ -2349,6 +2432,7 @@ class ReviewEngine:
 
         return ReviewResult(
             comments=final_comments,
+            drafted_count=len(all_comments),
             key_issues=all_key_issues,
             summary=summary,
             pr_summary_block=pr_summary_block,
