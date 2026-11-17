@@ -62,10 +62,16 @@ async def test_individual_fallback_retains_partial_acknowledgements(monkeypatch,
     pr = client.get_repo.return_value.get_pull.return_value
     pr.get_commits.return_value = [SimpleNamespace(sha="a" * 40)]
     pr.create_review.side_effect = GithubException(422, {"message": "batch rejected"}, {})
-    pr.create_review_comment.side_effect = [
-        SimpleNamespace(id=101),
-        GithubException(second_status, {"message": "rejected"}, {}),
-    ]
+    posted_first = False
+
+    def create_comment(**_kwargs):
+        nonlocal posted_first
+        if not posted_first:
+            posted_first = True
+            return SimpleNamespace(id=101)
+        raise GithubException(second_status, {"message": "rejected"}, {})
+
+    pr.create_review_comment.side_effect = create_comment
     monkeypatch.setattr(provider, "_make_client", lambda _: client)
     info = PRInfo(
         "Test", "", "main", "change", "https://github.com/acme/app/pull/1", 1, "acme", "app"
