@@ -478,6 +478,7 @@ class GitHubProvider(BaseProvider):
         result: ReviewResult,
         bot_name: str = "miracodeai",
     ) -> list[int]:
+        delivery = result.begin_delivery()
         if not result.comments:
             return []
 
@@ -523,12 +524,14 @@ class GitHubProvider(BaseProvider):
             ids = [0] * len(result.comments)
 
             try:
+                delivery.begin(*range(len(result.comments)))
                 review = pr.create_review(
                     commit=latest_commit,
                     body=review_body,
                     event="COMMENT",
                     comments=review_comments,  # type: ignore[arg-type]
                 )
+                delivery.acknowledge(*range(len(result.comments)))
                 # Map the posted comments back to ours by (path, anchored line)
                 # so human replies can later link to the exact comment.
                 try:
@@ -540,10 +543,13 @@ class GitHubProvider(BaseProvider):
                         by_loc[(posted_c.path, ln)] = posted_c.id
                     for i, c in enumerate(result.comments):
                         ids[i] = by_loc.get((c.path, _anchor(c)), 0)
+                        delivery.set_comment_id(i, ids[i])
                 except Exception:
                     logger.debug("Could not map review comment IDs", exc_info=True)
                 return ids
             except GithubException as exc:
+                if 400 <= exc.status < 500:
+                    delivery.reject(*range(len(result.comments)))
                 if exc.status != 422:
                     raise
                 logger.warning(
@@ -573,10 +579,15 @@ class GitHubProvider(BaseProvider):
                         kwargs.get("line"),
                         len(kwargs.get("body", "")),
                     )
+                    delivery.begin(i)
                     created = pr.create_review_comment(**kwargs)
                     ids[i] = getattr(created, "id", 0) or 0
+                    delivery.acknowledge(i)
+                    delivery.set_comment_id(i, ids[i])
                     posted += 1
                 except GithubException as exc:
+                    if 400 <= exc.status < 500:
+                        delivery.reject(i)
                     if exc.status == 422:
                         logger.warning(
                             "Skipping comment on %s:%s — 422 from GitHub: %s",

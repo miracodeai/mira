@@ -209,6 +209,26 @@ async def test_completed_review_fires_review_completed(
 @patch("mira.platforms.github.webhook.create_provider")
 @patch("mira.platforms.handlers.create_llm")
 @patch("mira.platforms.handlers.load_config")
+async def test_completed_review_payload_keeps_delivery_separate_from_findings(
+    mock_config, mock_llm_cls, mock_provider_cls, mock_engine_cls, mock_app_auth
+):
+    from mira.review_outcome import DeliveryStatus, ReviewOutcome
+
+    mock_config.return_value = MagicMock()
+    result = ReviewResult(comments=[_comment(Severity.SUGGESTION)])
+    result.outcome = ReviewOutcome(2, 1, 0, 0, 1, DeliveryStatus.UNKNOWN, "complete")
+    dispatch = await _run_pr_handler(result, mock_engine_cls, mock_app_auth)
+    data = _data_for(dispatch, "review.completed")
+    assert data.get("outcome") is not None
+    assert data["outcome"]["retained"] == 1
+    assert data["outcome"]["delivered"] == 0
+    assert data["outcome"]["status"] == "unknown"
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
 async def test_blocker_comment_also_fires_high_severity(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
