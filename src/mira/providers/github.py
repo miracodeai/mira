@@ -8,6 +8,8 @@ import itertools
 import logging
 import os
 import re
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -25,7 +27,7 @@ from mira.models import (
     ReviewResult,
     UnresolvedThread,
 )
-from mira.providers.base import BaseProvider
+from mira.providers.base import CHECK_RUN_NAME, BaseProvider, CheckConclusion
 
 # Shared comment-formatting helpers (re-exported for back-compat — callers and
 # tests import these names from this module).
@@ -185,21 +187,50 @@ def _file_to_diff(f: dict[str, Any]) -> str:
     return "\n".join(header) + "\n" + patch
 
 
+def _async_constant(value: str) -> Callable[[], Awaitable[str]]:
+    async def _const() -> str:
+        return value
+
+    return _const
+
+
+_WRITE_PERMISSIONS = frozenset({"admin", "maintain", "push", "write"})
+_READ_PERMISSIONS = frozenset({"pull", "read", "triage"})
+
+
+def _normalize_permission(permission: str | None) -> str | None:
+    value = (permission or "").lower()
+    if value in _WRITE_PERMISSIONS:
+        return "write"
+    if value in _READ_PERMISSIONS:
+        return "read"
+    if value == "none":
+        return "none"
+    return None
+
+
 class GitHubProvider(BaseProvider):
     """GitHub code hosting provider."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str | Callable[[], Awaitable[str]]) -> None:
         if not token:
             raise ProviderError("GitHub token is required")
-        self._github = Github(token)
-        self._token = token
+        self._token_supplier = _async_constant(token) if isinstance(token, str) else token
+
+    async def _resolve_token(self) -> str:
+        return await self._token_supplier()
+
+    def _make_client(self, token: str):
+        return Github(token, base_url=_GITHUB_API_URL)
 
     async def get_pr_info(self, pr_url: str) -> PRInfo:
         owner, repo, number = parse_pr_url(pr_url)
+        token = await self._resolve_token()
+        gh = self._make_client(token)
 
         @_retry_transient
         def _fetch() -> PRInfo:
-            gh_repo = self._github.get_repo(f"{owner}/{repo}")
+            gh_repo = gh.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
             user = pr.user
             return PRInfo(
@@ -223,10 +254,36 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to fetch PR info: {e}") from e
 
+    async def get_repo_permission(
+        self,
+        owner: str,
+        repo: str,
+        username: str,
+        *,
+        user_id: int | str | None = None,
+    ) -> str | None:
+        """Fetch a user's collaborator permission, normalized for authz."""
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
+        def _fetch() -> str:
+            return gh.get_repo(f"{owner}/{repo}").get_collaborator_permission(username)
+
+        try:
+            permission = await asyncio.to_thread(_fetch)
+        except GithubException as exc:
+            if getattr(exc, "status", None) == 404:
+                return "none"
+            raise ProviderError(f"Failed to fetch repo permission for {username}: {exc}") from exc
+        except Exception as exc:
+            raise ProviderError(f"Failed to fetch repo permission for {username}: {exc}") from exc
+        return _normalize_permission(permission)
+
     async def get_pr_diff(self, pr_info: PRInfo) -> str:
         diff_url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/pulls/{pr_info.number}"
+        token = await self._resolve_token()
         headers = {
-            "Authorization": f"token {self._token}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3.diff",
         }
 
@@ -265,8 +322,9 @@ class GitHubProvider(BaseProvider):
         too large for an individual patch arrive without one and are skipped
         with a warning.
         """
+        token = await self._resolve_token()
         headers = {
-            "Authorization": f"token {self._token}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github+json",
         }
         files: list[dict[str, Any]] = []
@@ -322,8 +380,9 @@ class GitHubProvider(BaseProvider):
             f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}"
             f"/compare/{base_sha}...{head_sha}"
         )
+        token = await self._resolve_token()
         headers = {
-            "Authorization": f"token {self._token}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3.diff",
         }
 
@@ -352,9 +411,12 @@ class GitHubProvider(BaseProvider):
         ``limit`` to bound the work on busy repos.
         """
 
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _fetch() -> list[OpenPRRef]:
-            gh_repo = self._github.get_repo(f"{owner}/{repo}")
+            gh_repo = gh.get_repo(f"{owner}/{repo}")
             pulls = gh_repo.get_pulls(state="open", sort="updated", direction="desc")
             out: list[OpenPRRef] = []
             for pr in itertools.islice(pulls, limit):
@@ -392,9 +454,12 @@ class GitHubProvider(BaseProvider):
         list if the PR has vanished (closed/merged mid-review).
         """
 
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _fetch() -> list[str]:
-            gh_repo = self._github.get_repo(f"{owner}/{repo}")
+            gh_repo = gh.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
             return [f.filename for f in itertools.islice(pr.get_files(), limit)]
 
@@ -441,9 +506,12 @@ class GitHubProvider(BaseProvider):
         if result.key_issues:
             review_body += _format_key_issues(result.key_issues)
 
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _post() -> list[int]:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
 
             commits = list(pr.get_commits())
@@ -546,9 +614,12 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to post review: {e}") from e
 
     async def post_comment(self, pr_info: PRInfo, body: str) -> None:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _post_comment() -> None:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
             issue.create_comment(body)
 
@@ -559,10 +630,116 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to post comment: {e}") from e
 
+    def _check_run_headers(self, token: str) -> dict[str, str]:
+        return {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+    async def start_check_run(
+        self,
+        pr_info: PRInfo,
+        *,
+        title: str = "",
+        summary: str = "",
+        details_url: str = "",
+    ) -> int | None:
+        """Create an in-progress check run for the PR head commit.
+
+        Uses the Checks API: the run shows the bot avatar, a title/summary,
+        and a details link (clickable from the PR checks section). No retry on
+        transient errors — a missing ``checks: write`` permission surfaces as
+        a single 403 instead of a retry storm.
+        """
+        if not pr_info.head_sha:
+            return None
+        token = await self._resolve_token()
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/check-runs"
+        payload: dict[str, Any] = {
+            "name": CHECK_RUN_NAME,
+            "head_sha": pr_info.head_sha,
+            "status": "in_progress",
+            "started_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "output": {
+                "title": title or CHECK_RUN_NAME,
+                "summary": summary,
+                "text": "",
+            },
+        }
+        if details_url:
+            payload["details_url"] = details_url
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    url,
+                    json=payload,
+                    headers=self._check_run_headers(token),
+                )
+        except (ConnectionError, TimeoutError, httpx.TransportError) as e:
+            raise ProviderError(f"GitHub POST {url} failed: {e}") from e
+        if resp.status_code == 403:
+            # Check-run write is App-only (`checks: write` is granted to
+            # GitHub App installations, not to personal tokens). Skip the
+            # check run; the engine logs no status was published.
+            logger.warning(
+                "GitHub check-run create forbidden (needs a GitHub App "
+                "installation with checks:write granted): %s",
+                resp.text[:300],
+            )
+            return None
+        if resp.status_code != 201:
+            raise ProviderError(f"GitHub POST {url} → {resp.status_code}: {resp.text[:300]}")
+        return int(resp.json()["id"])
+
+    async def finish_check_run(
+        self,
+        pr_info: PRInfo,
+        run_id: int | None,
+        conclusion: CheckConclusion,
+        *,
+        title: str = "",
+        summary: str = "",
+        details: str = "",
+    ) -> None:
+        """Complete an in-progress check run with a conclusion.
+
+        ``details`` goes into the check run's expandable DETAILS section
+        (``output.text``); an empty string leaves the box blank.
+        """
+        if run_id is None:
+            return
+        token = await self._resolve_token()
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/check-runs/{run_id}"
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload: dict[str, Any] = {
+            "status": "completed",
+            "conclusion": conclusion,
+            "completed_at": now,
+            "output": {
+                "title": title or CHECK_RUN_NAME,
+                "summary": summary,
+                "text": details,
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.patch(
+                    url,
+                    json=payload,
+                    headers=self._check_run_headers(token),
+                )
+        except (ConnectionError, TimeoutError, httpx.TransportError) as e:
+            raise ProviderError(f"GitHub PATCH {url} failed: {e}") from e
+        if resp.status_code != 200:
+            raise ProviderError(f"GitHub PATCH {url} → {resp.status_code}: {resp.text[:300]}")
+
     async def find_bot_comment(self, pr_info: PRInfo, marker: str) -> int | None:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _find() -> int | None:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
             for comment in issue.get_comments():
                 if marker in comment.body:
@@ -577,9 +754,12 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to find bot comment: {e}") from e
 
     async def update_comment(self, pr_info: PRInfo, comment_id: int, body: str) -> None:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _update() -> None:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
             comment = issue.get_comment(comment_id)
             comment.edit(body)
@@ -599,9 +779,12 @@ class GitHubProvider(BaseProvider):
         REST endpoint, not ``create_comment``.
         """
 
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _reply() -> None:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
             pr.create_review_comment_reply(comment_id, body)
 
@@ -615,8 +798,11 @@ class GitHubProvider(BaseProvider):
     async def get_comment_body(self, pr_info: PRInfo, comment_id: int) -> str:
         """Fetch a review (line) comment's body by id. Best-effort."""
 
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         def _fetch() -> str:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
             return (pr.get_review_comment(comment_id).body or "")[:1500]
 
@@ -638,7 +824,7 @@ class GitHubProvider(BaseProvider):
                 _GRAPHQL_URL,
                 json={"query": query, "variables": variables},
                 headers={
-                    "Authorization": f"bearer {self._token}",
+                    "Authorization": f"bearer {await self._resolve_token()}",
                     "Content-Type": "application/json",
                 },
             )
@@ -800,10 +986,45 @@ class GitHubProvider(BaseProvider):
         )
         return threads
 
+    async def get_pr_description(self, pr_info: PRInfo) -> str:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
+        @_retry_transient
+        def _fetch() -> str:
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            return gh_repo.get_pull(pr_info.number).body or ""
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to fetch PR description: {e}") from e
+
+    async def update_pr_description(self, pr_info: PRInfo, body: str) -> None:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
+        @_retry_transient
+        def _edit() -> None:
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo.get_pull(pr_info.number).edit(body=body)
+
+        try:
+            await asyncio.to_thread(_edit)
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError(f"Failed to update PR description: {e}") from e
+
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _add() -> None:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
             issue.add_to_labels(label)
 
@@ -815,9 +1036,12 @@ class GitHubProvider(BaseProvider):
             raise ProviderError(f"Failed to add label: {e}") from e
 
     async def remove_label(self, pr_info: PRInfo, label: str) -> None:
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _remove() -> None:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             issue = gh_repo.get_issue(pr_info.number)
             try:
                 issue.remove_from_labels(label)
@@ -842,8 +1066,9 @@ class GitHubProvider(BaseProvider):
         thousands of paths in response.
         """
         url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/git/trees/{ref}?recursive=1"
+        token = await self._resolve_token()
         headers = {
-            "Authorization": f"token {self._token}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github+json",
         }
 
@@ -864,8 +1089,9 @@ class GitHubProvider(BaseProvider):
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref via the REST API."""
         url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/contents/{path}"
+        token = await self._resolve_token()
         headers = {
-            "Authorization": f"token {self._token}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json",
         }
 
@@ -1047,8 +1273,9 @@ class GitHubProvider(BaseProvider):
             return {}
 
         sem = asyncio.Semaphore(8)
+        token = await self._resolve_token()
         headers = {
-            "Authorization": f"token {self._token}",
+            "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json",
         }
         base = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/commits"
@@ -1100,9 +1327,12 @@ class GitHubProvider(BaseProvider):
         """Fetch all non-bot review comments (line-level) on a PR."""
         bot_norm = _normalize_login(bot_login)
 
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _fetch() -> list[HumanReviewComment]:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
             results: list[HumanReviewComment] = []
             for c in pr.get_review_comments():
@@ -1129,9 +1359,12 @@ class GitHubProvider(BaseProvider):
         (matched via ``pull_request_review_id``). Used to classify whether an
         approval was a substantive review or a rubber-stamp."""
 
+        token = await self._resolve_token()
+        gh = self._make_client(token)
+
         @_retry_transient
         def _fetch() -> list[str]:
-            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo = gh.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
             return [
                 c.body or ""

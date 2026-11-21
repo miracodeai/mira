@@ -1,22 +1,8 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
+
+import { AuthContext, type AuthUser } from "./auth-context"
 
 const API_BASE = import.meta.env.VITE_API_URL || ""
-
-export interface AuthUser {
-  id: number
-  username: string
-  is_admin: boolean
-  theme: "dark" | "light"
-}
-
-interface AuthContextType {
-  user: AuthUser | null
-  loading: boolean
-  login: (username: string, password: string) => Promise<string | null>
-  logout: () => Promise<void>
-}
-
-const AuthContext = createContext<AuthContextType | null>(null)
 
 function applyTheme(theme: string) {
   // Sync with the ThemeProvider by setting localStorage + class
@@ -74,10 +60,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   )
-}
-
-export function useAuth() {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider")
-  return ctx
 }

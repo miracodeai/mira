@@ -74,6 +74,24 @@ def test_reject_keeps_rule_out(patched_db: AppDatabase):
     store.close()
 
 
+def test_resynthesis_leaves_rejected_rule_untouched(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    store = IndexStore.open("acme", "web")
+    rule = store.upsert_learned_rule("first wording", "reject_pattern", "style", "", 3)
+    store.close()
+    rules.reject_learned_rule("acme", "web", rule.id, _Req(is_admin=True))
+
+    # More feedback re-synthesizes the same (category, path) with new text.
+    store = IndexStore.open("acme", "web")
+    again = store.upsert_learned_rule("new wording", "reject_pattern", "style", "", 9)
+    assert (again.id, again.status) == (rule.id, "rejected")
+    kept = store.get_learned_rule(rule.id)
+    # The admin's verdict applies to the text they saw: neither is rewritten.
+    assert (kept.rule_text, kept.sample_count, kept.status) == ("first wording", 3, "rejected")
+    assert store.list_active_learned_rules() == []
+    store.close()
+
+
 def test_non_admin_cannot_approve(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     store = IndexStore.open("acme", "web")

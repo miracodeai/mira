@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 
 from mira.config import FilterConfig
 from mira.models import FileChangeType, FileDiff
@@ -26,6 +27,24 @@ def _is_generated(file_diff: FileDiff) -> bool:
             if marker.upper() in content_upper:
                 return True
     return False
+
+
+_GITLINK_LINE_RE = re.compile(r"^[+-]Subproject commit [0-9a-f]{7,64}\s*$")
+
+
+def _is_gitlink(file_diff: FileDiff) -> bool:
+    """A submodule pointer (`mode 160000`): the only content is a commit SHA.
+
+    There is no source to review, and a reviewer asked to judge it can only
+    speculate about the nested repository.
+    """
+    changed = [
+        line
+        for hunk in file_diff.hunks
+        for line in hunk.content.splitlines()
+        if line[:1] in ("+", "-") and not line.startswith(("+++", "---"))
+    ]
+    return bool(changed) and all(_GITLINK_LINE_RE.match(line) for line in changed)
 
 
 def _matches_any_pattern(path: str, patterns: list[str]) -> bool:
@@ -62,6 +81,8 @@ def filter_files(files: list[FileDiff], config: FilterConfig) -> list[FileDiff]:
         if _matches_any_pattern(f.path, config.exclude_patterns):
             continue
         if _is_generated(f):
+            continue
+        if _is_gitlink(f):
             continue
         result.append(f)
 

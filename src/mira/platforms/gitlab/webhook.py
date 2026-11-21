@@ -18,10 +18,11 @@ import httpx
 from mira.config import load_config
 from mira.platforms import profiles
 from mira.platforms.auth import PlatformAuth
+from mira.platforms.base_branch_policy import base_branch_is_filtered_for_repo
+from mira.platforms.command_policy import is_command_allowed
 from mira.platforms.fetch import _next_link, make_fetcher
 from mira.platforms.mentions import (
     author_is_filtered,
-    command_after_mention,
     has_mention,
     mention_names,
     strip_mentions,
@@ -210,11 +211,13 @@ async def handle_gitlab_note(payload: dict[str, Any], auth: PlatformAuth, bot_na
         return
     mr_url = mr.get("url") or f"{project.get('web_url', '')}/-/merge_requests/{iid}"
     actor = payload.get("user", {}).get("username", "")
+    actor_id = payload.get("user", {}).get("id")
 
     try:
         token = await auth.get_token()
         provider = create_provider("gitlab", token)
         pr_info = await provider.get_pr_info(mr_url)
+        config = load_config()
 
         # Accept a mention of either the configured name or the real bot user.
         names = mention_names(bot_name, await auth.get_bot_identity())
@@ -222,6 +225,16 @@ async def handle_gitlab_note(payload: dict[str, Any], auth: PlatformAuth, bot_na
         first_word = question.split()[0].lower() if question.split() else ""
 
         if first_word in _PAUSE_KEYWORDS:
+            if not await is_command_allowed(
+                config,
+                "pause",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo,
+                user_id=actor_id,
+            ):
+                return
             await provider.add_label(pr_info, PAUSE_LABEL)
             await provider.post_comment(
                 pr_info,
@@ -229,6 +242,16 @@ async def handle_gitlab_note(payload: dict[str, Any], auth: PlatformAuth, bot_na
             )
             return
         if first_word in _RESUME_KEYWORDS:
+            if not await is_command_allowed(
+                config,
+                "resume",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo,
+                user_id=actor_id,
+            ):
+                return
             await provider.remove_label(pr_info, PAUSE_LABEL)
             await provider.post_comment(pr_info, "Automatic reviews resumed.")
             return
@@ -238,6 +261,16 @@ async def handle_gitlab_note(payload: dict[str, Any], auth: PlatformAuth, bot_na
 
         # Explicit reject on an inline (diff) note → resolve + record feedback.
         if first_word in _REJECT_KEYWORDS and discussion_id and position:
+            if not await is_command_allowed(
+                config,
+                "reject",
+                actor,
+                provider=provider,
+                owner=owner,
+                repo=repo,
+                user_id=actor_id,
+            ):
+                return
             await provider.resolve_threads(pr_info, [str(discussion_id)])
             try:
                 store = _open_store(owner, repo, "gitlab")
@@ -274,12 +307,22 @@ async def handle_gitlab_note(payload: dict[str, Any], auth: PlatformAuth, bot_na
                 actor=actor,
                 bot_name=bot_name,
                 platform="gitlab",
+                user_id=actor_id,
             )
             return
 
         # General MR comment → review / help / Q&A.
         await run_pr_command(
-            provider, owner, repo, iid, mr_url, question, actor, bot_name, platform="gitlab"
+            provider,
+            owner,
+            repo,
+            iid,
+            mr_url,
+            question,
+            actor,
+            bot_name,
+            platform="gitlab",
+            user_id=actor_id,
         )
     except Exception:
         logger.exception("Error handling GitLab note on %s/%s!%s", owner, repo, iid)
@@ -310,6 +353,20 @@ async def dispatch_gitlab_event(
             if author_is_filtered(actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
                 logger.debug("MR skipped — author %s filtered by author filter", actor)
                 return "ignored"
+            # Destination-branch gate (see dispatch_github_event).
+            owner, repo = _split_project_path(
+                payload.get("project", {}).get("path_with_namespace", "")
+            )
+            target_branch = attrs.get("target_branch", "")
+            if base_branch_is_filtered_for_repo(owner, repo, target_branch, cfg, platform="gitlab"):
+                logger.info(
+                    "MR %s/%s!%s skipped — target branch %r not in auto-review policy",
+                    owner,
+                    repo,
+                    attrs.get("iid", 0),
+                    target_branch,
+                )
+                return "ignored"
             # Same opt-out as GitHub's `synchronize`: new commits on an already
             # open MR only get reviewed on an explicit `@bot review` comment.
             if action == "update" and not cfg.review.review_on_synchronize:
@@ -331,14 +388,6 @@ async def dispatch_gitlab_event(
         if attrs.get("noteable_type") == "MergeRequest" and has_mention(
             attrs.get("note") or "", names
         ):
-            cmd_word = command_after_mention(attrs.get("note") or "", names)
-            if cmd_word != "review":
-                cfg = load_config()
-                if author_is_filtered(
-                    actor, cfg.filter.allowed_authors, cfg.filter.blocked_authors
-                ):
-                    logger.debug("MR note skipped — author %s filtered", actor)
-                    return "ignored"
             background_tasks.add_task(handle_gitlab_note, payload, auth, bot_name)
             return "processing"
         return "ignored"

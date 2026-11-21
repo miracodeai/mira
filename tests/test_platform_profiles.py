@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from mira.platforms import profiles
 
 
@@ -26,9 +28,20 @@ class TestResolve:
         assert p["supports"]["installations"] is False
         assert p["terminology"]["pr_short"] == "MR"
 
-    def test_unknown_name_returns_default_with_name(self):
+    def test_bitbucket(self):
         p = profiles.resolve("bitbucket")
         assert p["name"] == "bitbucket"
+        assert p["api_url"] == "https://api.bitbucket.org/2.0"
+        assert p["auth_model"] == "token"
+        assert p["signature"]["scheme"] == "hmac-sha256"
+        assert p["signature"]["header"] == "X-Hub-Signature"
+        assert p["signature"]["prefix"] == "sha256="
+        assert p["event_header"] == "X-Event-Key"
+        assert p["webhook_route"] == "/bitbucket/webhook"
+
+    def test_unknown_name_returns_default_with_name(self):
+        p = profiles.resolve("sourcehut")
+        assert p["name"] == "sourcehut"
         assert p["api_url"] == ""
         assert p["signature"] == {}
 
@@ -38,7 +51,7 @@ class TestGet:
         assert profiles.get("gitlab")["name"] == "gitlab"
 
     def test_missing_returns_none(self):
-        assert profiles.get("bitbucket") is None
+        assert profiles.get("sourcehut") is None
 
 
 class TestEnvSeeding:
@@ -86,3 +99,17 @@ class TestRuntimeOverride:
             assert profiles.resolve("github")["name"] == "github"
         finally:
             profiles._load.cache_clear()
+
+
+@pytest.mark.parametrize("api_url", ["https://git.acme.test/custom-api", "https://[invalid"])
+@pytest.mark.parametrize("platform", ["github", "gitlab", "forgejo", "bitbucket"])
+def test_invalid_forgejo_url_does_not_block_profile_lookup(monkeypatch, api_url, platform):
+    monkeypatch.setenv("MIRA_FORGEJO_API_URL", api_url)
+    monkeypatch.delenv("MIRA_FORGEJO_BASE_URL", raising=False)
+    monkeypatch.delenv("MIRA_PLATFORMS_JSON_PATH", raising=False)
+    profiles._load.cache_clear()
+    try:
+        assert profiles.resolve(platform)["name"] == platform
+        assert profiles.all_profiles()["forgejo"]["api_url"] == api_url
+    finally:
+        profiles._load.cache_clear()

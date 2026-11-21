@@ -14,6 +14,9 @@ boto3 = pytest.importorskip(
     "boto3", reason="boto3 not installed (install with: pip install mira-reviewer[bedrock])"
 )
 
+botocore_session = pytest.importorskip("botocore.session")
+from botocore.validate import validate_parameters  # noqa: E402
+
 
 def _bedrock_config(**kwargs) -> LLMConfig:
     return LLMConfig(
@@ -185,6 +188,95 @@ class TestBedrockComplete:
 
         thinking = mock_client.converse.call_args[1]["additionalModelRequestFields"]["thinking"]
         assert thinking == {"type": "enabled", "budget_tokens": 32768}
+
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
+    async def test_xhigh_uses_largest_budget(self, mock_session_cls):
+        from mira.llm.bedrock import BedrockProvider
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = _mock_converse_response("ok")
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        provider = BedrockProvider(_bedrock_config(reasoning_effort="xhigh", max_tokens=40000))
+        await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
+
+        thinking = mock_client.converse.call_args[1]["additionalModelRequestFields"]["thinking"]
+        assert thinking == {"type": "enabled", "budget_tokens": 32768}
+
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
+    async def test_thinking_disables_forced_tool_choice(self, mock_session_cls):
+        from mira.llm.bedrock import BedrockProvider
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = _mock_tool_use_response()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        provider = BedrockProvider(_bedrock_config(reasoning_effort="high"))
+        await provider.complete_with_tools(
+            [{"role": "user", "content": "review"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "submit_review",
+                        "description": "",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+
+        tool_config = mock_client.converse.call_args[1]["toolConfig"]
+        assert tool_config["toolChoice"] == {"auto": {}}
+
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
+    async def test_request_matches_converse_service_model(self, mock_session_cls):
+        """Validate the constructed request against the Converse service model.
+
+        Catches request-shape mistakes without AWS credentials, including the
+        empty tool-description minimum-length rule.
+        """
+        from mira.llm.bedrock import BedrockProvider
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = _mock_tool_use_response()
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        provider = BedrockProvider(_bedrock_config(reasoning_effort="high"))
+        await provider.complete_with_tools(
+            [{"role": "user", "content": "review"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "submit_review",
+                        # Deliberately empty: Converse rejects the field when
+                        # present but shorter than one character.
+                        "description": "",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+
+        request = mock_client.converse.call_args.kwargs
+        assert "description" not in request["toolConfig"]["tools"][0]["toolSpec"]
+        shape = (
+            botocore_session.get_session()
+            .get_service_model("bedrock-runtime")
+            .operation_model("Converse")
+            .input_shape
+        )
+        validate_parameters(request, shape)
 
     @pytest.mark.asyncio
     @patch("boto3.Session")
@@ -437,6 +529,68 @@ class TestBedrockAgentic:
         assert len(msg["tool_calls"]) == 1
         assert msg["tool_calls"][0]["function"]["name"] == "read_file"
         assert json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"path": "src/main.py"}
+
+    @pytest.mark.asyncio
+    @patch("boto3.Session")
+    async def test_replays_reasoning_blocks_on_tool_turn(self, mock_session_cls):
+        from mira.llm.bedrock import BedrockProvider
+
+        reasoning_block = {
+            "reasoningContent": {
+                "reasoningText": {"text": "I should read the file.", "signature": "sig"}
+            }
+        }
+        first_response = {
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        reasoning_block,
+                        {
+                            "toolUse": {
+                                "toolUseId": "call_xyz",
+                                "name": "read_file",
+                                "input": {"path": "src/main.py"},
+                            }
+                        },
+                    ],
+                }
+            },
+            "usage": {"inputTokens": 50, "outputTokens": 30},
+            "stopReason": "tool_use",
+        }
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [first_response, _mock_converse_response("done")]
+        mock_session = MagicMock()
+        mock_session.client.return_value = mock_client
+        mock_session_cls.return_value = mock_session
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+        provider = BedrockProvider(_bedrock_config(reasoning_effort="high"))
+        msg = await provider.complete_agentic(
+            [{"role": "user", "content": "check the file"}], tools=tools
+        )
+        assert msg["reasoning_blocks"] == [reasoning_block]
+
+        messages = [
+            {"role": "user", "content": "check the file"},
+            msg,
+            {"role": "tool", "tool_call_id": "call_xyz", "content": "print('ok')"},
+        ]
+        await provider.complete_agentic(messages, tools=tools)
+
+        sent_messages = mock_client.converse.call_args_list[1].kwargs["messages"]
+        assistant = sent_messages[1]
+        assert assistant["content"][0] == reasoning_block
 
     @pytest.mark.asyncio
     @patch("boto3.Session")

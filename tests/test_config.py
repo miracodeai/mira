@@ -76,6 +76,26 @@ class TestCodexConfigValidation:
             LLMConfig(provider="codex-cli", codex_timeout_seconds=0)
 
 
+class TestIndexingTemperature:
+    @pytest.mark.parametrize(
+        "value", [-1, float("nan"), float("inf"), True, False, None, "0.4", "off", {}]
+    )
+    def test_invalid_policy_rejected(self, value):
+        from mira.config import LLMConfig
+
+        with pytest.raises(ValueError):
+            LLMConfig(indexing_temperature=value)
+
+    @pytest.mark.parametrize("value", [0, 0.4, 3, "omit"])
+    def test_policy_does_not_change_global_temperature_or_effort(self, value):
+        from mira.config import LLMConfig
+
+        config = LLMConfig(indexing_temperature=value, reasoning_effort="low")
+        assert config.indexing_temperature == value
+        assert config.temperature == 0.2
+        assert config.reasoning_effort == "low"
+
+
 class TestLoadConfig:
     def test_default_config(self):
         config = load_config()
@@ -253,6 +273,23 @@ class TestGlobalDefaults:
         assert config.llm.codex_home == "/trusted/codex-home"
         assert config.llm.codex_sandbox == "read-only"
         assert config.llm.codex_timeout_seconds == 900
+
+    def test_repo_config_cannot_override_command_policy(self, tmp_path: Path):
+        global_file = tmp_path / "mira.yaml"
+        global_file.write_text(
+            "commands:\n  allowed_users:\n    - alice\n  allow_repo_write_access: false\n"
+        )
+        set_global_defaults(global_file)
+        repo_file = tmp_path / "repo" / ".mira.yaml"
+        repo_file.parent.mkdir()
+        repo_file.write_text(
+            "commands:\n  allowed_users:\n    - mallory\n  allow_repo_write_access: true\n"
+        )
+
+        config = load_config(repo_file)
+
+        assert config.commands.allowed_users == ["alice"]
+        assert config.commands.allow_repo_write_access is False
 
     def test_per_repo_overrides_global(self, tmp_path: Path):
         # Global sets a baseline.

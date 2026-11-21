@@ -48,7 +48,7 @@ import {
 } from "@/components/ui/tabs"
 import { toast } from "@/components/ui/sonner"
 import { api, type OrgLearnedRuleModel } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 
@@ -146,8 +146,14 @@ export function LearnedRulesPage() {
   )
   const [selected, setSelected] = useState<OrgLearnedRuleModel | null>(null)
 
-  const editHref = (r: OrgLearnedRuleModel) =>
-    `/learnings/edit?owner=${r.owner}&repo=${r.repo}&id=${r.id}`
+  const editHref = (r: OrgLearnedRuleModel) => {
+    const query = new URLSearchParams({
+      owner: r.owner,
+      repo: r.repo,
+      id: String(r.id),
+    })
+    return `/learnings/edit?${query.toString()}`
+  }
   const [panelOpen, setPanelOpen] = useState(false)
 
   const openDetail = (r: OrgLearnedRuleModel) => {
@@ -540,9 +546,12 @@ function LearningsTable({
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(20)
 
-  useEffect(() => {
+  const pageKey = JSON.stringify([resetKey, sort.key, sort.dir, pageSize])
+  const [prevPageKey, setPrevPageKey] = useState(pageKey)
+  if (prevPageKey !== pageKey) {
+    setPrevPageKey(pageKey)
     setPage(0)
-  }, [resetKey, sort.key, sort.dir, pageSize])
+  }
 
   const toggleSort = (key: SortKey) =>
     setSort((s) =>

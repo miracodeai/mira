@@ -1,0 +1,2051 @@
+{
+  "schema_version": 3,
+  "date": "2026-11-06",
+  "scope": "All 50 PRs of the Martian Code Review Bench offline set, assembled from three runs over disjoint selections: 20 held-out PRs (entries 1, 2, 4, 5 of each repository's golden file), the 5 development PRs (entry 3), and the remaining 25 (entries 6-10). One attempt per PR. No review or judge call was repeated.",
+  "benchmark_commit": "e616e849755441da38f18bf3adba2c9583b03803",
+  "sample_size": 50,
+  "core_reference_count": 158,
+  "model": "deepseek/deepseek-v4.1-flash-1017",
+  "model_label": "DeepSeek v4.1 flash",
+  "reasoning_effort": "medium",
+  "max_tokens": 16384,
+  "review_settings": "Shipping defaults (review.second_look off); empty isolated index; one attempt per PR; 900 s cap per review (420 s for the development run); 3 concurrent reviews",
+  "judge_model": "anthropic/claude-sonnet-4.5",
+  "published_judge": "anthropic_claude-sonnet-4-5-20250929",
+  "scoring_profile": "core",
+  "mira_source": {
+    "branch": "feature/increase-reviewer-performance",
+    "runs": [
+      {
+        "label": "held_out",
+        "directory": "tests/benchmarks/runs/five-pr-nov06-twenty-held-out",
+        "prs": 20,
+        "source_sha": "857b888",
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "reasoning_effort": "medium",
+        "max_tokens": 16384,
+        "selection_rule": "Entries 1,2,4,5 of each of the five repositories in the pinned upstream golden-file order. Fixed before reviews; no selection by findings or competitor performance."
+      },
+      {
+        "label": "dev",
+        "directory": "tests/benchmarks/runs/five-pr-nov06-shipped-default",
+        "prs": 5,
+        "source_sha": "319cf27",
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "reasoning_effort": "medium",
+        "max_tokens": 16384,
+        "selection_rule": "Third entry of each of the five repositories in the pinned upstream golden-file order. Fixed before reviews. No selection by findings or competitor performance. One case per language; not a representative full-benchmark estimate."
+      },
+      {
+        "label": "rest",
+        "directory": "tests/benchmarks/runs/five-pr-nov06-rest",
+        "prs": 25,
+        "source_sha": "13cea82",
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "reasoning_effort": "medium",
+        "max_tokens": 16384,
+        "selection_rule": "Entries 6,7,8,9,10 of each of the five repositories in the pinned upstream golden-file order. Fixed before reviews; no selection by findings or competitor performance."
+      }
+    ]
+  },
+  "mira": {
+    "precision": 0.75,
+    "recall": 0.5506329113924051,
+    "f1": 0.635036496350365,
+    "tp": 87,
+    "fp": 29,
+    "fn": 71,
+    "prs": 50,
+    "median_seconds": 106.1,
+    "minimum_seconds": 40.4,
+    "maximum_seconds": 796.1,
+    "under_120s": 31,
+    "completed": 50,
+    "attempted": 50
+  },
+  "mira_excluding_development_prs": {
+    "prs": 45,
+    "precision": 0.75,
+    "recall": 0.5531914893617021,
+    "f1": 0.6367346938775509,
+    "tp": 78,
+    "fp": 26,
+    "fn": 63
+  },
+  "comparisons": [
+    {
+      "id": "cubic-v2",
+      "name": "Cubic v2",
+      "precision": 0.5647058823529412,
+      "recall": 0.6075949367088608,
+      "f1": 0.5853658536585367,
+      "tp": 96,
+      "fp": 74,
+      "fn": 62,
+      "prs": 50
+    },
+    {
+      "id": "qodo-extended-v2",
+      "name": "Qodo Extended v2",
+      "precision": 0.5625,
+      "recall": 0.569620253164557,
+      "f1": 0.5660377358490567,
+      "tp": 90,
+      "fp": 70,
+      "fn": 68,
+      "prs": 50
+    },
+    {
+      "id": "augment",
+      "name": "Augment",
+      "precision": 0.5243243243243243,
+      "recall": 0.6139240506329114,
+      "f1": 0.5655976676384838,
+      "tp": 97,
+      "fp": 88,
+      "fn": 61,
+      "prs": 50
+    },
+    {
+      "id": "devin",
+      "name": "Devin",
+      "precision": 0.673469387755102,
+      "recall": 0.4177215189873418,
+      "f1": 0.515625,
+      "tp": 66,
+      "fp": 32,
+      "fn": 92,
+      "prs": 50
+    },
+    {
+      "id": "qodo-v2",
+      "name": "Qodo v2",
+      "precision": 0.4708994708994709,
+      "recall": 0.5632911392405063,
+      "f1": 0.5129682997118157,
+      "tp": 89,
+      "fp": 100,
+      "fn": 69,
+      "prs": 50
+    },
+    {
+      "id": "bugbot",
+      "name": "Cursor Bugbot",
+      "precision": 0.5426356589147286,
+      "recall": 0.4430379746835443,
+      "f1": 0.4878048780487804,
+      "tp": 70,
+      "fp": 59,
+      "fn": 88,
+      "prs": 50
+    },
+    {
+      "id": "gitlab",
+      "name": "GitLab Duo",
+      "precision": 0.475,
+      "recall": 0.4810126582278481,
+      "f1": 0.4779874213836478,
+      "tp": 76,
+      "fp": 84,
+      "fn": 82,
+      "prs": 50
+    },
+    {
+      "id": "greptile-v4-1",
+      "name": "Greptile v4.1",
+      "precision": 0.4691358024691358,
+      "recall": 0.4810126582278481,
+      "f1": 0.475,
+      "tp": 76,
+      "fp": 86,
+      "fn": 82,
+      "prs": 50
+    },
+    {
+      "id": "macroscope",
+      "name": "Macroscope",
+      "precision": 0.515625,
+      "recall": 0.4177215189873418,
+      "f1": 0.46153846153846156,
+      "tp": 66,
+      "fp": 62,
+      "fn": 92,
+      "prs": 50
+    },
+    {
+      "id": "kodus-v2",
+      "name": "Kodus v2",
+      "precision": 0.5742574257425742,
+      "recall": 0.3670886075949367,
+      "f1": 0.4478764478764478,
+      "tp": 58,
+      "fp": 43,
+      "fn": 100,
+      "prs": 50
+    },
+    {
+      "id": "gemini-v2",
+      "name": "Gemini v2",
+      "precision": 0.39215686274509803,
+      "recall": 0.5063291139240507,
+      "f1": 0.44198895027624313,
+      "tp": 80,
+      "fp": 124,
+      "fn": 78,
+      "prs": 50
+    },
+    {
+      "id": "copilot-v2",
+      "name": "GitHub Copilot v2",
+      "precision": 0.34265734265734266,
+      "recall": 0.620253164556962,
+      "f1": 0.4414414414414414,
+      "tp": 98,
+      "fp": 188,
+      "fn": 60,
+      "prs": 50
+    },
+    {
+      "id": "baz",
+      "name": "Baz",
+      "precision": 0.5555555555555556,
+      "recall": 0.34810126582278483,
+      "f1": 0.4280155642023346,
+      "tp": 55,
+      "fp": 44,
+      "fn": 103,
+      "prs": 50
+    },
+    {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "precision": 0.3382352941176471,
+      "recall": 0.5822784810126582,
+      "f1": 0.42790697674418604,
+      "tp": 92,
+      "fp": 180,
+      "fn": 66,
+      "prs": 50
+    },
+    {
+      "id": "sourcery",
+      "name": "Sourcery",
+      "precision": 0.3701923076923077,
+      "recall": 0.4873417721518987,
+      "f1": 0.4207650273224044,
+      "tp": 77,
+      "fp": 131,
+      "fn": 81,
+      "prs": 50
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "precision": 0.3651685393258427,
+      "recall": 0.41139240506329117,
+      "f1": 0.38690476190476186,
+      "tp": 65,
+      "fp": 113,
+      "fn": 93,
+      "prs": 50
+    },
+    {
+      "id": "greptile-v5",
+      "name": "Greptile v5",
+      "precision": 0.34673366834170855,
+      "recall": 0.43670886075949367,
+      "f1": 0.3865546218487395,
+      "tp": 69,
+      "fp": 130,
+      "fn": 89,
+      "prs": 50
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "precision": 0.3825503355704698,
+      "recall": 0.36075949367088606,
+      "f1": 0.3713355048859935,
+      "tp": 57,
+      "fp": 92,
+      "fn": 101,
+      "prs": 50
+    },
+    {
+      "id": "codeant-v2",
+      "name": "CodeAnt v2",
+      "precision": 0.3235294117647059,
+      "recall": 0.34810126582278483,
+      "f1": 0.3353658536585366,
+      "tp": 55,
+      "fp": 115,
+      "fn": 103,
+      "prs": 50
+    },
+    {
+      "id": "copilot",
+      "name": "GitHub Copilot",
+      "precision": 0.20085470085470086,
+      "recall": 0.47959183673469385,
+      "f1": 0.28313253012048195,
+      "tp": 47,
+      "fp": 187,
+      "fn": 51,
+      "prs": 50
+    },
+    {
+      "id": "kg",
+      "name": "KG",
+      "precision": 0.5,
+      "recall": 0.13924050632911392,
+      "f1": 0.21782178217821782,
+      "tp": 22,
+      "fp": 22,
+      "fn": 136,
+      "prs": 50
+    },
+    {
+      "id": "graphite",
+      "name": "Graphite",
+      "precision": 1.0,
+      "recall": 0.0759493670886076,
+      "f1": 0.1411764705882353,
+      "tp": 12,
+      "fp": 0,
+      "fn": 146,
+      "prs": 50
+    }
+  ],
+  "by_language": {
+    "go": {
+      "label": "Go \u00b7 Grafana",
+      "prs": 10,
+      "mira": {
+        "precision": 0.8333333333333334,
+        "recall": 0.6,
+        "f1": 0.6976744186046512,
+        "tp": 15,
+        "fp": 3,
+        "fn": 10
+      },
+      "best_other": {
+        "id": "cubic-v2",
+        "name": "Cubic v2",
+        "precision": 0.6666666666666666,
+        "recall": 0.88,
+        "f1": 0.7586206896551725
+      },
+      "all": {
+        "copilot": {
+          "precision": 0.2564102564102564,
+          "recall": 0.5555555555555556,
+          "f1": 0.3508771929824561,
+          "tp": 10,
+          "fp": 29,
+          "fn": 8
+        },
+        "augment": {
+          "precision": 0.5862068965517241,
+          "recall": 0.68,
+          "f1": 0.6296296296296295,
+          "tp": 17,
+          "fp": 12,
+          "fn": 8
+        },
+        "baz": {
+          "precision": 0.4666666666666667,
+          "recall": 0.28,
+          "f1": 0.35000000000000003,
+          "tp": 7,
+          "fp": 8,
+          "fn": 18
+        },
+        "bugbot": {
+          "precision": 0.5238095238095238,
+          "recall": 0.44,
+          "f1": 0.4782608695652174,
+          "tp": 11,
+          "fp": 10,
+          "fn": 14
+        },
+        "claude": {
+          "precision": 0.21052631578947367,
+          "recall": 0.32,
+          "f1": 0.25396825396825395,
+          "tp": 8,
+          "fp": 30,
+          "fn": 17
+        },
+        "claude-code": {
+          "precision": 0.34285714285714286,
+          "recall": 0.48,
+          "f1": 0.39999999999999997,
+          "tp": 12,
+          "fp": 23,
+          "fn": 13
+        },
+        "codeant-v2": {
+          "precision": 0.4666666666666667,
+          "recall": 0.28,
+          "f1": 0.35000000000000003,
+          "tp": 7,
+          "fp": 8,
+          "fn": 18
+        },
+        "coderabbit": {
+          "precision": 0.3611111111111111,
+          "recall": 0.52,
+          "f1": 0.42622950819672134,
+          "tp": 13,
+          "fp": 23,
+          "fn": 12
+        },
+        "cubic-v2": {
+          "precision": 0.6666666666666666,
+          "recall": 0.88,
+          "f1": 0.7586206896551725,
+          "tp": 22,
+          "fp": 11,
+          "fn": 3
+        },
+        "devin": {
+          "precision": 0.5833333333333334,
+          "recall": 0.56,
+          "f1": 0.5714285714285714,
+          "tp": 14,
+          "fp": 10,
+          "fn": 11
+        },
+        "graphite": {
+          "precision": 0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 25
+        },
+        "kg": {
+          "precision": 0.6428571428571429,
+          "recall": 0.36,
+          "f1": 0.4615384615384615,
+          "tp": 9,
+          "fp": 5,
+          "fn": 16
+        },
+        "kodus-v2": {
+          "precision": 0.6666666666666666,
+          "recall": 0.32,
+          "f1": 0.43243243243243246,
+          "tp": 8,
+          "fp": 4,
+          "fn": 17
+        },
+        "macroscope": {
+          "precision": 0.7333333333333333,
+          "recall": 0.44,
+          "f1": 0.5499999999999999,
+          "tp": 11,
+          "fp": 4,
+          "fn": 14
+        },
+        "qodo-extended-v2": {
+          "precision": 0.5333333333333333,
+          "recall": 0.64,
+          "f1": 0.5818181818181818,
+          "tp": 16,
+          "fp": 14,
+          "fn": 9
+        },
+        "qodo-v2": {
+          "precision": 0.3333333333333333,
+          "recall": 0.56,
+          "f1": 0.41791044776119407,
+          "tp": 14,
+          "fp": 28,
+          "fn": 11
+        },
+        "sourcery": {
+          "precision": 0.3333333333333333,
+          "recall": 0.4,
+          "f1": 0.3636363636363636,
+          "tp": 10,
+          "fp": 20,
+          "fn": 15
+        },
+        "greptile-v4-1": {
+          "precision": 0.46875,
+          "recall": 0.6,
+          "f1": 0.5263157894736842,
+          "tp": 15,
+          "fp": 17,
+          "fn": 10
+        },
+        "gemini-v2": {
+          "precision": 0.2857142857142857,
+          "recall": 0.4,
+          "f1": 0.3333333333333333,
+          "tp": 10,
+          "fp": 25,
+          "fn": 15
+        },
+        "gitlab": {
+          "precision": 0.6153846153846154,
+          "recall": 0.64,
+          "f1": 0.6274509803921569,
+          "tp": 16,
+          "fp": 10,
+          "fn": 9
+        },
+        "copilot-v2": {
+          "precision": 0.325,
+          "recall": 0.52,
+          "f1": 0.4,
+          "tp": 13,
+          "fp": 27,
+          "fn": 12
+        },
+        "greptile-v5": {
+          "precision": 0.4444444444444444,
+          "recall": 0.48,
+          "f1": 0.4615384615384615,
+          "tp": 12,
+          "fp": 15,
+          "fn": 13
+        },
+        "mira": {
+          "precision": 0.8333333333333334,
+          "recall": 0.6,
+          "f1": 0.6976744186046512,
+          "tp": 15,
+          "fp": 3,
+          "fn": 10
+        }
+      }
+    },
+    "java": {
+      "label": "Java \u00b7 Keycloak",
+      "prs": 10,
+      "mira": {
+        "precision": 0.65,
+        "recall": 0.52,
+        "f1": 0.5777777777777778,
+        "tp": 13,
+        "fp": 7,
+        "fn": 12
+      },
+      "best_other": {
+        "id": "qodo-extended-v2",
+        "name": "Qodo Extended v2",
+        "precision": 0.625,
+        "recall": 0.6,
+        "f1": 0.6122448979591836
+      },
+      "all": {
+        "copilot": {
+          "precision": 0.1951219512195122,
+          "recall": 0.4444444444444444,
+          "f1": 0.27118644067796616,
+          "tp": 8,
+          "fp": 33,
+          "fn": 10
+        },
+        "augment": {
+          "precision": 0.4074074074074074,
+          "recall": 0.44,
+          "f1": 0.4230769230769231,
+          "tp": 11,
+          "fp": 16,
+          "fn": 14
+        },
+        "baz": {
+          "precision": 0.7692307692307693,
+          "recall": 0.4,
+          "f1": 0.5263157894736842,
+          "tp": 10,
+          "fp": 3,
+          "fn": 15
+        },
+        "bugbot": {
+          "precision": 0.5,
+          "recall": 0.44,
+          "f1": 0.46808510638297873,
+          "tp": 11,
+          "fp": 11,
+          "fn": 14
+        },
+        "claude": {
+          "precision": 0.34782608695652173,
+          "recall": 0.32,
+          "f1": 0.3333333333333333,
+          "tp": 8,
+          "fp": 15,
+          "fn": 17
+        },
+        "claude-code": {
+          "precision": 0.23333333333333334,
+          "recall": 0.28,
+          "f1": 0.2545454545454545,
+          "tp": 7,
+          "fp": 23,
+          "fn": 18
+        },
+        "codeant-v2": {
+          "precision": 0.34782608695652173,
+          "recall": 0.32,
+          "f1": 0.3333333333333333,
+          "tp": 8,
+          "fp": 15,
+          "fn": 17
+        },
+        "coderabbit": {
+          "precision": 0.34782608695652173,
+          "recall": 0.64,
+          "f1": 0.4507042253521127,
+          "tp": 16,
+          "fp": 30,
+          "fn": 9
+        },
+        "cubic-v2": {
+          "precision": 0.4827586206896552,
+          "recall": 0.56,
+          "f1": 0.5185185185185185,
+          "tp": 14,
+          "fp": 15,
+          "fn": 11
+        },
+        "devin": {
+          "precision": 0.7777777777777778,
+          "recall": 0.28,
+          "f1": 0.4117647058823529,
+          "tp": 7,
+          "fp": 2,
+          "fn": 18
+        },
+        "graphite": {
+          "precision": 1.0,
+          "recall": 0.2,
+          "f1": 0.33333333333333337,
+          "tp": 5,
+          "fp": 0,
+          "fn": 20
+        },
+        "kg": {
+          "precision": 0.5714285714285714,
+          "recall": 0.16,
+          "f1": 0.25,
+          "tp": 4,
+          "fp": 3,
+          "fn": 21
+        },
+        "kodus-v2": {
+          "precision": 0.6875,
+          "recall": 0.44,
+          "f1": 0.5365853658536586,
+          "tp": 11,
+          "fp": 5,
+          "fn": 14
+        },
+        "macroscope": {
+          "precision": 0.35714285714285715,
+          "recall": 0.4,
+          "f1": 0.3773584905660378,
+          "tp": 10,
+          "fp": 18,
+          "fn": 15
+        },
+        "qodo-extended-v2": {
+          "precision": 0.625,
+          "recall": 0.6,
+          "f1": 0.6122448979591836,
+          "tp": 15,
+          "fp": 9,
+          "fn": 10
+        },
+        "qodo-v2": {
+          "precision": 0.48,
+          "recall": 0.48,
+          "f1": 0.48,
+          "tp": 12,
+          "fp": 13,
+          "fn": 13
+        },
+        "sourcery": {
+          "precision": 0.21052631578947367,
+          "recall": 0.32,
+          "f1": 0.25396825396825395,
+          "tp": 8,
+          "fp": 30,
+          "fn": 17
+        },
+        "greptile-v4-1": {
+          "precision": 0.37037037037037035,
+          "recall": 0.4,
+          "f1": 0.3846153846153846,
+          "tp": 10,
+          "fp": 17,
+          "fn": 15
+        },
+        "gemini-v2": {
+          "precision": 0.375,
+          "recall": 0.48,
+          "f1": 0.42105263157894735,
+          "tp": 12,
+          "fp": 20,
+          "fn": 13
+        },
+        "gitlab": {
+          "precision": 0.29411764705882354,
+          "recall": 0.4,
+          "f1": 0.33898305084745767,
+          "tp": 10,
+          "fp": 24,
+          "fn": 15
+        },
+        "copilot-v2": {
+          "precision": 0.29411764705882354,
+          "recall": 0.6,
+          "f1": 0.3947368421052632,
+          "tp": 15,
+          "fp": 36,
+          "fn": 10
+        },
+        "greptile-v5": {
+          "precision": 0.3548387096774194,
+          "recall": 0.44,
+          "f1": 0.3928571428571428,
+          "tp": 11,
+          "fp": 20,
+          "fn": 14
+        },
+        "mira": {
+          "precision": 0.65,
+          "recall": 0.52,
+          "f1": 0.5777777777777778,
+          "tp": 13,
+          "fp": 7,
+          "fn": 12
+        }
+      }
+    },
+    "python": {
+      "label": "Python \u00b7 Sentry",
+      "prs": 10,
+      "mira": {
+        "precision": 0.7894736842105263,
+        "recall": 0.45454545454545453,
+        "f1": 0.5769230769230769,
+        "tp": 15,
+        "fp": 4,
+        "fn": 18
+      },
+      "best_other": {
+        "id": "cubic-v2",
+        "name": "Cubic v2",
+        "precision": 0.6486486486486487,
+        "recall": 0.7272727272727273,
+        "f1": 0.6857142857142857
+      },
+      "all": {
+        "copilot": {
+          "precision": 0.17142857142857143,
+          "recall": 0.3157894736842105,
+          "f1": 0.22222222222222224,
+          "tp": 6,
+          "fp": 29,
+          "fn": 13
+        },
+        "augment": {
+          "precision": 0.5641025641025641,
+          "recall": 0.6666666666666666,
+          "f1": 0.611111111111111,
+          "tp": 22,
+          "fp": 17,
+          "fn": 11
+        },
+        "baz": {
+          "precision": 0.4583333333333333,
+          "recall": 0.3333333333333333,
+          "f1": 0.38596491228070173,
+          "tp": 11,
+          "fp": 13,
+          "fn": 22
+        },
+        "bugbot": {
+          "precision": 0.5909090909090909,
+          "recall": 0.3939393939393939,
+          "f1": 0.4727272727272727,
+          "tp": 13,
+          "fp": 9,
+          "fn": 20
+        },
+        "claude": {
+          "precision": 0.2727272727272727,
+          "recall": 0.18181818181818182,
+          "f1": 0.21818181818181817,
+          "tp": 6,
+          "fp": 16,
+          "fn": 27
+        },
+        "claude-code": {
+          "precision": 0.5,
+          "recall": 0.45454545454545453,
+          "f1": 0.47619047619047616,
+          "tp": 15,
+          "fp": 15,
+          "fn": 18
+        },
+        "codeant-v2": {
+          "precision": 0.4782608695652174,
+          "recall": 0.3333333333333333,
+          "f1": 0.3928571428571428,
+          "tp": 11,
+          "fp": 12,
+          "fn": 22
+        },
+        "coderabbit": {
+          "precision": 0.26785714285714285,
+          "recall": 0.45454545454545453,
+          "f1": 0.33707865168539325,
+          "tp": 15,
+          "fp": 41,
+          "fn": 18
+        },
+        "cubic-v2": {
+          "precision": 0.6486486486486487,
+          "recall": 0.7272727272727273,
+          "f1": 0.6857142857142857,
+          "tp": 24,
+          "fp": 13,
+          "fn": 9
+        },
+        "devin": {
+          "precision": 0.6842105263157895,
+          "recall": 0.3939393939393939,
+          "f1": 0.5,
+          "tp": 13,
+          "fp": 6,
+          "fn": 20
+        },
+        "graphite": {
+          "precision": 1.0,
+          "recall": 0.06060606060606061,
+          "f1": 0.1142857142857143,
+          "tp": 2,
+          "fp": 0,
+          "fn": 31
+        },
+        "kg": {
+          "precision": 0.3333333333333333,
+          "recall": 0.09090909090909091,
+          "f1": 0.14285714285714288,
+          "tp": 3,
+          "fp": 6,
+          "fn": 30
+        },
+        "kodus-v2": {
+          "precision": 0.5,
+          "recall": 0.24242424242424243,
+          "f1": 0.326530612244898,
+          "tp": 8,
+          "fp": 8,
+          "fn": 25
+        },
+        "macroscope": {
+          "precision": 0.6818181818181818,
+          "recall": 0.45454545454545453,
+          "f1": 0.5454545454545454,
+          "tp": 15,
+          "fp": 7,
+          "fn": 18
+        },
+        "qodo-extended-v2": {
+          "precision": 0.6,
+          "recall": 0.5454545454545454,
+          "f1": 0.5714285714285713,
+          "tp": 18,
+          "fp": 12,
+          "fn": 15
+        },
+        "qodo-v2": {
+          "precision": 0.5294117647058824,
+          "recall": 0.5454545454545454,
+          "f1": 0.5373134328358209,
+          "tp": 18,
+          "fp": 16,
+          "fn": 15
+        },
+        "sourcery": {
+          "precision": 0.35185185185185186,
+          "recall": 0.5757575757575758,
+          "f1": 0.4367816091954023,
+          "tp": 19,
+          "fp": 35,
+          "fn": 14
+        },
+        "greptile-v4-1": {
+          "precision": 0.5,
+          "recall": 0.42424242424242425,
+          "f1": 0.4590163934426229,
+          "tp": 14,
+          "fp": 14,
+          "fn": 19
+        },
+        "gemini-v2": {
+          "precision": 0.37209302325581395,
+          "recall": 0.48484848484848486,
+          "f1": 0.4210526315789474,
+          "tp": 16,
+          "fp": 27,
+          "fn": 17
+        },
+        "gitlab": {
+          "precision": 0.5161290322580645,
+          "recall": 0.48484848484848486,
+          "f1": 0.5,
+          "tp": 16,
+          "fp": 15,
+          "fn": 17
+        },
+        "copilot-v2": {
+          "precision": 0.27692307692307694,
+          "recall": 0.5454545454545454,
+          "f1": 0.3673469387755102,
+          "tp": 18,
+          "fp": 47,
+          "fn": 15
+        },
+        "greptile-v5": {
+          "precision": 0.2894736842105263,
+          "recall": 0.3333333333333333,
+          "f1": 0.3098591549295775,
+          "tp": 11,
+          "fp": 27,
+          "fn": 22
+        },
+        "mira": {
+          "precision": 0.7894736842105263,
+          "recall": 0.45454545454545453,
+          "f1": 0.5769230769230769,
+          "tp": 15,
+          "fp": 4,
+          "fn": 18
+        }
+      }
+    },
+    "ruby": {
+      "label": "Ruby \u00b7 Discourse",
+      "prs": 10,
+      "mira": {
+        "precision": 0.7857142857142857,
+        "recall": 0.5789473684210527,
+        "f1": 0.6666666666666667,
+        "tp": 22,
+        "fp": 6,
+        "fn": 16
+      },
+      "best_other": {
+        "id": "augment",
+        "name": "Augment",
+        "precision": 0.5384615384615384,
+        "recall": 0.5526315789473685,
+        "f1": 0.5454545454545455
+      },
+      "all": {
+        "copilot": {
+          "precision": 0.19047619047619047,
+          "recall": 0.4,
+          "f1": 0.25806451612903225,
+          "tp": 8,
+          "fp": 34,
+          "fn": 12
+        },
+        "augment": {
+          "precision": 0.5384615384615384,
+          "recall": 0.5526315789473685,
+          "f1": 0.5454545454545455,
+          "tp": 21,
+          "fp": 18,
+          "fn": 17
+        },
+        "baz": {
+          "precision": 0.6086956521739131,
+          "recall": 0.3684210526315789,
+          "f1": 0.4590163934426229,
+          "tp": 14,
+          "fp": 9,
+          "fn": 24
+        },
+        "bugbot": {
+          "precision": 0.53125,
+          "recall": 0.4473684210526316,
+          "f1": 0.4857142857142857,
+          "tp": 17,
+          "fp": 15,
+          "fn": 21
+        },
+        "claude": {
+          "precision": 0.5294117647058824,
+          "recall": 0.47368421052631576,
+          "f1": 0.5,
+          "tp": 18,
+          "fp": 16,
+          "fn": 20
+        },
+        "claude-code": {
+          "precision": 0.4146341463414634,
+          "recall": 0.4473684210526316,
+          "f1": 0.430379746835443,
+          "tp": 17,
+          "fp": 24,
+          "fn": 21
+        },
+        "codeant-v2": {
+          "precision": 0.20588235294117646,
+          "recall": 0.3684210526315789,
+          "f1": 0.2641509433962264,
+          "tp": 14,
+          "fp": 54,
+          "fn": 24
+        },
+        "coderabbit": {
+          "precision": 0.3225806451612903,
+          "recall": 0.5263157894736842,
+          "f1": 0.39999999999999997,
+          "tp": 20,
+          "fp": 42,
+          "fn": 18
+        },
+        "cubic-v2": {
+          "precision": 0.5757575757575758,
+          "recall": 0.5,
+          "f1": 0.5352112676056339,
+          "tp": 19,
+          "fp": 14,
+          "fn": 19
+        },
+        "devin": {
+          "precision": 0.6521739130434783,
+          "recall": 0.39473684210526316,
+          "f1": 0.49180327868852464,
+          "tp": 15,
+          "fp": 8,
+          "fn": 23
+        },
+        "graphite": {
+          "precision": 0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "tp": 0,
+          "fp": 0,
+          "fn": 38
+        },
+        "kg": {
+          "precision": 1.0,
+          "recall": 0.07894736842105263,
+          "f1": 0.14634146341463414,
+          "tp": 3,
+          "fp": 0,
+          "fn": 35
+        },
+        "kodus-v2": {
+          "precision": 0.48484848484848486,
+          "recall": 0.42105263157894735,
+          "f1": 0.4507042253521127,
+          "tp": 16,
+          "fp": 17,
+          "fn": 22
+        },
+        "macroscope": {
+          "precision": 0.5,
+          "recall": 0.34210526315789475,
+          "f1": 0.40625000000000006,
+          "tp": 13,
+          "fp": 13,
+          "fn": 25
+        },
+        "qodo-extended-v2": {
+          "precision": 0.5128205128205128,
+          "recall": 0.5263157894736842,
+          "f1": 0.5194805194805194,
+          "tp": 20,
+          "fp": 19,
+          "fn": 18
+        },
+        "qodo-v2": {
+          "precision": 0.4523809523809524,
+          "recall": 0.5,
+          "f1": 0.47500000000000003,
+          "tp": 19,
+          "fp": 23,
+          "fn": 19
+        },
+        "sourcery": {
+          "precision": 0.40425531914893614,
+          "recall": 0.5,
+          "f1": 0.44705882352941173,
+          "tp": 19,
+          "fp": 28,
+          "fn": 19
+        },
+        "greptile-v4-1": {
+          "precision": 0.5142857142857142,
+          "recall": 0.47368421052631576,
+          "f1": 0.4931506849315068,
+          "tp": 18,
+          "fp": 17,
+          "fn": 20
+        },
+        "gemini-v2": {
+          "precision": 0.45098039215686275,
+          "recall": 0.6052631578947368,
+          "f1": 0.5168539325842696,
+          "tp": 23,
+          "fp": 28,
+          "fn": 15
+        },
+        "gitlab": {
+          "precision": 0.5714285714285714,
+          "recall": 0.42105263157894735,
+          "f1": 0.48484848484848486,
+          "tp": 16,
+          "fp": 12,
+          "fn": 22
+        },
+        "copilot-v2": {
+          "precision": 0.36231884057971014,
+          "recall": 0.6578947368421053,
+          "f1": 0.4672897196261682,
+          "tp": 25,
+          "fp": 44,
+          "fn": 13
+        },
+        "greptile-v5": {
+          "precision": 0.3488372093023256,
+          "recall": 0.39473684210526316,
+          "f1": 0.3703703703703704,
+          "tp": 15,
+          "fp": 28,
+          "fn": 23
+        },
+        "mira": {
+          "precision": 0.7857142857142857,
+          "recall": 0.5789473684210527,
+          "f1": 0.6666666666666667,
+          "tp": 22,
+          "fp": 6,
+          "fn": 16
+        }
+      }
+    },
+    "typescript": {
+      "label": "TypeScript \u00b7 Cal.com",
+      "prs": 10,
+      "mira": {
+        "precision": 0.7096774193548387,
+        "recall": 0.5945945945945946,
+        "f1": 0.6470588235294118,
+        "tp": 22,
+        "fp": 9,
+        "fn": 15
+      },
+      "best_other": {
+        "id": "qodo-v2",
+        "name": "Qodo v2",
+        "precision": 0.5652173913043478,
+        "recall": 0.7027027027027027,
+        "f1": 0.6265060240963856
+      },
+      "all": {
+        "copilot": {
+          "precision": 0.19480519480519481,
+          "recall": 0.6521739130434783,
+          "f1": 0.3,
+          "tp": 15,
+          "fp": 62,
+          "fn": 8
+        },
+        "augment": {
+          "precision": 0.5098039215686274,
+          "recall": 0.7027027027027027,
+          "f1": 0.5909090909090909,
+          "tp": 26,
+          "fp": 25,
+          "fn": 11
+        },
+        "baz": {
+          "precision": 0.5416666666666666,
+          "recall": 0.35135135135135137,
+          "f1": 0.4262295081967213,
+          "tp": 13,
+          "fp": 11,
+          "fn": 24
+        },
+        "bugbot": {
+          "precision": 0.5625,
+          "recall": 0.4864864864864865,
+          "f1": 0.5217391304347827,
+          "tp": 18,
+          "fp": 14,
+          "fn": 19
+        },
+        "claude": {
+          "precision": 0.53125,
+          "recall": 0.4594594594594595,
+          "f1": 0.4927536231884059,
+          "tp": 17,
+          "fp": 15,
+          "fn": 20
+        },
+        "claude-code": {
+          "precision": 0.3333333333333333,
+          "recall": 0.3783783783783784,
+          "f1": 0.3544303797468354,
+          "tp": 14,
+          "fp": 28,
+          "fn": 23
+        },
+        "codeant-v2": {
+          "precision": 0.36585365853658536,
+          "recall": 0.40540540540540543,
+          "f1": 0.3846153846153847,
+          "tp": 15,
+          "fp": 26,
+          "fn": 22
+        },
+        "coderabbit": {
+          "precision": 0.3888888888888889,
+          "recall": 0.7567567567567568,
+          "f1": 0.5137614678899083,
+          "tp": 28,
+          "fp": 44,
+          "fn": 9
+        },
+        "cubic-v2": {
+          "precision": 0.4473684210526316,
+          "recall": 0.4594594594594595,
+          "f1": 0.45333333333333337,
+          "tp": 17,
+          "fp": 21,
+          "fn": 20
+        },
+        "devin": {
+          "precision": 0.7391304347826086,
+          "recall": 0.4594594594594595,
+          "f1": 0.5666666666666667,
+          "tp": 17,
+          "fp": 6,
+          "fn": 20
+        },
+        "graphite": {
+          "precision": 1.0,
+          "recall": 0.13513513513513514,
+          "f1": 0.2380952380952381,
+          "tp": 5,
+          "fp": 0,
+          "fn": 32
+        },
+        "kg": {
+          "precision": 0.2727272727272727,
+          "recall": 0.08108108108108109,
+          "f1": 0.125,
+          "tp": 3,
+          "fp": 8,
+          "fn": 34
+        },
+        "kodus-v2": {
+          "precision": 0.625,
+          "recall": 0.40540540540540543,
+          "f1": 0.4918032786885246,
+          "tp": 15,
+          "fp": 9,
+          "fn": 22
+        },
+        "macroscope": {
+          "precision": 0.4594594594594595,
+          "recall": 0.4594594594594595,
+          "f1": 0.4594594594594595,
+          "tp": 17,
+          "fp": 20,
+          "fn": 20
+        },
+        "qodo-extended-v2": {
+          "precision": 0.5675675675675675,
+          "recall": 0.5675675675675675,
+          "f1": 0.5675675675675675,
+          "tp": 21,
+          "fp": 16,
+          "fn": 16
+        },
+        "qodo-v2": {
+          "precision": 0.5652173913043478,
+          "recall": 0.7027027027027027,
+          "f1": 0.6265060240963856,
+          "tp": 26,
+          "fp": 20,
+          "fn": 11
+        },
+        "sourcery": {
+          "precision": 0.5384615384615384,
+          "recall": 0.5675675675675675,
+          "f1": 0.5526315789473685,
+          "tp": 21,
+          "fp": 18,
+          "fn": 16
+        },
+        "greptile-v4-1": {
+          "precision": 0.475,
+          "recall": 0.5135135135135135,
+          "f1": 0.4935064935064935,
+          "tp": 19,
+          "fp": 21,
+          "fn": 18
+        },
+        "gemini-v2": {
+          "precision": 0.4418604651162791,
+          "recall": 0.5135135135135135,
+          "f1": 0.47500000000000003,
+          "tp": 19,
+          "fp": 24,
+          "fn": 18
+        },
+        "gitlab": {
+          "precision": 0.43902439024390244,
+          "recall": 0.4864864864864865,
+          "f1": 0.4615384615384615,
+          "tp": 18,
+          "fp": 23,
+          "fn": 19
+        },
+        "copilot-v2": {
+          "precision": 0.4426229508196721,
+          "recall": 0.7297297297297297,
+          "f1": 0.5510204081632653,
+          "tp": 27,
+          "fp": 34,
+          "fn": 10
+        },
+        "greptile-v5": {
+          "precision": 0.3333333333333333,
+          "recall": 0.5405405405405406,
+          "f1": 0.41237113402061853,
+          "tp": 20,
+          "fp": 40,
+          "fn": 17
+        },
+        "mira": {
+          "precision": 0.7096774193548387,
+          "recall": 0.5945945945945946,
+          "f1": 0.6470588235294118,
+          "tp": 22,
+          "fp": 9,
+          "fn": 15
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "calcom-1",
+      "run": "held_out",
+      "url": "https://github.com/calcom/cal.com/pull/8087",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR8087__20260122/pull/1",
+      "head_sha": "820d7fa87e0c824c5dee8082a33efadb1a2566f7",
+      "base_sha": "ba9688a04a8398c9a8332ee7061bfae2f2efd524",
+      "seconds": 92.7,
+      "comments": 5,
+      "tp": 1,
+      "fp": 2,
+      "fn": 0
+    },
+    {
+      "id": "calcom-2",
+      "run": "held_out",
+      "url": "https://github.com/calcom/cal.com/pull/10600",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR10600__20260122/pull/1",
+      "head_sha": "54486a059cd2032042189bb565646ba4e0f6bd61",
+      "base_sha": "efa6d464a38e60ceeeb88f40668c1c4ac4bfaf54",
+      "seconds": 83.2,
+      "comments": 2,
+      "tp": 0,
+      "fp": 1,
+      "fn": 4
+    },
+    {
+      "id": "calcom-4",
+      "run": "held_out",
+      "url": "https://github.com/calcom/cal.com/pull/22345",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR22345__20260122/pull/1",
+      "head_sha": "da09bc0808e7c6df1bc10e00d5acf764d94c7cc7",
+      "base_sha": "c9a47dd0cebd121ff73f24e1f8c1829579daf8e3",
+      "seconds": 82.8,
+      "comments": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 1
+    },
+    {
+      "id": "calcom-5",
+      "run": "held_out",
+      "url": "https://github.com/calcom/cal.com/pull/7232",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR7232__20260122/pull/1",
+      "head_sha": "6048e2a86b50e81e1e3b1b467dfea5a895add3dc",
+      "base_sha": "d1440bb5d2f2190ad7ae1d26c165f970055b5370",
+      "seconds": 201.8,
+      "comments": 5,
+      "tp": 2,
+      "fp": 2,
+      "fn": 1
+    },
+    {
+      "id": "discourse-1",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/1",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR1__20260122/pull/1",
+      "head_sha": "ffbaf8c54269df2ce510de91245760fddce09896",
+      "base_sha": "3f71fa15c93bb0b751bb92abae1b5dc9a21bd4ca",
+      "seconds": 79.1,
+      "comments": 3,
+      "tp": 2,
+      "fp": 0,
+      "fn": 2
+    },
+    {
+      "id": "discourse-2",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/2",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR2__20260122/pull/1",
+      "head_sha": "6669a2d94d76eea3b99b8c476d12b1eb66726b07",
+      "base_sha": "56abd247e1829cb6de82dfcc8ce04deb5f0d1e91",
+      "seconds": 542.1,
+      "comments": 3,
+      "tp": 1,
+      "fp": 2,
+      "fn": 0
+    },
+    {
+      "id": "discourse-4",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/4",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR4__20260122/pull/1",
+      "head_sha": "4f8aed295a29954023b2849c060ef4fb299d1b5d",
+      "base_sha": "62db063e1e1abe691313ab42682a68f796d63769",
+      "seconds": 223.4,
+      "comments": 2,
+      "tp": 3,
+      "fp": 0,
+      "fn": 5
+    },
+    {
+      "id": "discourse-5",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/5",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR5__20260122/pull/1",
+      "head_sha": "5b229316ee4c661836ed1161139692a3e8527444",
+      "base_sha": "98fa098e6fade3097a11fe7f99a98a4e6ffb4728",
+      "seconds": 80.9,
+      "comments": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 1
+    },
+    {
+      "id": "grafana-1",
+      "run": "held_out",
+      "url": "https://github.com/grafana/grafana/pull/79265",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR79265__20260122/pull/1",
+      "head_sha": "bbd8c507cdf56f6b884373809e0b24abd4a2353d",
+      "base_sha": "50f4e78a39914711d0d231a501ba215becf17ebc",
+      "seconds": 100.7,
+      "comments": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 3
+    },
+    {
+      "id": "grafana-2",
+      "run": "held_out",
+      "url": "https://github.com/grafana/grafana/pull/103633",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR103633__20260122/pull/1",
+      "head_sha": "7562f37880367411a62304bcdcdc178bced23906",
+      "base_sha": "5634ca44f799a82161f0401dadc286452f3bdbf8",
+      "seconds": 130.5,
+      "comments": 2,
+      "tp": 3,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "grafana-4",
+      "run": "held_out",
+      "url": "https://github.com/grafana/grafana/pull/107534",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR107534__20260122/pull/1",
+      "head_sha": "1cab4143d443c33079566f6ca36931eb8468159f",
+      "base_sha": "d9a8253640464014aa3662c91131278990cfb828",
+      "seconds": 84.5,
+      "comments": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 1
+    },
+    {
+      "id": "grafana-5",
+      "run": "held_out",
+      "url": "https://github.com/grafana/grafana/pull/106778",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR106778__20260122/pull/1",
+      "head_sha": "8df850371034b73dc4dd9908cc30fa09f12a1f97",
+      "base_sha": "47e5bd23163e6037fc0741068ac78930bba2769f",
+      "seconds": 171.9,
+      "comments": 3,
+      "tp": 2,
+      "fp": 1,
+      "fn": 0
+    },
+    {
+      "id": "keycloak-1",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/keycloak-greptile/pull/1",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak-greptile__augment__PR1__20260122/pull/1",
+      "head_sha": "3214b188de808fdb0fff335556b686f1b0a63218",
+      "base_sha": "30f804af450dec523909a52f2a4b97302d27f5cc",
+      "seconds": 117.0,
+      "comments": 2,
+      "tp": 1,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "keycloak-2",
+      "run": "held_out",
+      "url": "https://github.com/keycloak/keycloak/pull/32918",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR32918__20260122/pull/1",
+      "head_sha": "e944e2acf1e64421860a8e827f93ad06c169621b",
+      "base_sha": "272cfc68dcc88615396ae62ed1571918e9c58ad3",
+      "seconds": 140.7,
+      "comments": 3,
+      "tp": 1,
+      "fp": 2,
+      "fn": 1
+    },
+    {
+      "id": "keycloak-4",
+      "run": "held_out",
+      "url": "https://github.com/keycloak/keycloak/pull/36882",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR36882__20260122/pull/1",
+      "head_sha": "62bf98939eda58f0d0a1a41a58aa6d4ecdc24dba",
+      "base_sha": "8671f860469d6d95e54df3e13f77ebc401249489",
+      "seconds": 103.3,
+      "comments": 3,
+      "tp": 1,
+      "fp": 2,
+      "fn": 1
+    },
+    {
+      "id": "keycloak-5",
+      "run": "held_out",
+      "url": "https://github.com/keycloak/keycloak/pull/36880",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR36880__20260122/pull/1",
+      "head_sha": "1950a511026d520a7329c7b6b9ee60a4af8f8b55",
+      "base_sha": "b8c1cd410f4499c77a8b372decfe1718b80ccfd2",
+      "seconds": 127.3,
+      "comments": 1,
+      "tp": 0,
+      "fp": 1,
+      "fn": 4
+    },
+    {
+      "id": "sentry-1",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/1",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry-greptile__augment__PR1__20260122/pull/1",
+      "head_sha": "8ab88145113dd23a930e23b9cbbcf8b30e4c0b17",
+      "base_sha": "a5d290951def84afdcc4c88d2f1f20023fc36e2a",
+      "seconds": 67.3,
+      "comments": 4,
+      "tp": 3,
+      "fp": 0,
+      "fn": 1
+    },
+    {
+      "id": "sentry-2",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/2",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry-greptile__augment__PR2__20260122/pull/1",
+      "head_sha": "8ab88145113dd23a930e23b9cbbcf8b30e4c0b17",
+      "base_sha": "28e3db2520d4ea28c57b08da57b83917ba7b2e15",
+      "seconds": 105.2,
+      "comments": 5,
+      "tp": 4,
+      "fp": 1,
+      "fn": 0
+    },
+    {
+      "id": "sentry-4",
+      "run": "held_out",
+      "url": "https://github.com/getsentry/sentry/pull/67876",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry__augment__PR67876__20260122/pull/1",
+      "head_sha": "bb75657fc8f13923c1d7983f422290908a1e7310",
+      "base_sha": "344aa102e7818606e29426ebe69d5a680d8727c6",
+      "seconds": 80.7,
+      "comments": 1,
+      "tp": 1,
+      "fp": 0,
+      "fn": 2
+    },
+    {
+      "id": "sentry-5",
+      "run": "held_out",
+      "url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/5",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry-greptile__augment__PR5__20260122/pull/1",
+      "head_sha": "ea188e2d736fd6ed27c1dba8aae63b7268e2a7a9",
+      "base_sha": "49a275847631e231672d01b5dcd66558c069d25b",
+      "seconds": 114.2,
+      "comments": 4,
+      "tp": 3,
+      "fp": 1,
+      "fn": 3
+    },
+    {
+      "id": "sentry-3",
+      "run": "dev",
+      "url": "https://github.com/ai-code-review-evaluation/sentry-greptile/pull/3",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry-greptile__augment__PR3__20260122/pull/1",
+      "head_sha": "6ad6fe3899f630ccf922ce7ac681147dc7987435",
+      "base_sha": "a5d290951def84afdcc4c88d2f1f20023fc36e2a",
+      "seconds": 194.8,
+      "comments": 2,
+      "tp": 1,
+      "fp": 1,
+      "fn": 2
+    },
+    {
+      "id": "grafana-3",
+      "run": "dev",
+      "url": "https://github.com/grafana/grafana/pull/76186",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR76186__20260122/pull/1",
+      "head_sha": "303cdc2caf256aa5df660611120c2e3f7392365d",
+      "base_sha": "58ba11ecbd60863e2bfc6e32f0399ed4feb3927a",
+      "seconds": 52.2,
+      "comments": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 3
+    },
+    {
+      "id": "calcom-3",
+      "run": "dev",
+      "url": "https://github.com/calcom/cal.com/pull/10967",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR10967__20260122/pull/1",
+      "head_sha": "de628295646d0848226618108a52f2f1e5d04ac0",
+      "base_sha": "a308075bc39b77ed7059b0cae9d443d669a7bf98",
+      "seconds": 119.0,
+      "comments": 5,
+      "tp": 3,
+      "fp": 2,
+      "fn": 2
+    },
+    {
+      "id": "discourse-3",
+      "run": "dev",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/3",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR3__20260122/pull/1",
+      "head_sha": "5f8a130277dbddc95d133cd2832be639baf89213",
+      "base_sha": "e25638dab0d4b98f99c8fe8976ccaae8f4fb9db3",
+      "seconds": 73.2,
+      "comments": 3,
+      "tp": 3,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "keycloak-3",
+      "run": "dev",
+      "url": "https://github.com/keycloak/keycloak/pull/33832",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR33832__20260122/pull/1",
+      "head_sha": "79d11c4890cc4792e3dc3535af59e4e5f7a2739d",
+      "base_sha": "10aca5552314d6e5c9226f3c6d0107861c38c693",
+      "seconds": 178.9,
+      "comments": 3,
+      "tp": 2,
+      "fp": 0,
+      "fn": 1
+    },
+    {
+      "id": "calcom-6",
+      "run": "rest",
+      "url": "https://github.com/calcom/cal.com/pull/8330",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR8330__20260122/pull/1",
+      "head_sha": "ee38fd295fd294b9fc787eba482bde24bbfea69b",
+      "base_sha": "93cb21f55a2a40d9116c014741f5679fbeff5fd9",
+      "seconds": 250.2,
+      "comments": 3,
+      "tp": 2,
+      "fp": 1,
+      "fn": 0
+    },
+    {
+      "id": "calcom-7",
+      "run": "rest",
+      "url": "https://github.com/calcom/cal.com/pull/11059",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR11059__20260122/pull/1",
+      "head_sha": "9fde0e906897cc0f4f71793f647dd629faba3317",
+      "base_sha": "bc89fe00ea84d20bedcec782f0701b9711dc8201",
+      "seconds": 107.9,
+      "comments": 7,
+      "tp": 8,
+      "fp": 0,
+      "fn": 1
+    },
+    {
+      "id": "calcom-8",
+      "run": "rest",
+      "url": "https://github.com/calcom/cal.com/pull/14943",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR14943__20260122/pull/1",
+      "head_sha": "c790227e0cda780e6fea9bb03af27948d9e286b9",
+      "base_sha": "917c7b0764f4c6bfdca95db2c5f73dbfdbe11757",
+      "seconds": 56.9,
+      "comments": 3,
+      "tp": 2,
+      "fp": 1,
+      "fn": 0
+    },
+    {
+      "id": "calcom-9",
+      "run": "rest",
+      "url": "https://github.com/calcom/cal.com/pull/14740",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR14740__20260122/pull/1",
+      "head_sha": "92f44dcea7ff19e9123a30c63c167a2938df5a55",
+      "base_sha": "b004587262e8221083bafbe9a0c515e7becaa7b3",
+      "seconds": 53.8,
+      "comments": 1,
+      "tp": 2,
+      "fp": 0,
+      "fn": 4
+    },
+    {
+      "id": "calcom-10",
+      "run": "rest",
+      "url": "https://github.com/calcom/cal.com/pull/22532",
+      "language": "typescript",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/cal_dot_com__cal.com__augment__PR22532__20260122/pull/1",
+      "head_sha": "5fd11f9faa79c4aefd39975d1b0e963e5034f793",
+      "base_sha": "30a92a4d66b417f7c19dee2b343099adc6e88aa6",
+      "seconds": 80.3,
+      "comments": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 2
+    },
+    {
+      "id": "discourse-6",
+      "run": "rest",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/6",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR6__20260122/pull/1",
+      "head_sha": "267d8be1f556ed59639ced396c885bb44586da19",
+      "base_sha": "7a5fbae060bd0d3e29f3a4b5c6f2bfd8b2914dc7",
+      "seconds": 112.0,
+      "comments": 3,
+      "tp": 1,
+      "fp": 1,
+      "fn": 0
+    },
+    {
+      "id": "discourse-7",
+      "run": "rest",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/7",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR7__20260122/pull/1",
+      "head_sha": "d38c4d5f7443223c81529c22470293771baf9f38",
+      "base_sha": "7554b5e3c458dc79b591d5e874e79ab10cf30c2f",
+      "seconds": 61.7,
+      "comments": 5,
+      "tp": 3,
+      "fp": 2,
+      "fn": 0
+    },
+    {
+      "id": "discourse-8",
+      "run": "rest",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/8",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR8__20260122/pull/1",
+      "head_sha": "060cda77729cb1c4a827560e09e89a7b22078ba9",
+      "base_sha": "4975fc28903a84418f546b2809370f19abf10e08",
+      "seconds": 156.5,
+      "comments": 3,
+      "tp": 3,
+      "fp": 1,
+      "fn": 3
+    },
+    {
+      "id": "discourse-9",
+      "run": "rest",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/9",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR9__20260122/pull/1",
+      "head_sha": "ecfa17b5a79dfdc91e7a4d50b42ae78a35d0a293",
+      "base_sha": "728845d008f06828630a632e5c7d67e11bf15deb",
+      "seconds": 356.3,
+      "comments": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 2
+    },
+    {
+      "id": "discourse-10",
+      "run": "rest",
+      "url": "https://github.com/ai-code-review-evaluation/discourse-graphite/pull/10",
+      "language": "ruby",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/discourse__discourse-graphite__augment__PR10__20260122/pull/1",
+      "head_sha": "d1c69189f3c90ecf56013a8da904da9bff9a8e19",
+      "base_sha": "913c3d6f636d02b3dd6c2c022ca1af2bec95d752",
+      "seconds": 163.2,
+      "comments": 5,
+      "tp": 4,
+      "fp": 0,
+      "fn": 3
+    },
+    {
+      "id": "grafana-6",
+      "run": "rest",
+      "url": "https://github.com/grafana/grafana/pull/90045",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR90045__20260122/pull/1",
+      "head_sha": "e369f24665ec70e1e3700f457d25ef83301d931a",
+      "base_sha": "66c4dff17e9147b11fb9b14c6ed63089a599da65",
+      "seconds": 69.9,
+      "comments": 6,
+      "tp": 3,
+      "fp": 1,
+      "fn": 0
+    },
+    {
+      "id": "grafana-7",
+      "run": "rest",
+      "url": "https://github.com/grafana/grafana/pull/80329",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR80329__20260122/pull/1",
+      "head_sha": "04cfa3bfd469c035ff8b35f9a66867c4e8d5dcf4",
+      "base_sha": "a886bd3c79a417a70b51509384d1f1ec3e87e96b",
+      "seconds": 41.7,
+      "comments": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "grafana-8",
+      "run": "rest",
+      "url": "https://github.com/grafana/grafana/pull/90939",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR90939__20260122/pull/1",
+      "head_sha": "b1613e320acff00623e6efc59f00ee68c7684a97",
+      "base_sha": "3ce1a5b0caab215346a51629b0344b90d67e9478",
+      "seconds": 40.4,
+      "comments": 1,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "grafana-9",
+      "run": "rest",
+      "url": "https://github.com/grafana/grafana/pull/94942",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR94942__20260122/pull/1",
+      "head_sha": "f3317b329b4eb8fd96f99dd86525bc4a22d20248",
+      "base_sha": "cbe1e7d63f098e306058c0fbcab2f5c30602fa7d",
+      "seconds": 76.6,
+      "comments": 1,
+      "tp": 1,
+      "fp": 0,
+      "fn": 1
+    },
+    {
+      "id": "grafana-10",
+      "run": "rest",
+      "url": "https://github.com/grafana/grafana/pull/97529",
+      "language": "go",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/grafana__grafana__augment__PR97529__20260122/pull/1",
+      "head_sha": "26fed312840cd76b766cbd2158e17a7e6c0ec548",
+      "base_sha": "871af07203177ce59a24e742107119409274f48a",
+      "seconds": 122.8,
+      "comments": 1,
+      "tp": 0,
+      "fp": 1,
+      "fn": 2
+    },
+    {
+      "id": "keycloak-6",
+      "run": "rest",
+      "url": "https://github.com/keycloak/keycloak/pull/37038",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR37038__20260122/pull/1",
+      "head_sha": "7355f05e6aafe2a7acc6434fb40c686665416606",
+      "base_sha": "7ea067aae9be56cb2622bce6563864817c3dfeaf",
+      "seconds": 104.0,
+      "comments": 3,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "keycloak-7",
+      "run": "rest",
+      "url": "https://github.com/keycloak/keycloak/pull/37429",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR37429__20260122/pull/1",
+      "head_sha": "02f48f776f43734d1ac8914d3ad6a7115acdcb33",
+      "base_sha": "f3c8e8f3487112f2c99aa78400430cce2d30be39",
+      "seconds": 179.1,
+      "comments": 3,
+      "tp": 2,
+      "fp": 1,
+      "fn": 1
+    },
+    {
+      "id": "keycloak-8",
+      "run": "rest",
+      "url": "https://github.com/keycloak/keycloak/pull/37634",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR37634__20260122/pull/1",
+      "head_sha": "daffb05b5ad091d3ec09933c3c99c2b54f448696",
+      "base_sha": "c22f76867f595f0f7c327376a66a08dca01949e8",
+      "seconds": 106.9,
+      "comments": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 2
+    },
+    {
+      "id": "keycloak-9",
+      "run": "rest",
+      "url": "https://github.com/keycloak/keycloak/pull/38446",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR38446__20260122/pull/1",
+      "head_sha": "ce2dcc537b4b1f98a335e88cfe8e0b804483252a",
+      "base_sha": "85737f52b59aa2e3403c9b8e48acf71ccc5bfae3",
+      "seconds": 174.6,
+      "comments": 1,
+      "tp": 0,
+      "fp": 1,
+      "fn": 2
+    },
+    {
+      "id": "keycloak-10",
+      "run": "rest",
+      "url": "https://github.com/keycloak/keycloak/pull/40940",
+      "language": "java",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/keycloak__keycloak__augment__PR40940__20260122/pull/1",
+      "head_sha": "4def149a50c4b9b2c24fbb753ac60fe4f4df0cac",
+      "base_sha": "c834e7473c02f11451216b3fbf355f953cfd95e9",
+      "seconds": 71.7,
+      "comments": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "sentry-6",
+      "run": "rest",
+      "url": "https://github.com/getsentry/sentry/pull/93824",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry__augment__PR93824__20260122/pull/1",
+      "head_sha": "3162ad68a5c87666788b27a44eb31235025091a9",
+      "base_sha": "de11fb0166a7244115bb066edd65ec0d6b7e365c",
+      "seconds": 796.1,
+      "comments": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 5
+    },
+    {
+      "id": "sentry-7",
+      "run": "rest",
+      "url": "https://github.com/getsentry/sentry/pull/77754",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry__augment__PR77754__20260122/pull/1",
+      "head_sha": "9501091c52ae94e8d916f79b35d21975b3f9cadb",
+      "base_sha": "bb5a6837cb5b3d8d3b174e17d42ec14486ef8738",
+      "seconds": 46.8,
+      "comments": 1,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0
+    },
+    {
+      "id": "sentry-8",
+      "run": "rest",
+      "url": "https://github.com/getsentry/sentry/pull/80528",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry__augment__PR80528__20260122/pull/1",
+      "head_sha": "dcdcadb771128e79259cc9eff9c70c38fc597976",
+      "base_sha": "0cfc28e76ddc986d2d89dd9b9f63ee916a18a5f9",
+      "seconds": 54.0,
+      "comments": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 2
+    },
+    {
+      "id": "sentry-9",
+      "run": "rest",
+      "url": "https://github.com/getsentry/sentry/pull/95633",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry__augment__PR95633__20260122/pull/1",
+      "head_sha": "9966ec5a13e331659c3ea00981f9b11b0faf821f",
+      "base_sha": "fd358e8a388939959369f08f616e29552cdaf96e",
+      "seconds": 276.5,
+      "comments": 1,
+      "tp": 0,
+      "fp": 1,
+      "fn": 1
+    },
+    {
+      "id": "sentry-10",
+      "run": "rest",
+      "url": "https://github.com/getsentry/sentry/pull/80168",
+      "language": "python",
+      "snapshot_pr_url": "https://github.com/code-review-benchmark/sentry__sentry__augment__PR80168__20260122/pull/1",
+      "head_sha": "8422030ef456e3a898415e96475b4d8ddfc7640f",
+      "base_sha": "bdd229e3f22e307fe40b30ef99e92ff3f6723da4",
+      "seconds": 131.5,
+      "comments": 1,
+      "tp": 1,
+      "fp": 0,
+      "fn": 2
+    }
+  ],
+  "chart_subtitle": "Same PRs and judge for every reviewer; competitor reviews as published \u00b7 Nov 2026",
+  "method": "Pinned local source snapshots at each PR's head commit; Mira reviewed each PR once through its full pipeline with no index, learned rules or history. Matching and deduplication use the upstream benchmark's prompts with Claude Sonnet 4.5; competitor rows are the upstream's published evaluations of the same PRs under the same judge and were not rerun. Unmatched findings count as false positives even where the reference set may omit a valid issue. Competitors publish no timings.",
+  "reproduce": "scripts/prepare_benchmark_inputs.py (--entries 1,2,4,5 / 3 / 6,7,8,9,10); scripts/run_benchmark_sample.py --inputs <inputs> --models deepseek --timeout 900; scripts/combine_benchmark_runs.py; scripts/render_benchmark_charts.py"
+}

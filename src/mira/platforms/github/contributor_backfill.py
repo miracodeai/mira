@@ -24,7 +24,7 @@ from typing import Any
 
 from github import Github, GithubException
 
-from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.github.auth import _GITHUB_API_URL, GitHubAppAuth
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +301,7 @@ def _backfill_sync(
     progress_cb: Callable[[int, int], None] | None,
 ) -> None:
     """Blocking GitHub work — call via ``asyncio.to_thread``."""
-    gh = Github(token)
+    gh = Github(token, base_url=_GITHUB_API_URL)
     gh_repo = gh.get_repo(f"{owner}/{repo}")
     pulls = gh_repo.get_pulls(state="all", sort="created", direction="asc")
     total = pulls.totalCount

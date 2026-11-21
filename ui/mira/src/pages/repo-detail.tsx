@@ -8,7 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link, useParams } from "react-router"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -25,8 +25,10 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
-import { api, type ReviewContextModel } from "@/lib/api"
+import { api, type BaseBranchPolicy, type ReviewContextModel } from "@/lib/api"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
+import { splitRepoKey } from "@/lib/repo-key"
 
 function formatRelativeTime(iso: string | null): string {
   if (!iso) return "Never indexed"
@@ -45,26 +47,49 @@ function formatRelativeTime(iso: string | null): string {
 }
 
 export function RepoDetailPage() {
-  const { owner, repo } = useParams<{ owner: string; repo: string }>()
-  useDocumentTitle(owner && repo ? `${owner}/${repo}` : "Repository")
+  const params = useParams<{ "*": string }>()
+  const repoKey = splitRepoKey(params["*"] ?? "")
+  useDocumentTitle(repoKey ? `${repoKey[0]}/${repoKey[1]}` : "Repository")
 
+  if (!repoKey) {
+    return (
+      <div className="p-6 text-sm text-destructive">
+        Invalid repository path.
+      </div>
+    )
+  }
+
+  return <RepoDetailPageContent owner={repoKey[0]} repo={repoKey[1]} />
+}
+
+function RepoDetailPageContent({
+  owner,
+  repo,
+}: {
+  owner: string
+  repo: string
+}) {
   const { data, loading, error } = useAsync(
-    () => api.getRepo(owner!, repo!),
+    () => api.getRepo(owner, repo),
     [owner, repo],
   )
   const { data: packages } = useAsync(
-    () => api.getPackages(owner!, repo!),
+    () => api.getPackages(owner, repo),
     [owner, repo],
   )
   const { data: vulns } = useAsync(
     () =>
       api
-        .getRepoVulnerabilities(owner!, repo!)
+        .getRepoVulnerabilities(owner, repo)
         .catch(() => [] as never),
     [owner, repo],
   )
   const [contextEntries, setContextEntries] = useState<ReviewContextModel[]>([])
   const [contextLoaded, setContextLoaded] = useState(false)
+  // Context goes straight into the review prompt, so only admins may change
+  // it (the API rejects other users' writes with 403).
+  const { user } = useAuth()
+  const canEditContext = !!user?.is_admin
   const [editingCtx, setEditingCtx] = useState<{
     id?: number
     title: string
@@ -111,6 +136,83 @@ export function RepoDetailPage() {
 
   const [indexing, setIndexing] = useState(false)
   const [indexStatus, setIndexStatus] = useState("")
+  const [cancelling, setCancelling] = useState(false)
+
+  // Auto-review destination-branch policy for this repo.
+  const [policy, setPolicy] = useState<BaseBranchPolicy | null>(null)
+  const [policyLoadError, setPolicyLoadError] = useState(false)
+  const [savingPolicy, setSavingPolicy] = useState(false)
+  const [policySaved, setPolicySaved] = useState(false)
+  const [policyError, setPolicyError] = useState("")
+  const [policyBranchesDraft, setPolicyBranchesDraft] = useState("")
+  // Tracks the repo currently rendered, so async policy callbacks (GET/PUT
+  // responses, timers) can detect that the user has moved to another repo.
+  const currentRepoRef = useRef("")
+
+  // Keyed by owner/repo: a late response for a previous repo must not
+  // populate the form, and navigating repos resets the draft.
+  const [policyRepo, setPolicyRepo] = useState(`${owner}/${repo}`)
+  if (policyRepo !== `${owner}/${repo}`) {
+    setPolicyRepo(`${owner}/${repo}`)
+    setPolicy(null)
+    setPolicyLoadError(false)
+    setPolicyBranchesDraft("")
+    setSavingPolicy(false)
+    setPolicySaved(false)
+    setPolicyError("")
+  }
+  useEffect(() => {
+    if (!owner || !repo) return
+    let cancelled = false
+    currentRepoRef.current = `${owner}/${repo}`
+    api
+      .getBranchPolicy(owner, repo)
+      .then((p) => {
+        if (cancelled) return
+        setPolicy(p)
+        setPolicyBranchesDraft(p.branches.join(", "))
+      })
+      .catch(() => {
+        if (!cancelled) setPolicyLoadError(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [owner, repo])
+
+  const setPolicyMode = (mode: BaseBranchPolicy["mode"]) => {
+    setPolicy((prev) => (prev ? { ...prev, mode } : prev))
+  }
+
+  const savePolicy = async () => {
+    if (!owner || !repo || !policy) return
+    // A PUT resolving after repo navigation must not touch the new repo's form.
+    const savedFor = `${owner}/${repo}`
+    setSavingPolicy(true)
+    setPolicyError("")
+    try {
+      const branches =
+        policy.mode === "override"
+          ? policyBranchesDraft
+              .split(",")
+              .map((b) => b.trim())
+              .filter(Boolean)
+          : []
+      const saved = await api.saveBranchPolicy(owner, repo, policy.mode, branches)
+      if (currentRepoRef.current !== savedFor) return
+      setPolicy(saved)
+      setPolicyBranchesDraft(saved.branches.join(", "))
+      setPolicySaved(true)
+      setTimeout(() => {
+        if (currentRepoRef.current === savedFor) setPolicySaved(false)
+      }, 2000)
+    } catch (err) {
+      if (currentRepoRef.current !== savedFor) return
+      setPolicyError(err instanceof Error ? err.message : "Failed to save")
+    } finally {
+      if (currentRepoRef.current === savedFor) setSavingPolicy(false)
+    }
+  }
 
   // Poll indexing status continuously so the UI reflects jobs started from
   // anywhere (this page, the setup modal, a webhook-driven backfill, etc.).
@@ -133,14 +235,17 @@ export function RepoDetailPage() {
           setIndexStatus(`Done — ${job.files_done} files indexed`)
           if (indexing) {
             setIndexing(false)
+            setCancelling(false)
             setTimeout(() => window.location.reload(), 1000)
           }
         } else if (job && job.status === "failed") {
           setIndexStatus(`Failed: ${job.error}`)
           setIndexing(false)
+          setCancelling(false)
         } else if (job && job.status === "cancelled") {
           setIndexStatus(`Cancelled — ${job.files_done} files indexed before stopping`)
           setIndexing(false)
+          setCancelling(false)
         }
       } catch {
         // ignore
@@ -158,6 +263,7 @@ export function RepoDetailPage() {
   const triggerIndex = async (full: boolean) => {
     if (!owner || !repo) return
     setIndexing(true)
+    setCancelling(false)
     setIndexStatus(full ? "Starting full re-index..." : "Starting index update...")
     try {
       await api.triggerIndex(owner, repo, full)
@@ -166,8 +272,6 @@ export function RepoDetailPage() {
       setIndexing(false)
     }
   }
-
-  const [cancelling, setCancelling] = useState(false)
 
   const cancelIndex = async () => {
     if (!owner || !repo) return
@@ -180,10 +284,6 @@ export function RepoDetailPage() {
       setCancelling(false)
     }
   }
-
-  useEffect(() => {
-    if (!indexing) setCancelling(false)
-  }, [indexing])
 
   if (loading) {
     return <div className="p-6 text-sm text-muted-foreground">Loading...</div>
@@ -302,6 +402,7 @@ export function RepoDetailPage() {
         <TabsList>
           <TabsTrigger value="files">Files</TabsTrigger>
           <TabsTrigger value="context">Review Context</TabsTrigger>
+          <TabsTrigger value="policy">Review Policy</TabsTrigger>
           <TabsTrigger value="dependencies">Dependencies</TabsTrigger>
           <TabsTrigger value="blast">Blast Radius</TabsTrigger>
         </TabsList>
@@ -364,12 +465,14 @@ export function RepoDetailPage() {
                     reviews for this repo
                   </CardDescription>
                 </div>
-                <Button
-                  size="sm"
-                  onClick={() => setEditingCtx({ title: "", content: "" })}
-                >
-                  <Plus className="mr-1 h-3 w-3" /> Add
-                </Button>
+                {canEditContext && (
+                  <Button
+                    size="sm"
+                    onClick={() => setEditingCtx({ title: "", content: "" })}
+                  >
+                    <Plus className="mr-1 h-3 w-3" /> Add
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -426,30 +529,32 @@ export function RepoDetailPage() {
                           {entry.content.length > 200 && "..."}
                         </pre>
                       </div>
-                      <div className="ml-4 flex gap-1">
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8"
-                          onClick={() =>
-                            setEditingCtx({
-                              id: entry.id,
-                              title: entry.title,
-                              content: entry.content,
-                            })
-                          }
-                        >
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8"
-                          onClick={() => deleteCtx(entry.id)}
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
+                      {canEditContext && (
+                        <div className="ml-4 flex gap-1">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() =>
+                              setEditingCtx({
+                                id: entry.id,
+                                title: entry.title,
+                                content: entry.content,
+                              })
+                            }
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() => deleteCtx(entry.id)}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -459,6 +564,121 @@ export function RepoDetailPage() {
                   to improve review quality on this repo.
                 </p>
               ) : null}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Review Policy — auto-review destination-branch gate for this repo */}
+        <TabsContent value="policy">
+          <Card>
+            <CardHeader>
+              <CardTitle>Review Policy</CardTitle>
+              <CardDescription>
+                Which pull requests get an automatic review. This only gates
+                automatic reviews — manual{" "}
+                <code className="text-xs">@bot review</code> commands,
+                indexing, and merged-PR learning are unaffected.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {!policy ? (
+                policyLoadError ? (
+                  <p className="text-sm text-destructive">
+                    Could not load the branch policy for this repo. Reload the
+                    page to retry.
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground">Loading…</p>
+                )
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="radio"
+                        name="branch-policy-mode"
+                        checked={policy.mode === "inherit"}
+                        onChange={() => setPolicyMode("inherit")}
+                        className="size-4 accent-primary"
+                      />
+                      Inherit deployment default
+                    </label>
+                    <p className="pl-6 text-xs text-muted-foreground">
+                      Use this repo's{" "}
+                      <code className="text-xs">
+                        filter.allowed_base_branch_overrides
+                      </code>{" "}
+                      entry if one exists, otherwise the instance-wide{" "}
+                      <code className="text-xs">filter.allowed_base_branches</code>{" "}
+                      setting. If neither is configured, every branch is
+                      auto-reviewed.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="radio"
+                        name="branch-policy-mode"
+                        checked={policy.mode === "override"}
+                        onChange={() => setPolicyMode("override")}
+                        className="size-4 accent-primary"
+                      />
+                      Only these destination branches
+                    </label>
+                    <Input
+                      className="ml-6 max-w-md font-mono text-sm"
+                      placeholder='e.g. main, dev*, release/*'
+                      value={policyBranchesDraft}
+                      onChange={(e) => setPolicyBranchesDraft(e.target.value)}
+                      disabled={policy.mode !== "override"}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") savePolicy()
+                      }}
+                    />
+                    <p className="ml-6 text-xs text-muted-foreground">
+                      Comma-separated shell globs matched against the PR
+                      destination (base) branch, case-sensitive.{" "}
+                      <code className="text-xs">dev*</code> matches{" "}
+                      <code className="text-xs">dev/foo</code> too. An empty
+                      list here is invalid — use the option below to disable.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="radio"
+                        name="branch-policy-mode"
+                        checked={policy.mode === "disable"}
+                        onChange={() => setPolicyMode("disable")}
+                        className="size-4 accent-primary"
+                      />
+                      Disable automatic reviews
+                    </label>
+                    <p className="pl-6 text-xs text-muted-foreground">
+                      No automatic reviews for any branch of this repo.
+                      Manual comments still work.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 pt-2">
+                    <Button
+                      size="sm"
+                      onClick={savePolicy}
+                      disabled={savingPolicy || !policy}
+                    >
+                      {savingPolicy && (
+                        <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                      )}
+                      Save policy
+                    </Button>
+                    {policySaved && (
+                      <span className="text-xs text-muted-foreground">Saved</span>
+                    )}
+                    {policyError && (
+                      <p className="text-xs text-destructive">{policyError}</p>
+                    )}
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
@@ -493,7 +713,7 @@ export function RepoDetailPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <BlastRadiusList owner={owner!} repo={repo!} />
+              <BlastRadiusList owner={owner} repo={repo} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -531,11 +751,10 @@ function BlastRadiusList({ owner, repo }: { owner: string; repo: string }) {
         <div className="space-y-3">
           <h3 className="text-sm font-medium">Cross-Repo References</h3>
           {data!.cross_repo.map((entry) => {
-            const [rOwner, rRepo] = entry.repo.split("/")
             return (
               <div key={entry.repo} className="rounded-lg border p-3">
                 <Link
-                  to={`/repos/${rOwner}/${rRepo}`}
+                  to={`/repos/${entry.repo}`}
                   className="text-sm font-medium hover:underline"
                 >
                   {entry.repo}

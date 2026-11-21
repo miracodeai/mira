@@ -13,6 +13,17 @@ from mira.llm.codex_cli import CodexCLIProvider
 
 
 class TestCodexCLIProvider:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["review", "walkthrough"])
+    async def test_schema_import_entrypoints(self, method):
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+        provider.complete_with_tools = AsyncMock(return_value="{}")
+
+        assert await getattr(provider, method)([{"role": "user", "content": "test"}]) == "{}"
+
+        provider.complete_with_tools.assert_awaited_once()
+        assert provider.complete_with_tools.call_args.kwargs["tools"][0]["type"] == "function"
+
     def test_factory_selects_codex_cli_provider(self):
         provider = create_llm(LLMConfig(provider="codex-cli", model="gpt-5-codex"))
         assert isinstance(provider, CodexCLIProvider)
@@ -44,6 +55,20 @@ class TestCodexCLIProvider:
             "gpt-5-codex",
             "-",
         ]
+
+    def test_command_passes_reasoning_effort(self):
+        provider = CodexCLIProvider(
+            LLMConfig(provider="codex-cli", model="gpt-5-codex", reasoning_effort="high")
+        )
+        cmd = provider._command("/tmp/out.txt")
+        assert 'model_reasoning_effort="high"' in cmd
+
+    def test_command_omits_reasoning_effort_when_off(self):
+        provider = CodexCLIProvider(
+            LLMConfig(provider="codex-cli", model="gpt-5-codex", reasoning_effort="off")
+        )
+        cmd = provider._command("/tmp/out.txt")
+        assert not any("model_reasoning_effort" in part for part in cmd)
 
     def test_command_omits_model_for_codex_default(self):
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli", model="codex-default"))

@@ -145,6 +145,24 @@ class TestParseWalkthroughResponse:
         with pytest.raises(ResponseParseError, match="Expected JSON object"):
             parse_walkthrough_response("[1, 2, 3]")
 
+    @pytest.mark.parametrize(
+        "payload",
+        [{}, {"summary": ""}, {"summary": " \n\t"}, {"Summary": "Changes"}],
+    )
+    def test_rejects_empty_walkthrough_instead_of_rendering_only_stats(self, payload):
+        from mira.exceptions import ResponseParseError
+
+        with pytest.raises(ResponseParseError, match="non-empty summary"):
+            parse_walkthrough_response(json.dumps(payload))
+
+    def test_rejects_tool_xml_leaked_into_summary(self):
+        from mira.exceptions import ResponseParseError
+
+        # Shape observed in the posted walkthroughs on PRs #377 and #366.
+        raw = json.dumps({"summary": "Fix scanning.</summary>\n</invoke>"})
+        with pytest.raises(ResponseParseError, match="leaked tool-call XML"):
+            parse_walkthrough_response(raw)
+
     def test_with_sequence_diagram(self):
         raw = json.dumps(
             {
@@ -227,6 +245,14 @@ class TestParseWalkthroughResponse:
         raw = '{"summary": "Changes", "change_groups": []}</parameter></invoke>'
         result = parse_walkthrough_response(raw)
         assert result.summary == "Changes"
+
+    def test_capitalized_group_keys_accepted(self):
+        raw = json.dumps(
+            {"summary": "s", "change_groups": [{"Label": "Core", "Files": [{"Path": "a.py"}]}]}
+        )
+        result = parse_walkthrough_response(raw)
+        assert result.change_groups[0].label == "Core"
+        assert result.change_groups[0].files[0].path == "a.py"
 
     def test_skips_file_missing_path(self):
         raw = json.dumps(
@@ -510,3 +536,63 @@ class TestBuildReviewStats:
         comments = [self._make_comment(Severity.SUGGESTION)] * 3
         stats = build_review_stats(comments)
         assert stats == {Severity.SUGGESTION: 3}
+
+
+def test_markdown_with_skipped_files_is_utf8_encodable():
+    """The "Reviewed N of M files" heading must be a real emoji, not two UTF-16 halves.
+
+    Python doesn't combine "\\ud83d\\udccb" escapes, so the heading used to make
+    the whole walkthrough unencodable ("surrogates not allowed") on any PR with
+    skipped files.
+    """
+    wt = WalkthroughResult(summary="s")
+    md = wt.to_markdown(
+        bot_name="mira",
+        reviewed_files=1,
+        skipped_paths=["b.py"],
+        total_paths=["a.py", "b.py"],
+    )
+    assert "### \U0001f4cb Reviewed 1 of 2 files" in md
+    md.encode("utf-8")
+
+
+class TestIncrementalFooter:
+    """A round-2+ review posts findings only on the latest push.
+
+    The walkthrough still describes the whole PR, so the footer has to say
+    which numbers are per push: "5 files reviewed" on a 25-file PR read as if
+    20 files had been skipped (miracodeai/mira#434).
+    """
+
+    def test_full_review_footer_unchanged(self):
+        md = WalkthroughResult(summary="s").to_markdown(reviewed_files=25, total_comments=2)
+        assert "*25 files reviewed · 2 comments*" in md
+        assert "in PR" not in md
+        assert "this push" not in md
+
+    def test_incremental_footer_counts_pr_and_push(self):
+        md = WalkthroughResult(summary="s").to_markdown(
+            reviewed_files=5,
+            total_comments=1,
+            existing_issues=2,
+            incremental_since="134545e90f1c2d3e",
+            pr_file_count=25,
+        )
+        assert (
+            "*25 files in PR · 5 reviewed in this push · 1 new comment · 2 unresolved threads*"
+        ) in md
+        # The narrative is the whole PR's, so nothing above the footer is per push.
+        assert "Incremental" not in md
+
+    def test_incremental_singular(self):
+        md = WalkthroughResult(summary="s").to_markdown(
+            reviewed_files=1, incremental_since="abcdef0", pr_file_count=1
+        )
+        assert "*1 file in PR · 1 reviewed in this push*" in md
+
+    def test_in_progress_has_no_footer(self):
+        md = WalkthroughResult(summary="s").to_markdown(
+            in_progress=True, incremental_since="abcdef0", pr_file_count=25
+        )
+        assert "in PR" not in md
+        assert "Code review in progress" in md

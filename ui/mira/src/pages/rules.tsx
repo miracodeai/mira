@@ -21,7 +21,9 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { toast } from "@/components/ui/sonner"
 import { api, type RepoListItem, type RuleModel } from "@/lib/api"
+import { useAuth } from "@/lib/auth-context"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
+import { splitRepoKey } from "@/lib/repo-key"
 
 // ── Types ──
 
@@ -35,6 +37,10 @@ interface EditingRule {
 
 export function RulesPage() {
   useDocumentTitle("Rules")
+  // Rules feed the review prompt, so only admins may change them; everyone
+  // else gets a read-only view (the API rejects their writes with 403).
+  const { user } = useAuth()
+  const canEdit = !!user?.is_admin
   // Global rules
   const [globalRules, setGlobalRules] = useState<RuleModel[]>([])
   const [editingGlobal, setEditingGlobal] = useState<EditingRule | null>(null)
@@ -87,19 +93,38 @@ export function RulesPage() {
   const [selectedRepo, setSelectedRepo] = useState<string>("")
   const [repoRules, setRepoRules] = useState<RuleModel[]>([])
   const [editingRepo, setEditingRepo] = useState<EditingRule | null>(null)
+  // Drop the previous repo's rules as soon as the selection changes.
+  const [rulesRepo, setRulesRepo] = useState(selectedRepo)
+  if (rulesRepo !== selectedRepo) {
+    setRulesRepo(selectedRepo)
+    setRepoRules([])
+  }
 
   useEffect(() => {
-    if (!selectedRepo) {
-      setRepoRules([])
-      return
+    if (!selectedRepo) return
+    const repoKey = splitRepoKey(selectedRepo)
+    if (!repoKey) return
+    const [owner, repo] = repoKey
+    let cancelled = false
+    api
+      .listRepoRules(owner, repo)
+      .then((rules) => {
+        if (!cancelled) setRepoRules(rules)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
     }
-    const [owner, repo] = selectedRepo.split("/")
-    api.listRepoRules(owner, repo).then(setRepoRules).catch(() => {})
   }, [selectedRepo])
 
   const saveRepo = async () => {
     if (!editingRepo || !editingRepo.title.trim() || !selectedRepo) return
-    const [owner, repo] = selectedRepo.split("/")
+    const repoKey = splitRepoKey(selectedRepo)
+    if (!repoKey) {
+      toast.error("Invalid repository key")
+      return
+    }
+    const [owner, repo] = repoKey
     try {
       if (editingRepo.id) {
         const updated = await api.updateRepoRule(
@@ -131,7 +156,12 @@ export function RulesPage() {
 
   const deleteRepo = async (id: number) => {
     if (!selectedRepo) return
-    const [owner, repo] = selectedRepo.split("/")
+    const repoKey = splitRepoKey(selectedRepo)
+    if (!repoKey) {
+      toast.error("Invalid repository key")
+      return
+    }
+    const [owner, repo] = repoKey
     await api.deleteRepoRule(owner, repo, id)
     setRepoRules((prev) => prev.filter((r) => r.id !== id))
   }
@@ -143,6 +173,7 @@ export function RulesPage() {
         <p className="text-sm text-muted-foreground">
           Define review rules that Mira follows when reviewing code. Global
           rules apply to all repos. Per-repo rules apply to a single repo.
+          {!canEdit && " Only admins can change them."}
         </p>
       </div>
 
@@ -156,12 +187,14 @@ export function RulesPage() {
                 Apply to all repositories in your organization
               </CardDescription>
             </div>
-            <Button
-              size="sm"
-              onClick={() => setEditingGlobal({ title: "", content: "" })}
-            >
-              <Plus className="mr-1 h-3 w-3" /> Add
-            </Button>
+            {canEdit && (
+              <Button
+                size="sm"
+                onClick={() => setEditingGlobal({ title: "", content: "" })}
+              >
+                <Plus className="mr-1 h-3 w-3" /> Add
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent>
@@ -180,6 +213,7 @@ export function RulesPage() {
                       key={rule.id}
                       rule={rule}
                       icon={<Globe className="h-4 w-4" />}
+                      readOnly={!canEdit}
                       onEdit={() =>
                         setEditingGlobal({
                           id: rule.id,
@@ -211,13 +245,15 @@ export function RulesPage() {
                 Rules scoped to a specific repository
               </CardDescription>
             </div>
-            <Button
-              size="sm"
-              disabled={!selectedRepo}
-              onClick={() => setEditingRepo({ title: "", content: "" })}
-            >
-              <Plus className="mr-1 h-3 w-3" /> Add
-            </Button>
+            {canEdit && (
+              <Button
+                size="sm"
+                disabled={!selectedRepo}
+                onClick={() => setEditingRepo({ title: "", content: "" })}
+              >
+                <Plus className="mr-1 h-3 w-3" /> Add
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent>
@@ -249,6 +285,7 @@ export function RulesPage() {
                   key={rule.id}
                   rule={rule}
                   icon={<BookOpen className="h-4 w-4" />}
+                  readOnly={!canEdit}
                   onEdit={() =>
                     setEditingRepo({
                       id: rule.id,
@@ -314,12 +351,14 @@ function RuleForm({
 function RuleItem({
   rule,
   icon,
+  readOnly,
   onEdit,
   onDelete,
   onToggle,
 }: {
   rule: RuleModel
   icon: React.ReactNode
+  readOnly?: boolean
   onEdit: () => void
   onDelete: () => void
   onToggle?: () => void
@@ -338,35 +377,37 @@ function RuleItem({
           {rule.content.length > 200 && "..."}
         </pre>
       </div>
-      <div className="ml-4 flex gap-1">
-        {onToggle && (
+      {!readOnly && (
+        <div className="ml-4 flex gap-1">
+          {onToggle && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              onClick={onToggle}
+              title={rule.enabled ? "Disable" : "Enable"}
+            >
+              <Power className={`h-3 w-3 ${rule.enabled ? "text-green-500" : "text-muted-foreground"}`} />
+            </Button>
+          )}
           <Button
             size="icon"
             variant="ghost"
             className="h-8 w-8"
-            onClick={onToggle}
-            title={rule.enabled ? "Disable" : "Enable"}
+            onClick={onEdit}
           >
-            <Power className={`h-3 w-3 ${rule.enabled ? "text-green-500" : "text-muted-foreground"}`} />
+            <Pencil className="h-3 w-3" />
           </Button>
-        )}
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8"
-          onClick={onEdit}
-        >
-          <Pencil className="h-3 w-3" />
-        </Button>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8"
-          onClick={onDelete}
-        >
-          <Trash2 className="h-3 w-3" />
-        </Button>
-      </div>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8"
+            onClick={onDelete}
+          >
+            <Trash2 className="h-3 w-3" />
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

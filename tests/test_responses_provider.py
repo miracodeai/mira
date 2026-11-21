@@ -11,7 +11,8 @@ import pytest
 from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm import create_llm
-from mira.llm.responses import ResponsesProvider, _ensure_json_word
+from mira.llm.responses import ResponsesProvider
+from mira.llm.utils import _JSON_HINT, _ensure_json_hint
 
 # Set a dummy API key for tests so _get_api_key() doesn't fail
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key-for-unit-tests")
@@ -204,11 +205,13 @@ class TestComplete:
 
 
 class TestJsonHintInjection:
-    """Responses backends (Codex) require the word "json" in the input
-    whenever text.format type is json_object."""
+    """JSON-mode Responses requests must carry an explicit JSON-only
+    instruction in a user-role input item. The instruction is appended to the
+    final user text; system prompts, function-call arguments, and tool outputs
+    never satisfy the contract on their own."""
 
     @pytest.mark.asyncio
-    async def test_json_hint_prepended_when_missing(self, config: LLMConfig):
+    async def test_json_hint_appended_to_final_user_message(self, config: LLMConfig):
         provider = ResponsesProvider(config)
         mock_data = _make_resp_text('{"ok": true}', _make_resp_usage(10, 10))
         mock_resp = _mock_httpx_response(mock_data, 200)
@@ -225,15 +228,18 @@ class TestJsonHintInjection:
 
         body = mock_client.post.call_args[1]["json"]
         assert body["text"]["format"]["type"] == "json_object"
-        first = body["input"][0]
-        assert first["role"] == "system"
-        assert "json" in first["content"].lower()
-        # Original system message and user message preserved after the hint.
-        assert body["input"][1] == {"role": "system", "content": "You are a helpful assistant."}
-        assert body["input"][2] == {"role": "user", "content": "Summarize this PR."}
+        # No synthetic system item; the caller's system text is untouched.
+        assert body["input"][0] == {
+            "role": "system",
+            "content": "You are a helpful assistant.",
+        }
+        user = body["input"][-1]
+        assert user["role"] == "user"
+        assert user["content"].startswith("Summarize this PR.")
+        assert "Respond with a JSON object only" in user["content"]
 
     @pytest.mark.asyncio
-    async def test_no_hint_when_json_already_present(self, config: LLMConfig):
+    async def test_hint_appended_when_only_system_mentions_json(self, config: LLMConfig):
         provider = ResponsesProvider(config)
         mock_data = _make_resp_text("{}", _make_resp_usage(10, 10))
         mock_resp = _mock_httpx_response(mock_data, 200)
@@ -249,14 +255,17 @@ class TestJsonHintInjection:
             )
 
         body = mock_client.post.call_args[1]["json"]
-        assert len(body["input"]) == 2
         assert body["input"][0] == {
             "role": "system",
             "content": "Respond with a JSON object.",
         }
+        user = body["input"][-1]
+        assert user["role"] == "user"
+        # A JSON mention in the system prompt does not satisfy the contract.
+        assert "Respond with a JSON object only" in user["content"]
 
     @pytest.mark.asyncio
-    async def test_no_hint_when_json_word_in_user_content(self, config: LLMConfig):
+    async def test_hint_appended_when_absent(self, config: LLMConfig):
         provider = ResponsesProvider(config)
         mock_data = _make_resp_text("{}", _make_resp_usage(10, 10))
         mock_resp = _mock_httpx_response(mock_data, 200)
@@ -264,42 +273,16 @@ class TestJsonHintInjection:
 
         with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
             await provider.complete(
-                [{"role": "user", "content": "Return the diff as JSON."}],
+                [{"role": "user", "content": "Return the diff."}],
                 json_mode=True,
             )
 
         body = mock_client.post.call_args[1]["json"]
         assert len(body["input"]) == 1
-        assert body["input"][0]["content"] == "Return the diff as JSON."
-
-    @pytest.mark.asyncio
-    async def test_no_hint_when_json_in_tool_result(self, config: LLMConfig):
-        provider = ResponsesProvider(config)
-        mock_data = _make_resp_text("{}", _make_resp_usage(10, 10))
-        mock_resp = _mock_httpx_response(mock_data, 200)
-        mock_client = _mock_client(mock_resp)
-
-        convo = [
-            {"role": "user", "content": "Run the check."},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "read_file", "arguments": '{"path": "config.json"}'},
-                    }
-                ],
-            },
-            {"role": "tool", "tool_call_id": "call_1", "content": '{"status": "ok"}'},
-        ]
-        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
-            await provider.complete(convo, json_mode=True)
-
-        body = mock_client.post.call_args[1]["json"]
-        # "json" appears in the function_call arguments — no hint needed.
-        assert body["input"][0] == {"role": "user", "content": "Run the check."}
+        user = body["input"][0]
+        assert user["role"] == "user"
+        assert user["content"].startswith("Return the diff.")
+        assert "Respond with a JSON object only" in user["content"]
 
     @pytest.mark.asyncio
     async def test_no_hint_when_json_mode_disabled(self, config: LLMConfig):
@@ -318,24 +301,51 @@ class TestJsonHintInjection:
 
 
 class TestJsonHintHelper:
-    def test_returns_same_list_when_word_present(self):
-        items = [{"role": "system", "content": "Respond in JSON."}]
-        assert _ensure_json_word(items) is items
-
-    def test_case_insensitive_match(self):
-        items = [{"role": "user", "content": "give me the Json blob"}]
-        assert _ensure_json_word(items) is items
-
-    def test_prepends_hint_when_absent(self):
+    def test_appends_hint_to_final_user_message(self):
         items = [{"role": "user", "content": "hi"}]
-        out = _ensure_json_word(items)
-        assert len(out) == 2
-        assert out[0]["role"] == "system"
-        assert "json" in out[0]["content"].lower()
-        assert out[1] == {"role": "user", "content": "hi"}
+        out = _ensure_json_hint(items)
+        assert out is not items
+        assert len(out) == 1
+        assert out[0]["role"] == "user"
+        assert out[0]["content"].startswith("hi")
+        assert _JSON_HINT in out[0]["content"]
 
-    def test_scans_non_role_values(self):
-        # "json" inside function_call arguments must count.
+    def test_does_not_mutate_caller_messages(self):
+        items = [{"role": "user", "content": "hi"}]
+        out = _ensure_json_hint(items)
+        assert items[0]["content"] == "hi"
+        assert out[0]["content"] != items[0]["content"]
+
+    def test_appends_to_final_user_not_first(self):
+        items = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "second"},
+        ]
+        out = _ensure_json_hint(items)
+        assert out[0] == {"role": "user", "content": "first"}
+        assert out[-1]["role"] == "user"
+        assert out[-1]["content"].startswith("second")
+        assert _JSON_HINT in out[-1]["content"]
+
+    def test_idempotent_when_hint_already_present(self):
+        items = [{"role": "user", "content": f"hi\n\n{_JSON_HINT}"}]
+        out = _ensure_json_hint(items)
+        assert out == items
+        assert out[0]["content"].count(_JSON_HINT) == 1
+
+    def test_system_json_mention_does_not_satisfy_contract(self):
+        items = [
+            {"role": "system", "content": "Respond in JSON."},
+            {"role": "user", "content": "hi"},
+        ]
+        out = _ensure_json_hint(items)
+        assert out[0] == {"role": "system", "content": "Respond in JSON."}
+        assert out[-1]["role"] == "user"
+        assert _JSON_HINT in out[-1]["content"]
+
+    def test_json_in_tool_values_does_not_satisfy_contract(self):
+        # "json" inside function_call arguments or tool output must NOT count.
         items = [
             {
                 "type": "function_call",
@@ -343,9 +353,27 @@ class TestJsonHintHelper:
                 "call_id": "c1",
                 "name": "read_file",
                 "arguments": '{"path": "json_schema.py"}',
-            }
+            },
+            {"type": "function_call_output", "call_id": "c1", "output": '{"ok": "json"}'},
         ]
-        assert _ensure_json_word(items) is items
+        out = _ensure_json_hint(items)
+        assert len(out) == 3
+        assert out[-1]["role"] == "user"
+        assert out[-1]["content"] == _JSON_HINT
+
+    def test_adds_user_message_when_none_present(self):
+        items = [{"role": "system", "content": "You are helpful."}]
+        out = _ensure_json_hint(items)
+        assert len(out) == 2
+        assert out[0] == {"role": "system", "content": "You are helpful."}
+        assert out[1] == {"role": "user", "content": _JSON_HINT}
+
+    def test_non_string_user_content_gets_separate_hint_item(self):
+        items = [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        out = _ensure_json_hint(items)
+        assert len(out) == 2
+        assert out[0] == items[0]
+        assert out[1] == {"role": "user", "content": _JSON_HINT}
 
 
 class TestCompleteWithTools:
@@ -681,6 +709,134 @@ class TestApplyReasoning:
         assert "reasoning" not in body
         # Temperature should NOT be popped when reasoning is off
         assert "temperature" in body
+
+    @pytest.mark.asyncio
+    async def test_deepseek_on_maps_effort_levels(self):
+        cfg = LLMConfig(
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/v1",
+            api_style="responses",
+            reasoning_effort="xhigh",
+        )
+        provider = ResponsesProvider(cfg)
+        body = {"model": "deepseek-v4-pro"}
+        provider._apply_reasoning(body)
+        assert body["reasoning"] == {"effort": "high"}
+        assert "reasoning_effort" not in body
+        assert "thinking" not in body
+
+    @pytest.mark.asyncio
+    async def test_deepseek_off_sends_explicit_disable(self):
+        cfg = LLMConfig(
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/v1",
+            api_style="responses",
+        )
+        provider = ResponsesProvider(cfg)
+        mock_resp = _mock_httpx_response(_make_resp_text("done"), 200)
+        mock_client = _mock_client(mock_resp)
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete([{"role": "user", "content": "hi"}], json_mode=False)
+
+        body = mock_client.post.call_args[1]["json"]
+        assert body["reasoning"] == {"effort": "none"}
+
+    @pytest.mark.asyncio
+    async def test_deepseek_reasoning_rejection_reapplies_off(self):
+        cfg = LLMConfig(
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com/v1",
+            api_style="responses",
+            reasoning_effort="high",
+        )
+        provider = ResponsesProvider(cfg)
+        err_resp = _mock_httpx_response({"error": "reasoning unsupported"}, 400)
+        ok_resp = _mock_httpx_response(_make_resp_text("done"), 200)
+        mock_client = _mock_client(None, extra_posts=[err_resp, ok_resp])
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "do_thing", "parameters": {"type": "object"}},
+            }
+        ]
+
+        with patch("mira.llm.responses.httpx.AsyncClient", return_value=mock_client):
+            await provider.complete_agentic([{"role": "user", "content": "test"}], tools=tools)
+
+        second_body = mock_client.post.call_args_list[1][1]["json"]
+        assert second_body["reasoning"] == {"effort": "none"}
+
+
+class TestReasoningItems:
+    def test_response_message_keeps_reasoning_item_and_provider_id(self):
+        from mira.llm.responses import _response_message
+
+        data = {
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "content": [{"type": "reasoning_text", "text": "thinking"}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{}",
+                },
+            ]
+        }
+        result = _response_message(data)
+        assert result["reasoning_items"] == [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "content": [{"type": "reasoning_text", "text": "thinking"}],
+            }
+        ]
+        assert result["tool_calls"][0]["id"] == "call_1"
+        assert result["tool_calls"][0]["provider_id"] == "fc_1"
+
+    def test_responses_input_replays_reasoning_items(self):
+        from mira.llm.responses import _responses_input
+
+        reasoning = {
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "cipher",
+        }
+        messages = [
+            {"role": "user", "content": "review"},
+            {
+                "role": "assistant",
+                "content": "checking",
+                "reasoning_items": [reasoning],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "provider_id": "fc_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        ]
+
+        items = _responses_input(messages)
+        assert items[1] == reasoning
+        assert items[2] == {
+            "type": "message",
+            "role": "assistant",
+            "content": "checking",
+        }
+        assert items[3]["type"] == "function_call"
+        assert items[3]["id"] == "fc_1"
+        assert items[3]["call_id"] == "call_1"
+        assert items[4]["type"] == "function_call_output"
+        assert items[4]["call_id"] == "call_1"
 
 
 class TestResponseMessage:

@@ -76,3 +76,20 @@ async def test_complete_setup_writes_to_platform_rows(db: AppDatabase) -> None:
     # The disabled GitLab repo must be opted out on its own row, not a
     # phantom github one — otherwise the initial indexer picks it up.
     assert gl is not None and gl.index_mode == "none" and gl.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_initial_indexing_setup_failure_marks_repos_failed(
+    db: AppDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MIRA_GITLAB_TOKEN", "tok")
+    db.register_repo("grp", "proj", platform="gitlab")
+    db.set_repo_index_mode("grp", "proj", "full", platform="gitlab")
+    db.set_repo_status("grp", "proj", "indexing", platform="gitlab")
+
+    with patch("mira.llm.create_llm", side_effect=RuntimeError("bad indexing model")):
+        await api._run_initial_indexing("full")
+
+    repo = db.get_repo("grp", "proj", platform="gitlab")
+    assert repo is not None and repo.status == "failed"
+    assert "bad indexing model" in (repo.error or "")

@@ -14,7 +14,7 @@ from tenacity import (
 )
 
 from mira.config import LLMConfig
-from mira.exceptions import LLMError
+from mira.exceptions import LLMError, StructuredOutputError
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 
 logger = logging.getLogger(__name__)
@@ -37,13 +37,14 @@ class _BedrockThrottlingError(Exception):
 def _openai_tool_to_bedrock(tool: dict) -> dict:
     """Convert OpenAI function-calling tool schema to Bedrock toolSpec format."""
     func = tool["function"]
-    return {
-        "toolSpec": {
-            "name": func["name"],
-            "description": func.get("description", ""),
-            "inputSchema": {"json": func["parameters"]},
-        }
+    spec: dict = {
+        "name": func["name"],
+        "inputSchema": {"json": func["parameters"]},
     }
+    # Converse rejects an empty description when the field is present.
+    if func.get("description"):
+        spec["description"] = func["description"]
+    return {"toolSpec": spec}
 
 
 def _messages_to_bedrock(messages: list[dict]) -> tuple[list[dict] | None, list[dict]]:
@@ -65,6 +66,11 @@ def _messages_to_bedrock(messages: list[dict]) -> tuple[list[dict] | None, list[
         elif role == "assistant":
             # Reconstruct assistant messages — may have tool_calls from agentic loop
             blocks: list[dict] = []
+            # Claude extended thinking requires the reasoning block and its
+            # signature to be replayed unchanged on tool turns.
+            for block in msg.get("reasoning_blocks") or []:
+                if "reasoningContent" in block:
+                    blocks.append(dict(block))
             if content:
                 blocks.append({"text": content})
             for tc in msg.get("tool_calls", []):
@@ -146,6 +152,16 @@ class BedrockProvider:
         )
         self._call_converse = self._retry(self._call_converse)
 
+    def _thinking_enabled(self) -> bool:
+        effort = self.config.reasoning_effort
+        return bool(effort and effort != "off")
+
+    def _tool_choice(self, name: str) -> dict:
+        """Thinking only supports automatic tool choice on Claude."""
+        if self._thinking_enabled():
+            return {"auto": {}}
+        return {"tool": {"name": name}}
+
     async def _call_converse(
         self,
         model: str,
@@ -174,7 +190,13 @@ class BedrockProvider:
         # unset, so drop it when enabled. Budget must stay below maxTokens.
         effort = self.config.reasoning_effort
         if effort and effort != "off":
-            budget = {"low": 2048, "medium": 8192, "high": 16384, "max": 32768}.get(effort, 8192)
+            budget = {
+                "low": 2048,
+                "medium": 8192,
+                "high": 16384,
+                "xhigh": 32768,
+                "max": 32768,
+            }.get(effort, 8192)
             budget = min(budget, max(1024, max_out - 1024))
             kwargs["additionalModelRequestFields"] = {
                 "thinking": {"type": "enabled", "budget_tokens": budget}
@@ -307,13 +329,17 @@ class BedrockProvider:
         json_mode: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        omit_temperature: bool = False,
     ) -> str:
         """Complete a prompt. Uses tool calling to enforce JSON when json_mode=True."""
+        if omit_temperature:
+            raise ValueError("Temperature omission requires an OpenAI-compatible HTTP provider")
         if json_mode:
             # Force structured JSON output via tool use
             tool_config = {
                 "tools": [_JSON_RESPONSE_TOOL],
-                "toolChoice": {"tool": {"name": "submit_json_response"}},
+                "toolChoice": self._tool_choice("submit_json_response"),
             }
             response = await self._call_with_fallback(
                 messages,
@@ -334,18 +360,88 @@ class BedrockProvider:
         )
         return self._extract_text(response)
 
+    async def _call_named_tool_with_fallback(
+        self,
+        messages: list[dict],
+        *,
+        tool_config: dict,
+        force_tool: str,
+        temperature: float | None = None,
+    ) -> str:
+        """Strict structured call: prose is a failure, and fallback gets a turn."""
+        models = [self.config.model]
+        if self.config.fallback_model and self.config.fallback_model != self.config.model:
+            models.append(self.config.fallback_model)
+
+        last_error: Exception | None = None
+        for index, model in enumerate(models):
+            try:
+                response = await self._call_converse(
+                    model,
+                    messages,
+                    tool_config=tool_config,
+                    temperature=temperature,
+                )
+            except Exception as exc:
+                last_error = exc
+            else:
+                tool_json = self._extract_tool_use(response)
+                if tool_json:
+                    return tool_json
+                text = self._extract_text(response)
+                excerpt = " ".join(text.split())[:300]
+                last_error = StructuredOutputError(
+                    "structured_output",
+                    model=model,
+                    tool=force_tool,
+                    excerpt=excerpt or "(empty response)",
+                )
+            if index + 1 < len(models):
+                logger.warning(
+                    "Primary model %s failed (%s), trying fallback %s",
+                    model,
+                    last_error,
+                    models[index + 1],
+                )
+
+        assert last_error is not None
+        if len(models) > 1:
+            if isinstance(last_error, StructuredOutputError):
+                raise last_error
+            raise LLMError(
+                "both_models_failed",
+                primary_model=self.config.model,
+                fallback_model=self.config.fallback_model,
+                error=last_error,
+            ) from last_error
+        if isinstance(last_error, StructuredOutputError):
+            raise last_error
+        raise LLMError(
+            "bedrock_call_failed", model=self.config.model, error=last_error
+        ) from last_error
+
     async def complete_with_tools(
         self,
         messages: list[dict[str, str]],
         tools: list[dict],
         temperature: float | None = None,
+        force_tool: str | None = None,
     ) -> str:
         """Complete using tool calling for structured output."""
         bedrock_tools = [_openai_tool_to_bedrock(t) for t in tools]
+        forced_tool_name = force_tool or tools[0]["function"]["name"]
         tool_config = {
             "tools": bedrock_tools,
-            "toolChoice": {"tool": {"name": tools[0]["function"]["name"]}},
+            "toolChoice": self._tool_choice(forced_tool_name),
         }
+
+        if force_tool:
+            return await self._call_named_tool_with_fallback(
+                messages,
+                tool_config=tool_config,
+                force_tool=force_tool,
+                temperature=temperature,
+            )
 
         response = await self._call_with_fallback(
             messages,
@@ -387,10 +483,13 @@ class BedrockProvider:
         content_blocks = message.get("content", [])
 
         openai_msg: dict = {"role": "assistant", "content": None, "tool_calls": []}
+        reasoning_blocks: list[dict] = []
 
         for block in content_blocks:
             if "text" in block:
                 openai_msg["content"] = block["text"]
+            elif "reasoningContent" in block:
+                reasoning_blocks.append(block)
             elif "toolUse" in block:
                 tool_use = block["toolUse"]
                 openai_msg["tool_calls"].append(
@@ -406,6 +505,10 @@ class BedrockProvider:
 
         if not openai_msg["tool_calls"]:
             del openai_msg["tool_calls"]
+        if reasoning_blocks:
+            openai_msg["reasoning_blocks"] = reasoning_blocks
+        if response.get("stopReason"):
+            openai_msg["finish_reason"] = response["stopReason"]
 
         return openai_msg
 

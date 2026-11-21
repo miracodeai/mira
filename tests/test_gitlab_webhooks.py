@@ -230,6 +230,60 @@ async def test_github_route_404_when_not_configured(client):
 
 
 @pytest.mark.asyncio
+async def test_mr_open_target_branch_filtered(client):
+    payload = _mr_payload(action="open")
+    payload["object_attributes"]["target_branch"] = "develop"
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
+        )
+    assert resp.json()["status"] == "ignored"
+    h.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mr_open_target_branch_allowed(client):
+    payload = _mr_payload(action="open")
+    payload["object_attributes"]["target_branch"] = "main"
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_merge_request", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
+        )
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mr_note_mention_ignores_branch_policy(client):
+    # Manual commands are never gated by the branch policy.
+    payload = _note_payload("@mira-bot review")
+    cfg = MiraConfig(filter=FilterConfig(allowed_base_branches=["main"]))
+    with (
+        patch("mira.platforms.gitlab.webhook.load_config", return_value=cfg),
+        patch("mira.platforms.gitlab.webhook.handle_gitlab_note", new=AsyncMock()) as h,
+    ):
+        resp = await client.post(
+            "/gitlab/webhook",
+            content=json.dumps(payload),
+            headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_mr_open_blocked_author_filtered(client):
     payload = _mr_payload(action="open")
     payload["user"]["username"] = "dependabot"
@@ -284,7 +338,8 @@ async def test_mr_open_allowlist_filters_off_list(client):
 
 
 @pytest.mark.asyncio
-async def test_note_review_bypass_for_blocked_author(client):
+async def test_note_review_ignores_author_filter(client):
+    """Commands use the command policy, not the auto-review author filter."""
     payload = _note_payload(note="@mira-bot review")
     payload["user"]["username"] = "dependabot"
     cfg = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
@@ -302,7 +357,8 @@ async def test_note_review_bypass_for_blocked_author(client):
 
 
 @pytest.mark.asyncio
-async def test_note_non_review_no_bypass(client):
+async def test_note_non_review_ignores_author_filter(client):
+    """Free-form command dispatch is separate from the auto-review author filter."""
     payload = _note_payload(note="@mira-bot pause")
     payload["user"]["username"] = "alice"
     cfg = MiraConfig(filter=FilterConfig(blocked_authors=["alice"]))
@@ -315,5 +371,5 @@ async def test_note_non_review_no_bypass(client):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
         )
-    assert resp.json()["status"] == "ignored"
-    h.assert_not_called()
+    assert resp.json()["status"] == "processing"
+    h.assert_awaited_once()
