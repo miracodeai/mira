@@ -13,6 +13,8 @@ import pytest
 from click.testing import CliRunner
 
 from mira.cli import main
+from mira.config import MiraConfig
+from mira.core.engine import ReviewEngine
 from mira.core.git_snapshot import GitSnapshot
 from mira.exceptions import MiraError
 
@@ -148,6 +150,84 @@ def test_branch_diff_uses_merge_base(checkout: Path):
     assert "base_only.py" not in diff
 
 
+@pytest.mark.parametrize(
+    ("call", "enabled", "checked", "verified"),
+    [
+        ("greet('Grace')", True, 1, 1),
+        ("greet('Grace', 'Hi ')", True, 1, 0),
+        ("greet(*('Grace',))", True, 0, 0),
+        ("greet('Grace')", False, 0, 0),
+    ],
+    ids=["broken", "compatible", "unsupported", "disabled"],
+)
+async def test_local_cross_chunk_call_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call, enabled, checked, verified
+):
+    _git(tmp_path, "init", "--initial-branch=main", "--template=")
+    service = tmp_path / "service.py"
+    caller = tmp_path / "caller.py"
+    service.write_text("def greet(name):\n    return name\n")
+    caller.write_text("from service import greet\n\ndef run():\n    return greet('Ada')\n")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "Add caller")
+    _git(tmp_path, "switch", "-c", "change")
+    service.write_text("def greet(name, prefix):\n    return name\n")
+    caller.write_text(f"from service import greet\n\ndef run():\n    return {call}\n")
+    _git(tmp_path, "commit", "-am", "Change signature and caller")
+    monkeypatch.chdir(tmp_path)
+    snapshot = GitSnapshot("main")
+    # Working-tree edits must not change the verification result.
+    service.write_text("def greet(name, prefix=None):\n    return name\n")
+    config = MiraConfig()
+    config.llm.max_context_tokens = 2500
+    config.review.python_call_verification = enabled
+    config.review.agentic_tools = False
+    config.review.walkthrough = False
+    config.review.security_pass = False
+    config.review.include_summary = False
+    model = MagicMock()
+    model.count_tokens.return_value = 400
+    model.usage = {}
+
+    async def review(messages):
+        prompt = "\n".join(m["content"] for m in messages)
+        assert ("Independently checked Python call bindings" in prompt) == bool(checked)
+        if "### `caller.py`" in prompt:
+            return json.dumps(
+                {
+                    "comments": [
+                        {
+                            "path": "caller.py",
+                            "line": 4,
+                            "severity": "warning",
+                            "category": "bug",
+                            "title": "Ordinary review finding",
+                            "body": "Keep this ordinary finding.",
+                            "confidence": 0.95,
+                        }
+                    ]
+                }
+            )
+        return '{"comments":[]}'
+
+    model.review = AsyncMock(side_effect=review)
+    critique = AsyncMock(side_effect=lambda _llm, comments, **kwargs: comments)
+    monkeypatch.setattr("mira.core.engine.self_critique", critique)
+    result = await ReviewEngine(config, model).review_diff(snapshot.diff(), local_snapshot=snapshot)
+
+    assert model.review.await_count == 2
+    assert result.failed_paths == []
+    assert [c.title for c in critique.await_args.args[1]] == ["Ordinary review finding"]
+    assert [c.title for c in result.comments if c.source_pass == "main"] == [
+        "Ordinary review finding"
+    ]
+    findings = [c for c in result.comments if c.source_pass == "python-call"]
+    assert len(findings) == verified
+    if findings:
+        assert (findings[0].path, findings[0].line) == ("caller.py", 4)
+        assert "service.py:1" in findings[0].body
+
+
 async def test_snapshot_reads_only_regular_files_from_captured_head(checkout: Path):
     snapshot = GitSnapshot("main")
     (checkout / "src/caller.py").write_text("NEW_HEAD\n")
@@ -158,6 +238,50 @@ async def test_snapshot_reads_only_regular_files_from_captured_head(checkout: Pa
     assert "NEW_HEAD" not in snapshot.diff()
     for path in ("link.py", "untracked.py", "../outside.py", str(checkout / "src/caller.py")):
         assert await snapshot.fetch(path) is None
+
+
+async def test_local_call_verification_finds_unchanged_importer(tmp_path, monkeypatch):
+    _git(tmp_path, "init", "--initial-branch=main", "--template=")
+    service = tmp_path / "service.py"
+    caller = tmp_path / "caller.py"
+    service.write_text("def greet(\n    name,\n    prefix,\n):\n    return name\n")
+    source = (
+        "from service import greet\n\n"
+        "class Caller:\n"
+        "    def run(self, name):\n"
+        "        result = greet(\n"
+        "            name, self.prefix,\n"
+        "        )\n"
+        "        return result\n"
+    )
+    caller.write_text(source)
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "Add caller")
+    _git(tmp_path, "switch", "-c", "change")
+    service.write_text("def greet(\n    name,\n):\n    return name\n")
+    _git(tmp_path, "commit", "-am", "Remove the prefix parameter")
+    monkeypatch.chdir(tmp_path)
+    snapshot = GitSnapshot("main")
+    caller.write_text(source.replace("name, self.prefix,", "name,"))
+    assert await snapshot.unchanged_importers(["service"]) == ["caller.py"]
+    assert await snapshot.unchanged_importers(["not_a_module"]) == []
+    assert _git(tmp_path, "diff", "--name-only", "main...HEAD") == "service.py"
+
+    config = MiraConfig()
+    config.review.python_call_verification = True
+    config.review.agentic_tools = config.review.security_pass = False
+    config.review.walkthrough = config.review.include_summary = False
+    model = MagicMock()
+    model.count_tokens.return_value = 400
+    model.review = AsyncMock(return_value='{"comments":[]}')
+    model.usage = {}
+    result = await ReviewEngine(config, model).review_diff(snapshot.diff(), local_snapshot=snapshot)
+
+    (finding,) = result.comments
+    assert (finding.path, finding.line) == ("service.py", 3)
+    assert "caller.py:5" in finding.body
+    assert "too many positional arguments" in finding.body
+    assert result.total_chunks == model.review.await_count == 1
 
 
 @pytest.mark.parametrize("content", [b"source\n", b"binary\0data"])
