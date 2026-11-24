@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Area, AreaChart, CartesianGrid, XAxis } from "recharts"
 
 import { Badge } from "@/components/ui/badge"
+import { ReviewDeliveryBadge, ReviewOutcomeSummary } from "@/components/dashboard/review-outcome"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { GitHubIcon } from "@/components/ui/github-icon"
@@ -653,7 +654,7 @@ export function ActivityPage() {
                     <SortHead label="PR" sortKey="pr_number" sort={sort} onSort={toggleSort} />
                     <SortHead label="Reviews" sortKey="reviews" sort={sort} onSort={toggleSort} />
                     <SortHead label="Last reviewed" sortKey="last_reviewed" sort={sort} onSort={toggleSort} />
-                    <SortHead label="Comments" sortKey="comments" sort={sort} onSort={toggleSort} />
+                    <SortHead label="Findings" sortKey="comments" sort={sort} onSort={toggleSort} />
                     <SortHead label="Severity" sortKey="severity" sort={sort} onSort={toggleSort} />
                     <TableHead>Categories</TableHead>
                   </TableRow>
@@ -688,6 +689,21 @@ export function ActivityPage() {
                           <span className="truncate text-muted-foreground">
                             {g.pr_title}
                           </span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          <ReviewDeliveryBadge outcome={g.latest.outcome} />
+                          {g.latest.outcome &&
+                            g.latest.outcome.coverage !== "complete" && (
+                              <Badge
+                                variant={
+                                  g.latest.outcome.coverage === "failed"
+                                    ? "destructive"
+                                    : "outline"
+                                }
+                              >
+                                Review {g.latest.outcome.coverage}
+                              </Badge>
+                            )}
                         </div>
                       </TableCell>
                       <TableCell className="tabular-nums">
@@ -851,7 +867,7 @@ export function ActivityPage() {
 
               <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
                 <Stat label="Reviews" value={selected.reviewCount} />
-                <Stat label="Comments posted" value={selected.totalComments} />
+                <Stat label="Recorded findings" value={selected.totalComments} />
                 <Stat label="Files reviewed" value={selected.latest.files_reviewed} />
                 <Stat label="Lines changed" value={selected.latest.lines_changed.toLocaleString()} />
                 <Stat label="Tokens used" value={selected.totalTokens.toLocaleString()} />
@@ -1030,8 +1046,10 @@ function ReviewEntry({
         <SeverityBadges counts={review} />
       </div>
 
+      <ReviewOutcomeSummary outcome={review.outcome} />
+
       {review.comments.length > 0 && (
-        <ul className="mt-3 space-y-3">
+        <ul className="mt-3 space-y-3" aria-label="Recorded findings">
           {review.comments.map((c) => (
             <li key={c.id} className="min-w-0">
               <div className="flex items-center gap-2">
@@ -1092,7 +1110,7 @@ function ReviewEntry({
       )}
 
       <div className="mt-2 text-xs text-muted-foreground">
-        {plural(review.comments_posted, "comment")} · {review.lines_changed.toLocaleString()} lines ·{" "}
+        {plural(review.comments_posted, "recorded finding")} · {review.lines_changed.toLocaleString()} lines ·{" "}
         {review.tokens_used.toLocaleString()} tokens · {(review.duration_ms / 1000).toFixed(1)}s
       </div>
     </>

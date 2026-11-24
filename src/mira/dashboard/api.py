@@ -27,6 +27,7 @@ from mira.dashboard.auth import AuthMiddleware, create_auth_router
 from mira.dashboard.db import AppDatabase, RepoRecord
 from mira.index.relationships import RelationshipStore
 from mira.index.store import IndexingSuperseded, IndexStore
+from mira.review_outcome import ReviewOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,9 @@ class ReviewEventModel(BaseModel):
     pr_number: int
     pr_title: str
     pr_url: str
-    comments_posted: int
+    comments_posted: int = Field(
+        description="Legacy retained-finding count; delivery proof is in outcome."
+    )
     blockers: int
     warnings: int
     suggestions: int
@@ -221,6 +224,7 @@ class ReviewEventModel(BaseModel):
     duration_ms: int
     categories: str
     created_at: float
+    outcome: ReviewOutcome | None = None
 
 
 class ActivityEventModel(ReviewEventModel):
@@ -1439,6 +1443,7 @@ def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetail
                 pr_title=e.pr_title,
                 pr_url=e.pr_url,
                 comments_posted=e.comments_posted,
+                outcome=ReviewOutcome.from_json(e.outcome_json),
                 blockers=e.blockers,
                 warnings=e.warnings,
                 suggestions=e.suggestions,

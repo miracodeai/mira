@@ -127,3 +127,47 @@ def test_activity_detail_404_for_unknown_pr(patched_db: AppDatabase):
     with pytest.raises(HTTPException) as exc:
         api.get_activity_detail("acme", "web", 999)
     assert exc.value.status_code == 404
+
+
+def test_activity_exposes_delivery_outcome_and_leaves_history_unverified(patched_db: AppDatabase):
+    _seed(patched_db)
+    store = IndexStore.open("acme", "web")
+    try:
+        store.record_review(
+            1,
+            "Fix auth",
+            "https://github.com/acme/web/pull/1",
+            2,
+            1,
+            1,
+            created_at=500.0,
+            outcome_json=json.dumps(
+                {
+                    "version": 1,
+                    "drafted": 3,
+                    "retained": 2,
+                    "delivered": 1,
+                    "failed": 1,
+                    "unknown": 0,
+                    "status": "partial",
+                    "coverage": "complete",
+                    "delivery_error": False,
+                }
+            ),
+        )
+    finally:
+        store.close()
+
+    detail = api.get_activity_detail("acme", "web", 1)
+    latest = detail.reviews[0]
+    outcome = getattr(latest, "outcome", None)
+    assert outcome is not None, "Review detail must distinguish retained from delivered findings"
+    assert (outcome.drafted, outcome.retained, outcome.delivered, outcome.status) == (
+        3,
+        2,
+        1,
+        "partial",
+    )
+    assert latest.comments_posted == 2, "Legacy aggregate semantics must remain compatible"
+    assert all(review.outcome is None for review in detail.reviews[1:])
+    assert core.list_activity().events[0].outcome == outcome

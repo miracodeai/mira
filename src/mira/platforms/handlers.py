@@ -178,6 +178,8 @@ async def run_pr_review(
         "key_issues": len(result.key_issues),
         "severities": {sev.name.lower(): n for sev, n in stats.items()},
     }
+    if result.outcome is not None:
+        event_data["outcome"] = json.loads(result.outcome.to_json())
     await dispatch_event(REVIEW_COMPLETED, event_data)
     if any(sev >= Severity.WARNING for sev in stats):
         await dispatch_event(REVIEW_HIGH_SEVERITY, event_data)

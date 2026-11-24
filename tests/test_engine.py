@@ -32,6 +32,7 @@ from mira.models import (
     PRInfo,
     ReviewChunk,
     ReviewComment,
+    ReviewResult,
     Severity,
     UnresolvedThread,
     WalkthroughConfidenceScore,
@@ -151,7 +152,13 @@ def mock_provider(sample_diff_text: str) -> AsyncMock:
         repo="repo",
     )
     provider.get_pr_diff.return_value = sample_diff_text
-    provider.post_review = AsyncMock()
+
+    async def acknowledge_review(_info: PRInfo, result: ReviewResult, **_kwargs) -> list[int]:
+        receipt = result.begin_delivery()
+        receipt.acknowledge(*range(len(result.comments)))
+        return [0] * len(result.comments)
+
+    provider.post_review = AsyncMock(side_effect=acknowledge_review)
     provider.post_comment = AsyncMock()
     provider.find_bot_comment = AsyncMock(return_value=None)
     provider.update_comment = AsyncMock()
@@ -3299,7 +3306,11 @@ class TestIncrementalWalkthroughScope:
         assert result.key_issues == []
 
         details = provider.finish_check_run.call_args.kwargs["details"]
-        assert details == "2 files in PR · 1 reviewed in this push"
+        assert details == (
+            "Findings: unrecorded drafted · 0 retained · 0 confirmed delivered · "
+            "0 not delivered · 0 unconfirmed. Finding delivery: complete. "
+            "Review coverage: complete. · 2 files in PR · 1 reviewed in this push"
+        )
 
     @pytest.mark.asyncio
     async def test_round_1_describes_the_reviewed_diff(self, monkeypatch):

@@ -49,6 +49,11 @@ class BaseProvider(abc.ABC):
         Returns the GitHub comment IDs of the posted inline comments, aligned
         to ``result.comments`` (0 where the ID couldn't be determined). Used to
         link human replies back to the exact comment they answer.
+
+        IDs are not delivery receipts. Native implementations populate
+        ``result.delivery`` using request acknowledgements, preserving partial
+        evidence before fallible follow-up work. Uninstrumented providers are
+        treated as unknown rather than inferred successful from IDs.
         """
 
     @abc.abstractmethod

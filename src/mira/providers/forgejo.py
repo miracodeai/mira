@@ -326,6 +326,7 @@ class ForgejoProvider(BaseProvider):
     async def post_review(
         self, pr_info: PRInfo, result: ReviewResult, bot_name: str = "miracodeai"
     ) -> None:
+        delivery = result.begin_delivery()
         if not result.comments:
             return
 
@@ -350,8 +351,12 @@ class ForgejoProvider(BaseProvider):
         }
 
         try:
+            delivery.begin(*range(len(result.comments)))
             await self._request("POST", f"{self._pr(pr_info)}/reviews", json=review_body)
+            delivery.acknowledge(*range(len(result.comments)))
         except ProviderError as exc:
+            if exc.status_code is not None and 400 <= exc.status_code < 500:
+                delivery.reject(*range(len(result.comments)))
             if getattr(exc, "status_code", None) == 422:
                 logger.warning("Inline review failed (%s); posting as individual comments", exc)
                 if summary_text:
@@ -359,12 +364,19 @@ class ForgejoProvider(BaseProvider):
                         await self.post_comment(pr_info, summary_text)
                     except ProviderError:
                         logger.warning("Failed to post PR summary comment (fallback)")
-                for comment in result.comments:
+                for index, comment in enumerate(result.comments):
                     body = format_comment_body(comment, bot_name=bot_name)
                     note = f"**`{comment.path}:{comment.line}`**\n\n{body}"
                     try:
+                        delivery.begin(index)
                         await self.post_comment(pr_info, note)
-                    except ProviderError:
+                        delivery.acknowledge(index)
+                    except ProviderError as fallback_error:
+                        if (
+                            fallback_error.status_code is not None
+                            and 400 <= fallback_error.status_code < 500
+                        ):
+                            delivery.reject(index)
                         logger.warning(
                             "Plain-comment fallback also failed for %s:%s",
                             comment.path,

@@ -109,7 +109,9 @@ class GitLabProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.request(method, url, headers=headers, **kw)
         if resp.status_code not in ok:
-            raise ProviderError(f"GitLab {method} {url} → {resp.status_code}: {resp.text[:300]}")
+            error = ProviderError(f"GitLab {method} {url} → {resp.status_code}: {resp.text[:300]}")
+            error.status_code = resp.status_code
+            raise error
         return resp
 
     async def _paginate(self, url: str) -> list[dict[str, Any]]:
@@ -319,6 +321,7 @@ class GitLabProvider(BaseProvider):
     async def post_review(
         self, pr_info: PRInfo, result: ReviewResult, bot_name: str = "miracodeai"
     ) -> None:
+        delivery = result.begin_delivery()
         if not result.comments:
             return
         try:
@@ -328,7 +331,7 @@ class GitLabProvider(BaseProvider):
         diff_refs = data.get("diff_refs") or {}
 
         posted = 0
-        for comment in result.comments:
+        for index, comment in enumerate(result.comments):
             body = format_comment_body(comment, bot_name=bot_name)
             line = (
                 comment.end_line
@@ -345,13 +348,17 @@ class GitLabProvider(BaseProvider):
                 "position[new_line]": str(line),
             }
             try:
+                delivery.begin(index)
                 await self._request(
                     "POST",
                     f"{self._mr(pr_info)}/discussions",
                     data={"body": body, **position},
                 )
+                delivery.acknowledge(index)
                 posted += 1
             except ProviderError as exc:
+                if exc.status_code is not None and 400 <= exc.status_code < 500:
+                    delivery.reject(index)
                 # GitLab 400s when a position lands on an unchanged/context line.
                 # Fall back to a plain note so the finding still surfaces.
                 logger.warning(
@@ -359,9 +366,16 @@ class GitLabProvider(BaseProvider):
                 )
                 note = f"**`{comment.path}:{line}`**\n\n{body}"
                 try:
+                    delivery.begin(index)
                     await self.post_comment(pr_info, note)
+                    delivery.acknowledge(index)
                     posted += 1
-                except ProviderError:
+                except ProviderError as fallback_error:
+                    if (
+                        fallback_error.status_code is not None
+                        and 400 <= fallback_error.status_code < 500
+                    ):
+                        delivery.reject(index)
                     logger.warning("Plain-note fallback also failed for %s:%s", comment.path, line)
 
         review_body = ""

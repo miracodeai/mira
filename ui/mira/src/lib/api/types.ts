@@ -162,12 +162,25 @@ export interface RelatedRepoModel {
   edge_count: number
 }
 
+export interface ReviewOutcome {
+  drafted: number | null
+  retained: number
+  delivered: number
+  failed: number
+  unknown: number
+  status: "complete" | "partial" | "failed" | "unknown" | "not_attempted"
+  coverage: "complete" | "incomplete" | "failed" | "skipped"
+  delivery_error: boolean
+}
+
 export interface ReviewEventModel {
   id: number
   pr_number: number
   pr_title: string
   pr_url: string
+  // Legacy retained-finding count; use outcome for delivery confirmation.
   comments_posted: number
+  outcome?: ReviewOutcome | null
   blockers: number
   warnings: number
   suggestions: number
