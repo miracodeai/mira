@@ -430,6 +430,32 @@ def _registry_owner(storage_owner: str) -> str:
     return storage_owner
 
 
+def rename_repo_pg(url: str, owner: str, old: str, new: str) -> None:
+    """Move every index row for owner/old to owner/new in one transaction."""
+    tables = (
+        "files", "symbols", "imports", "symbol_refs", "directories", "external_refs",
+        "review_events", "review_comments", "pr_replies", "pr_fingerprints",
+        "review_context", "feedback_events", "learned_rules", "package_manifests",
+        "vulnerabilities",
+    )  # fmt: skip
+    # A dedicated connection: the shared cursor's reconnect-and-retry would commit
+    # the remaining updates outside this transaction.
+    with _index_transaction(url) as conn:
+        for table in tables:
+            conn.execute(
+                f"UPDATE {table} SET repo=%s WHERE owner=%s AND repo=%s", (new, owner, old)
+            )
+        # Move the indexing lease too, keeping its recovery flag. A run still writing
+        # under the old name then finds no lease and stops instead of orphaning rows.
+        if conn.execute("SELECT to_regclass('index_runs')").fetchone()[0] is not None:
+            conn.execute(
+                "UPDATE index_runs SET repo=%s WHERE owner=%s AND repo=%s AND NOT EXISTS "
+                "(SELECT 1 FROM index_runs WHERE owner=%s AND repo=%s)",
+                (new, owner, old, owner, new),
+            )
+            conn.execute("DELETE FROM index_runs WHERE owner=%s AND repo=%s", (owner, old))
+
+
 def list_learned_rules_org_wide(
     url: str, limit: int = 1000, status: str | None = None
 ) -> list[dict]:

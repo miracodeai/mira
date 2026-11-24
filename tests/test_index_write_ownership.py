@@ -2,45 +2,16 @@
 
 import asyncio
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from threading import Barrier
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
-from uuid import uuid4
 
 import pytest
 
 from mira.config import LLMConfig, MiraConfig
-from mira.index import pg_store
 from mira.index.indexer import IndexingRecoveryPending, index_diff, index_repo
 from mira.index.pg_store import PgIndexStore
 from mira.index.store import DirectorySummary, FileSummary, IndexingSuperseded, IndexStore
-
-
-@pytest.fixture
-def postgres_url(monkeypatch):
-    url = os.environ.get("MIRA_TEST_POSTGRES_URL")
-    if not url:
-        pytest.skip("Set MIRA_TEST_POSTGRES_URL to a disposable PostgreSQL database")
-    psycopg = pytest.importorskip("psycopg")
-    from psycopg import sql
-
-    schema = "index_owner_" + uuid4().hex
-    with psycopg.connect(url, autocommit=True) as admin:
-        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    parts = urlsplit(url)
-    params = dict(parse_qsl(parts.query))
-    params["options"] = f"-c search_path={schema} -c statement_timeout=5000"
-    scoped = urlunsplit(parts._replace(query=urlencode(params, quote_via=quote)))
-    monkeypatch.setattr(pg_store, "_pg_conn", None)
-    monkeypatch.setattr(pg_store, "_schema_initialized", False)
-    try:
-        yield scoped
-    finally:
-        pg_store._drop_pg_conn()
-        with psycopg.connect(url, autocommit=True) as admin:
-            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
