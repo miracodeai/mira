@@ -97,9 +97,10 @@ def _extract_sections(
 async def verify_fixes(
     llm: LLMProvider,
     file_groups: list[tuple[str, str, list[UnresolvedThread]]],
+    custom_instructions: str = "",
 ) -> list[str]:
     """Ask the LLM which previously-filed review issues are now fixed."""
-    prompt = build_verify_fixes_prompt(file_groups)
+    prompt = build_verify_fixes_prompt(file_groups, custom_instructions=custom_instructions)
     logger.debug("Verify-fixes prompt:\n%s", prompt[1]["content"])
     response = await llm.complete(prompt, json_mode=True, temperature=0.0)
     logger.debug("Verify-fixes raw response:\n%s", response)
@@ -112,6 +113,7 @@ async def resolve_verified_threads(
     pr_info: PRInfo,
     bot_name: str | None,
     dry_run: bool,
+    custom_instructions: str = "",
 ) -> tuple[int, int, list[UnresolvedThread], list[ThreadDecision]]:
     """Resolve unresolved bot threads the LLM confirms as fixed.
 
@@ -153,7 +155,7 @@ async def resolve_verified_threads(
                 snippet = _extract_sections(lines, path_threads, _LARGE_FILE_CONTEXT_LINES)
                 file_groups.append((path, snippet, path_threads))
 
-    verified_ids = await verify_fixes(llm, file_groups)
+    verified_ids = await verify_fixes(llm, file_groups, custom_instructions)
     verified_set = set(verified_ids)
 
     decisions = [

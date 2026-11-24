@@ -11,6 +11,7 @@ from mira.config import MiraConfig
 from mira.core.context import build_file_context_string
 from mira.llm.prompt_cache import split_system_prompt
 from mira.llm.prompts.footguns import get_footguns_for_files
+from mira.llm.prompts.operator import with_operator_instructions
 from mira.llm.prompts.verify_fixes import _extract_issue_description
 from mira.models import FileDiff, UnresolvedThread
 
@@ -104,15 +105,17 @@ def build_review_prompt(
         user_parts.append(code_context)
     user_parts.extend(file_contexts)
 
-    return [
+    messages = [
         *split_system_prompt(system_content),
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
+    return with_operator_instructions(messages, config.review.custom_instructions)
 
 
 def build_security_review_prompt(
     files: list[FileDiff],
     pr_title: str = "",
+    custom_instructions: str = "",
 ) -> list[dict[str, str]]:
     """Build the security-focused review prompt messages for the LLM.
 
@@ -125,16 +128,18 @@ def build_security_review_prompt(
     file_contexts = [build_file_context_string(f) for f in files]
     file_paths = [f.path for f in files]
     system_content = template.render(pr_title=pr_title, file_paths=file_paths)
-    return [
+    messages = [
         *split_system_prompt(system_content),
         {"role": "user", "content": "\n\n".join(file_contexts)},
     ]
+    return with_operator_instructions(messages, custom_instructions)
 
 
 def build_dependency_review_prompt(
     files: list[FileDiff],
     existing_packages: list[str] | None = None,
     pr_title: str = "",
+    custom_instructions: str = "",
 ) -> list[dict[str, str]]:
     """Build the dependency-overlap review prompt messages for the LLM.
 
@@ -153,10 +158,11 @@ def build_dependency_review_prompt(
         file_paths=file_paths,
         existing_packages=existing_packages or [],
     )
-    return [
+    messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": "\n\n".join(file_contexts)},
     ]
+    return with_operator_instructions(messages, custom_instructions)
 
 
 _HUNK_HEADER_RE = re.compile(r"^@@\s.*@@", re.MULTILINE)
@@ -204,10 +210,11 @@ def build_walkthrough_prompt(
         include_sequence_diagram=config.review.walkthrough_sequence_diagram,
     )
 
-    return [
+    messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": "Generate the walkthrough for this PR."},
     ]
+    return with_operator_instructions(messages, config.review.custom_instructions)
 
 
 def build_conversation_prompt(
@@ -215,6 +222,7 @@ def build_conversation_prompt(
     diff_text: str,
     pr_title: str = "",
     pr_description: str = "",
+    custom_instructions: str = "",
 ) -> list[dict[str, str]]:
     """Build prompt messages for a conversational reply about a PR."""
     env = _get_template_env()
@@ -227,7 +235,8 @@ def build_conversation_prompt(
 
     user_content = f"## Diff\n\n```diff\n{diff_text}\n```\n\n## Question\n\n{question}"
 
-    return [
+    messages = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
+    return with_operator_instructions(messages, custom_instructions)

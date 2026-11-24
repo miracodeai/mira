@@ -917,7 +917,12 @@ class ReviewEngine:
             try:
                 assert self.provider is not None
                 return await resolve_verified_threads(
-                    self.provider, self.llm, pr_info, self.bot_name, self.dry_run
+                    self.provider,
+                    self.llm,
+                    pr_info,
+                    self.bot_name,
+                    self.dry_run,
+                    custom_instructions=self.config.review.custom_instructions,
                 )
             except Exception as exc:
                 logger.warning("Thread resolution failed, continuing: %s", exc)
@@ -2108,6 +2113,7 @@ class ReviewEngine:
                 security_llm=self.security_llm,
                 agentic_executor_factory=_security_executor_factory,
                 max_hops=self.config.review.agentic_max_hops,
+                custom_instructions=self.config.review.custom_instructions,
             )
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])
@@ -2148,6 +2154,7 @@ class ReviewEngine:
                 existing_packages,
                 pr_title,
                 indexing_llm=self.indexing_llm,
+                custom_instructions=self.config.review.custom_instructions,
             )
             if manifest_files
             else _asyncio.sleep(0, result=[])
@@ -2315,6 +2322,7 @@ class ReviewEngine:
                         pr_description,
                         fallback=original_summary,
                         indexing_llm=self.indexing_llm,
+                        custom_instructions=self.config.review.custom_instructions,
                     )
                 except Exception as exc:
                     logger.warning("Summary regeneration failed, using original: %s", exc)
@@ -2342,6 +2350,7 @@ class ReviewEngine:
                     pr_title,
                     pr_description,
                     indexing_llm=self.indexing_llm,
+                    custom_instructions=self.config.review.custom_instructions,
                 )
             except Exception as exc:
                 logger.warning("PR summary generation failed: %s", exc)

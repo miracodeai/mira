@@ -18,6 +18,7 @@ from mira.core.review_status import tracker as review_tracker
 from mira.dashboard.models_config import llm_config_for
 from mira.index.store import IndexStore
 from mira.llm import create_llm
+from mira.llm.prompts.operator import with_operator_instructions
 from mira.llm.prompts.review import build_conversation_prompt
 from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
@@ -298,6 +299,7 @@ async def run_pr_command(
             diff_text=diff_text,
             pr_title=pr_info.title,
             pr_description=pr_info.description,
+            custom_instructions=config.review.custom_instructions,
         )
         response = await llm.complete(messages, json_mode=False)
         await provider.post_comment(pr_info, f"> @{actor} asked: {question}\n\n{response}")
@@ -347,7 +349,9 @@ async def run_thread_reply(
     # free-form JSON. The provider's tenacity decorator retries transient fails.
     try:
         raw = await llm.complete_with_tools(
-            messages=[{"role": "user", "content": prompt}],
+            messages=with_operator_instructions(
+                [{"role": "user", "content": prompt}], config.review.custom_instructions
+            ),
             tools=[SUBMIT_THREAD_REPLY_TOOL],
             temperature=0.0,
         )
