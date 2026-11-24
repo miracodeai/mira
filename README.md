@@ -153,6 +153,22 @@ Mira pins the diff, supporting source reads, and convention documents such as
 are excluded. The command uses CLI configuration without dashboard overrides
 or a Git hosting token. Use `--output json` for machine-readable findings.
 
+Atlas Cloud is also available as an OpenAI-compatible backend. Keep the API key
+in the deployment environment and select any supported Atlas Cloud LLM by its
+full model id:
+
+```yaml
+# mira.yaml
+llm:
+  base_url: "https://api.atlascloud.ai/v1"
+  api_key_env: "ATLASCLOUD_API_KEY"
+  model: "deepseek-ai/deepseek-v4-pro"
+```
+
+```bash
+ATLASCLOUD_API_KEY=your-key-here
+```
+
 ### Codex CLI
 
 If you already use OpenAI Codex locally, Mira can run reviews through the

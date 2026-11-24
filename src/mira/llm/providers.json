@@ -124,5 +124,13 @@
     "api_key_env": "FIREWORKS_API_KEY",
     "model_prefix": "strip",
     "max_tokens_field": "max_completion_tokens"
+  },
+
+  "atlascloud": {
+    "base_url": "https://api.atlascloud.ai/v1",
+    "api_key_env": "ATLASCLOUD_API_KEY",
+    "model_prefix": "keep",
+    "extra_headers": {},
+    "reasoning_effort_map": {}
   }
 }
