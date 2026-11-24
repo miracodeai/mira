@@ -465,8 +465,9 @@ def parse_package_lock_json(
     Modern npm lockfiles use a flat ``packages`` map keyed by relative path
     (e.g. ``"node_modules/lodash"``). Each entry has a concrete ``version``.
     The root entry has key ``""`` and we skip it (it's the project itself).
-    Inventory also walks nested v1 entries. Review scans retain the legacy
-    top-level view until nested entries can be anchored to a specific diff.
+    Inventory also walks nested v1 entries. The default parser retains the
+    top-level legacy view; review-time origin checks separately verify nested
+    records against the fetched source and diff before using them.
     """
     try:
         data = json.loads(content)
