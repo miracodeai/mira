@@ -527,6 +527,8 @@ class TestGitLabTreePagination:
             {"recursive": "false"},
             {"per_page": "1"},
             {"pagination": "offset"},
+            # Not one of GitLab's harmless keyset additions: `path` narrows the
+            # listing to a subdirectory, which would truncate the indexed tree.
             {"path": "subdir"},
             {"ref": None},
         ],
@@ -569,6 +571,131 @@ class TestGitLabTreePagination:
         with _patch_client([page1, page2]):
             paths = await GitLabRepoFetcher("tok").repo_tree("grp/sub", "proj", "main")
         assert paths == ["a.py", "sub/b.py"]
+
+    @pytest.mark.asyncio
+    async def test_follows_keyset_link_with_gitlab_added_params(self):
+        """GitLab appends id/page/with_last_commit to keyset next links."""
+        endpoint = "https://gitlab.com/api/v4/projects/netlife%2Fwfp/repository/tree"
+        base = (
+            "id=netlife%2Fwfp&pagination=keyset&per_page=100"
+            "&recursive=true&ref=master&with_last_commit=false"
+        )
+        page1 = _resp(
+            [{"type": "blob", "path": "a.py"}],
+            headers={"link": f'<{endpoint}?{base}&page=1&page_token=cGFnZTI>; rel="next"'},
+        )
+        page2 = _resp(
+            [{"type": "tree", "path": "sub"}, {"type": "blob", "path": "b.py"}],
+            headers={"link": f'<{endpoint}?{base}&page=2&page_token=cGFnZTM>; rel="next"'},
+        )
+        page3 = _resp([{"type": "blob", "path": "sub/c.py"}], headers={})
+        requested: list[str] = []
+
+        async def serve(url, **kwargs):
+            requested.append(str(url))
+            return [page1, page2, page3][len(requested) - 1]
+
+        with _patch_client(serve):
+            paths = await GitLabRepoFetcher("tok").repo_tree("netlife", "wfp", "master")
+        assert paths == ["a.py", "b.py", "sub/c.py"]
+        assert len(requested) == 3
+        for index, url in enumerate(requested[1:], start=1):
+            params = httpx.URL(url).params
+            assert params["id"] == "netlife/wfp"
+            assert params["page"] == str(index)
+            assert params["with_last_commit"] == "false"
+            assert params["recursive"] == "true"
+            assert params["ref"] == "master"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "override",
+        ["recursive=false", "per_page=1", "pagination=offset", "ref=other"],
+    )
+    async def test_rejects_changed_original_param_among_extras(self, override):
+        endpoint = "https://gitlab.example.invalid/api/v4/projects/example%2Fapp/repository/tree"
+        params = {
+            "recursive": "true",
+            "per_page": "100",
+            "pagination": "keyset",
+            "ref": "main",
+            "id": "example/app",
+            "page": "2",
+            "with_last_commit": "false",
+            "page_token": "next",
+        }
+        key, _, value = override.partition("=")
+        params[key] = value
+        next_url = httpx.URL(endpoint, params=params)
+        pages = [
+            _resp(
+                [{"type": "blob", "path": "a.py"}],
+                headers={"link": f'<{next_url}>; rel="next"'},
+            ),
+            _resp([{"type": "blob", "path": "b.py"}]),
+        ]
+        with _patch_client(pages), pytest.raises(IncompleteTreeError):
+            await GitLabRepoFetcher("synthetic", "https://gitlab.example.invalid/api/v4").repo_tree(
+                "example", "app", "main"
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "id=o%2Fr&page=2&pagination=keyset&per_page=100&recursive=true&ref=main",
+            "id=o%2Fr&page=2&page_token=&pagination=keyset&per_page=100&recursive=true&ref=main",
+            "id=o%2Fr&page=2&page_token=a&page_token=b&pagination=keyset&per_page=100"
+            "&recursive=true&ref=main",
+        ],
+    )
+    async def test_rejects_missing_empty_or_repeated_page_token_with_extras(self, query):
+        endpoint = "https://gitlab.example.invalid/api/v4/projects/o%2Fr/repository/tree"
+        page = _resp(
+            [{"type": "blob", "path": "a.py"}],
+            headers={"link": f'<{endpoint}?{query}>; rel="next"'},
+        )
+        requested = 0
+
+        async def serve(url, **kwargs):
+            nonlocal requested
+            requested += 1
+            if requested > 1:
+                pytest.fail("Followed a bad pagination link")
+            return page
+
+        with _patch_client(serve), pytest.raises(IncompleteTreeError):
+            await GitLabRepoFetcher("synthetic", "https://gitlab.example.invalid/api/v4").repo_tree(
+                "o", "r", "main"
+            )
+        assert requested == 1
+
+    @pytest.mark.asyncio
+    async def test_detects_cycle_when_links_have_extra_params(self):
+        endpoint = "https://gitlab.example.invalid/api/v4/projects/o%2Fr/repository/tree"
+        extras = (
+            "id=o%2Fr&page=2&pagination=keyset&per_page=100"
+            "&recursive=true&ref=main&with_last_commit=false"
+        )
+        link = f'<{endpoint}?{extras}&page_token=again>; rel="next"'
+        pages = [
+            _resp([{"type": "blob", "path": "a.py"}], headers={"link": link}),
+            _resp([{"type": "blob", "path": "b.py"}], headers={"link": link}),
+        ]
+        requested = 0
+
+        async def serve(url, **kwargs):
+            nonlocal requested
+            requested += 1
+            if requested > len(pages):
+                pytest.fail("Repeated a tree page request")
+            return pages[requested - 1]
+
+        with _patch_client(serve), pytest.raises(IncompleteTreeError, match="cyclic"):
+            await GitLabRepoFetcher("synthetic", "https://gitlab.example.invalid/api/v4").repo_tree(
+                "o", "r", "main"
+            )
+        assert requested == 2
 
     @pytest.mark.asyncio
     async def test_url_encodes_nested_project(self):

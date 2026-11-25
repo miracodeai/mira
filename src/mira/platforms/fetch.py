@@ -23,6 +23,12 @@ from mira.platforms import profiles
 logger = logging.getLogger(__name__)
 
 _MAX_TREE_PAGES = 1000
+
+# Query parameters GitLab itself appends to keyset ``next`` links on the
+# repository tree endpoint. Any other parameter not present in the original
+# request is rejected during pagination: ``path=<subdir>`` in particular would
+# silently narrow the listing and truncate the indexed tree.
+_GITLAB_TREE_LINK_EXTRAS = frozenset({"id", "page", "with_last_commit"})
 # A full commit hash; Bitbucket refs that match need no branch/tag lookup.
 _COMMIT_HASH = re.compile(r"[0-9a-f]{40}")
 
@@ -358,10 +364,22 @@ class GitLabRepoFetcher:
                         endpoint.path,
                     ) or target.userinfo:
                         raise IncompleteTreeError("Invalid repository tree pagination target")
+                    tokens = target.params.get_list("page_token")
+                    # GitLab appends a small set of harmless params (id, page,
+                    # with_last_commit) to keyset next links; every original param
+                    # must survive unchanged. Anything else is refused — notably
+                    # ``path=<subdir>``, which would narrow the listing.
+                    extras = (
+                        set(target.params.keys()) - set(endpoint.params.keys()) - {"page_token"}
+                    )
                     if (
-                        target.params.remove("page_token") != endpoint.params
-                        or len(target.params.get_list("page_token")) != 1
-                        or not target.params["page_token"]
+                        len(tokens) != 1
+                        or not tokens[0]
+                        or not extras <= _GITLAB_TREE_LINK_EXTRAS
+                        or any(
+                            target.params.get_list(key) != [value]
+                            for key, value in endpoint.params.multi_items()
+                        )
                     ):
                         raise IncompleteTreeError("Repository tree pagination query changed")
         return paths
