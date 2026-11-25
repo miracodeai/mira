@@ -33,11 +33,19 @@ logger = logging.getLogger(__name__)
 
 
 async def list_gitlab_projects(token: str, base_url: str) -> list[dict[str, Any]]:
-    """Every project the token can access (paginated). Scope follows the token:
-    a project token → that project; a group token → the group's projects; a PAT
-    → everything the user is a member of."""
+    """Every active project the token can access (paginated). Scope follows the
+    token: a project token → that project; a group token → the group's projects;
+    a PAT → everything the user is a member of.
+
+    ``active=true`` excludes archived projects *and* projects marked for
+    deletion. ``simple=true`` omits both ``archived`` and
+    ``marked_for_deletion_on``, so neither can be filtered client-side;
+    ``include_pending_delete`` would work but is administrator-only.
+    """
     out: list[dict[str, Any]] = []
-    url: str | None = f"{base_url.rstrip('/')}/projects?membership=true&simple=true&per_page=100"
+    url: str | None = (
+        f"{base_url.rstrip('/')}/projects?membership=true&simple=true&active=true&per_page=100"
+    )
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
             resp = await client.get(url, headers={"PRIVATE-TOKEN": token})
@@ -52,7 +60,7 @@ async def list_gitlab_projects(token: str, base_url: str) -> list[dict[str, Any]
 
 
 async def backfill_gitlab_projects(auth: PlatformAuth) -> int:
-    """Register every accessible GitLab project so they show in the dashboard
+    """Register every active GitLab project so they show in the dashboard
     ready to index — without waiting for a webhook. Returns the count."""
     from mira.platforms.index_handlers import _get_app_db
 
