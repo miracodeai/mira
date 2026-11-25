@@ -81,6 +81,45 @@ class TestEffectiveModelLogging:
 
 
 class TestSetModelsInheritAndCustom:
+    async def test_disconnect_refuses_provider_still_selected(self, in_memory_db: AppDatabase):
+        from fastapi import HTTPException
+
+        from mira.dashboard.routers.llm_auth import disconnect_api_provider
+
+        in_memory_db.set_setting("security_fallback_models", "@nvidia/llama")
+        with pytest.raises(HTTPException) as exc:
+            await disconnect_api_provider("nvidia", _admin_req())
+        assert exc.value.status_code == 409
+        assert "@nvidia/llama" in exc.value.detail
+
+    def test_saved_empty_lists_override_mira_yaml(self, in_memory_db: AppDatabase):
+        from mira.dashboard.models_config import ensemble_configs
+
+        cfg = LLMConfig(fallback_models=["a/b"], ensemble_models=["c/d"])
+        assert llm_config_for("review", cfg).fallback_models == ["a/b"]
+        assert [c.model for c in ensemble_configs(cfg)] == ["c/d"]
+        in_memory_db.set_settings({"review_fallback_models": "", "ensemble_models": ""})
+        assert llm_config_for("review", cfg).fallback_models == []
+        assert ensemble_configs(cfg) == []
+
+    def test_local_review_ignores_saved_critic_fallbacks_and_second_opinions(
+        self, in_memory_db: AppDatabase
+    ):
+        from mira.dashboard.models_config import critique_config, ensemble_configs
+
+        in_memory_db.set_settings(
+            {
+                "review_fallback_models": "x/y",
+                "ensemble_models": "p/q",
+                "critique_model": "r/s",
+            }
+        )
+        cfg = LLMConfig(fallback_models=["a/b"], ensemble_models=["c/d"], critique_model="e/f")
+        assert llm_config_for("review", cfg, use_dashboard=False).fallback_models == ["a/b"]
+        assert [c.model for c in ensemble_configs(cfg, use_dashboard=False)] == ["c/d"]
+        critic = critique_config(cfg, use_dashboard=False)
+        assert critic is not None and critic.model == "e/f"
+
     def test_empty_value_clears_override(self, in_memory_db: AppDatabase):
         in_memory_db.set_setting("review_model", "anthropic/claude-sonnet-4-6")
         body = ModelsUpdate(indexing_model="", review_model="")
@@ -98,6 +137,29 @@ class TestSetModelsInheritAndCustom:
         assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("review_model") == "openai/gpt-5.1-codex-mini"
         assert llm_config_for("review", LLMConfig()).model == "openai/gpt-5.1-codex-mini"
+
+    def test_save_is_one_write(self, in_memory_db: AppDatabase, monkeypatch: pytest.MonkeyPatch):
+        """A failed save must not leave new models next to stale fallbacks."""
+        in_memory_db.set_setting("review_model", "old/model")
+        calls: list[dict[str, str]] = []
+
+        def boom(values: dict[str, str]) -> None:
+            calls.append(dict(values))
+            raise RuntimeError("disk full")
+
+        body = ModelsUpdate(indexing_model="", review_model="new/model", review_fallbacks=["x/y"])
+        with monkeypatch.context() as m, pytest.raises(RuntimeError):
+            m.setattr(in_memory_db, "set_settings", boom)
+            set_models(body, _admin_req())
+        assert len(calls) == 1
+        assert calls[0]["review_model"] == "new/model"
+        assert calls[0]["review_fallback_models"] == "x/y"
+        assert in_memory_db.get_setting("review_model") == "old/model"
+        assert in_memory_db.get_setting("review_fallback_models") is None
+
+        in_memory_db.set_settings({"review_model": "new/model", "review_fallback_models": "x/y"})
+        assert in_memory_db.get_setting("review_model") == "new/model"
+        assert in_memory_db.get_setting("review_fallback_models") == "x/y"
 
 
 class TestIndexingTemperatureSettings:
