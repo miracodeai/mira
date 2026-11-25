@@ -358,10 +358,17 @@ class GitLabRepoFetcher:
                         endpoint.path,
                     ) or target.userinfo:
                         raise IncompleteTreeError("Invalid repository tree pagination target")
+                    tokens = target.params.get_list("page_token")
+                    # GitLab appends params (id, page, with_last_commit, ...) to keyset
+                    # next links; every original param must survive unchanged, extras are
+                    # benign and must not fail the pagination.
                     if (
-                        target.params.remove("page_token") != endpoint.params
-                        or len(target.params.get_list("page_token")) != 1
-                        or not target.params["page_token"]
+                        len(tokens) != 1
+                        or not tokens[0]
+                        or any(
+                            target.params.get_list(key) != [value]
+                            for key, value in endpoint.params.multi_items()
+                        )
                     ):
                         raise IncompleteTreeError("Repository tree pagination query changed")
         return paths
