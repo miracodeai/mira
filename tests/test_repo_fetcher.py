@@ -527,6 +527,9 @@ class TestGitLabTreePagination:
             {"recursive": "false"},
             {"per_page": "1"},
             {"pagination": "offset"},
+            # Not one of GitLab's harmless keyset additions: `path` narrows the
+            # listing to a subdirectory, which would truncate the indexed tree.
+            {"path": "subdir"},
             {"ref": None},
         ],
     )
