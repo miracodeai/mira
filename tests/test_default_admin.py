@@ -14,6 +14,22 @@ def _index_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MIRA_INDEX_DIR", str(tmp_path))
 
 
+def test_unreachable_postgres_raises_instead_of_sqlite_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    psycopg = pytest.importorskip("psycopg")
+
+    def refuse(url: str) -> None:
+        raise psycopg.OperationalError("the database system is starting up")
+
+    monkeypatch.setattr("mira.db.postgres.connect", refuse)
+    monkeypatch.setattr("mira.dashboard.db.time.sleep", lambda s: None)
+
+    with pytest.raises(psycopg.OperationalError):
+        AppDatabase(url="postgresql://mira@db/mira")
+    assert not (tmp_path / "_app.db").exists()
+
+
 def test_no_password_generates_random_admin(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
