@@ -18,6 +18,17 @@ class TestResolve:
     def test_trailing_slash_insensitive(self):
         assert profiles.resolve("https://openrouter.ai/api/v1/")["name"] == "openrouter"
 
+    def test_matches_requesty_by_base_url(self):
+        p = profiles.resolve("https://router.requesty.ai/v1")
+        assert p["name"] == "requesty"
+        assert p["api_key_env"] == "REQUESTY_API_KEY"
+        assert p["model_prefix"] == "keep"
+        assert p["extra_headers"]["X-Title"] == "Mira Code Reviewer"
+        assert p["reasoning_effort_map"] == {}
+        assert p["reasoning_off_payload"] == {"reasoning_effort": "none"}
+        assert p["reasoning_off_payload_responses"] == {"reasoning": {"effort": "none"}}
+        assert p["prompt_caching"] == "anthropic"
+
     def test_unknown_url_returns_portable_default(self):
         p = profiles.resolve("https://some-new-llm.example/v1")
         assert p["name"] == ""
