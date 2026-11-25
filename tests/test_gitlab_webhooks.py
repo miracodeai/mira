@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -373,3 +373,94 @@ async def test_note_non_review_ignores_author_filter(client):
         )
     assert resp.json()["status"] == "processing"
     h.assert_awaited_once()
+
+
+class _FakeGitLabResponse:
+    def __init__(self, payload):
+        self.status_code = 200
+        self._payload = payload
+        self.text = ""
+        self.headers = {}
+
+    def json(self):
+        return self._payload
+
+
+class _FakeGitLabClient:
+    """Minimal httpx.AsyncClient stand-in that honours ``active=true`` like GitLab."""
+
+    instances: list[_FakeGitLabClient] = []
+
+    def __init__(self, projects):
+        self.projects = projects
+        self.urls: list[str] = []
+        type(self).instances.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def get(self, url, **kwargs):
+        self.urls.append(url)
+        if "active=true" in url:
+            # active=true = not archived and not marked for deletion.
+            visible = [
+                p for p in self.projects if not p.get("archived") and not p.get("pending_deletion")
+            ]
+        else:
+            visible = self.projects
+        return _FakeGitLabResponse(visible)
+
+
+def _patch_gitlab_http(projects):
+    _FakeGitLabClient.instances = []
+    return patch(
+        "mira.platforms.gitlab.webhook.httpx.AsyncClient",
+        lambda *a, **k: _FakeGitLabClient(projects),
+    )
+
+
+@pytest.fixture
+def gitlab_project_list():
+    return [
+        {"path_with_namespace": "netlife/wfp", "visibility": "private"},
+        {"path_with_namespace": "norel/douglas", "visibility": "private", "archived": True},
+        {
+            "path_with_namespace": "netlife/opencode.netlife.pl-deletion_scheduled-88322484",
+            "visibility": "private",
+            "pending_deletion": True,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_gitlab_projects_filters_inactive_server_side(gitlab_project_list):
+    from mira.platforms.gitlab import webhook as gw
+
+    with _patch_gitlab_http(gitlab_project_list):
+        projects = await gw.list_gitlab_projects("tok", "https://gitlab.com/api/v4")
+
+    client = _FakeGitLabClient.instances[0]
+    assert "active=true" in client.urls[0]
+    assert "include_pending_delete" not in client.urls[0]
+    assert [p["path_with_namespace"] for p in projects] == ["netlife/wfp"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_skips_archived_and_pending_deletion(gitlab_auth, gitlab_project_list):
+    from mira.platforms.gitlab import webhook as gw
+
+    db = MagicMock()
+    with (
+        _patch_gitlab_http(gitlab_project_list),
+        patch("mira.platforms.index_handlers._get_app_db", return_value=db),
+    ):
+        count = await gw.backfill_gitlab_projects(gitlab_auth)
+
+    # The sync endpoint reports this count; archived and pending-deletion repos
+    # must not be registered or included.
+    assert count == 1
+    db.register_repo.assert_called_once_with("netlife", "wfp", platform="gitlab")
+    db.set_repo_visibility.assert_called_once_with("netlife", "wfp", True, platform="gitlab")
