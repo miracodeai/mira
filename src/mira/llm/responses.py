@@ -205,6 +205,10 @@ class ResponsesProvider(OpenAICompatibleProvider):
             self.total_prompt_tokens += usage.get("input_tokens", 0)
             self.total_completion_tokens += usage.get("output_tokens", 0)
 
+    async def _post(self, client: httpx.AsyncClient, body: dict) -> httpx.Response:
+        """Send one Responses request. Subclasses swap the transport (auth, streaming)."""
+        return await client.post(self._url, headers=self._build_headers(), json=body)
+
     # ── Internal LLM calls (retry-decorated by base class) ──────────
 
     async def _call_llm(
@@ -232,11 +236,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
             body.pop("temperature", None)
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            resp = await client.post(
-                self._url,
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post(client, body)
             self._handle_error(resp)
             data = resp.json()
 
@@ -308,11 +308,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
         self._apply_reasoning(body, protocol="responses")
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            resp = await client.post(
-                self._url,
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post(client, body)
             if (
                 resp.status_code == 400
                 and body["tool_choice"] != "auto"
@@ -321,7 +317,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
                 logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
                 self._no_forced_tool_choice.add(api_model)
                 body["tool_choice"] = "auto"
-                resp = await client.post(self._url, headers=self._build_headers(), json=body)
+                resp = await self._post(client, body)
             if (
                 resp.status_code == 400
                 and self._has_reasoning(body)
@@ -331,7 +327,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
-                resp = await client.post(self._url, headers=self._build_headers(), json=body)
+                resp = await self._post(client, body)
             self._handle_error(resp)
             data = resp.json()
 
@@ -402,11 +398,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
         self._apply_reasoning(body, protocol="responses")
 
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            resp = await client.post(
-                self._url,
-                headers=self._build_headers(),
-                json=body,
-            )
+            resp = await self._post(client, body)
             if (
                 resp.status_code == 400
                 and self._has_reasoning(body)
@@ -417,7 +409,7 @@ class ResponsesProvider(OpenAICompatibleProvider):
                 body["temperature"] = (
                     temperature if temperature is not None else self.config.temperature
                 )
-                resp = await client.post(self._url, headers=self._build_headers(), json=body)
+                resp = await self._post(client, body)
             self._handle_error(resp)
             data = resp.json()
 
