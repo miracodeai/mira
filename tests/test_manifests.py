@@ -510,6 +510,54 @@ class TestPreferResolved:
         assert len(selected) == 2
         assert all(r["file_path"].endswith("package-lock.json") for r in selected)
 
+    def test_unrelated_lockfile_does_not_suppress_exact_manifest_dependency(self):
+        from mira.security.poller import _prefer_resolved
+
+        def row(version, path, eligible=True):
+            return {
+                "owner": "o",
+                "repo": "r",
+                "kind": "npm",
+                "name": "shared",
+                "version": version,
+                "file_path": path,
+                "scan_eligible": eligible,
+            }
+
+        # app/ locks `shared` to a git source (not scannable); web/ has no
+        # lockfile and pins an exact registry version, which must still reach
+        # OSV.
+        rows = [
+            row("1.0.0", "app/package-lock.json", eligible=False),
+            row("1.0.0", "app/package.json"),
+            row("2.3.4", "web/package.json"),
+        ]
+        selected = _prefer_resolved(rows)
+        assert [(r["version"], r["file_path"]) for r in selected] == [("2.3.4", "web/package.json")]
+
+    def test_workspace_root_lockfile_covers_nested_manifest(self):
+        from mira.security.poller import _prefer_resolved
+
+        rows = [
+            {
+                "owner": "o",
+                "repo": "r",
+                "kind": "npm",
+                "name": "shared",
+                "version": "1.0.0",
+                "file_path": "package-lock.json",
+            },
+            {
+                "owner": "o",
+                "repo": "r",
+                "kind": "npm",
+                "name": "shared",
+                "version": "1.2.0",
+                "file_path": "packages/ui/package.json",
+            },
+        ]
+        assert [r["file_path"] for r in _prefer_resolved(rows)] == ["package-lock.json"]
+
     def test_other_ecosystems_still_select_one_resolved_version(self):
         from mira.security.poller import _prefer_resolved
 

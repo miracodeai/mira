@@ -966,29 +966,35 @@ async def _refresh_manifests_incremental(
     changed_paths: list[str] | None,
     removed_paths: list[str] | None,
     run: IndexRun,
-) -> int:
-    """Refresh package rows for manifests touched by a push. Returns the
-    number of manifest files updated or cleared."""
+) -> tuple[int, int]:
+    """Refresh package rows for manifests touched by a push.
+
+    Returns the number of manifest files updated or cleared, and the number
+    of changed manifests that could not be read. An unread manifest leaves
+    the package inventory stale, so the caller must keep the run pending.
+    """
     changed = [p for p in changed_paths or [] if is_manifest(p)]
     removed = [p for p in removed_paths or [] if is_manifest(p)]
     if not changed and not removed:
-        return 0
+        return 0, 0
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
     contents = await asyncio.gather(
         *(fetcher.file_content(owner, repo, p, branch, semaphore=fetch_sem) for p in changed)
     )
     touched = len(removed)
+    unreadable = 0
     with store.index_write(run):
         for path in removed:
             store.replace_manifest_packages(path, [])
         for path, content in zip(changed, contents, strict=False):
             if content is None:
+                unreadable += 1
                 continue
             _store_manifest_file(store, path, content)
             touched += 1
     if touched:
         logger.info("Refreshed %d manifest file(s) for %s/%s", touched, owner, repo)
-    return touched
+    return touched, unreadable
 
 
 async def index_diff(
@@ -1082,19 +1088,24 @@ async def _index_diff(
     # Manifests/lockfiles are excluded from code indexing but feed the package
     # inventory — a dependency-bump push usually touches nothing else (#157).
     touched = 0
+    manifests_missing = 0
     try:
-        touched = await _refresh_manifests_incremental(
+        touched, manifests_missing = await _refresh_manifests_incremental(
             owner, repo, fetcher, branch, store, changed_paths, removed_paths, run
         )
     except IndexingSuperseded:
         raise
     except Exception as exc:
         logger.warning("Manifest refresh failed for %s/%s: %s", owner, repo, exc)
+        # Nothing tells us which manifests were stored, so reconcile them all.
+        manifests_missing = sum(
+            1 for p in [*(changed_paths or []), *(removed_paths or [])] if is_manifest(p)
+        )
 
     # Filter to indexable files
     to_index = [p for p in changed_paths or [] if _should_index(p, config.filter.exclude_patterns)]
     if not to_index:
-        return 0, bool(touched), 0
+        return 0, bool(touched), manifests_missing
 
     # Fetch content
     fetch_sem = asyncio.Semaphore(_FILE_FETCH_SEMAPHORE)
@@ -1154,7 +1165,7 @@ async def _index_diff(
         repo,
     )
     missing = {path for path, _ in file_pairs} - summarized
-    return indexed_count, bool(touched), len(missing | unreadable)
+    return indexed_count, bool(touched), len(missing | unreadable) + manifests_missing
 
 
 async def _summarize_directories_selective(
