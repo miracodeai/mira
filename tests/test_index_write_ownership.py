@@ -303,6 +303,32 @@ async def test_incomplete_recovery_keeps_next_push_on_full_scan(stores, missing)
     assert [p.version for p in observer.list_manifest_packages()] == ["2.0.0"]
 
 
+@pytest.mark.parametrize("failure", ["unreadable", "error"])
+async def test_lockfile_only_push_stays_pending_when_lockfile_unread(stores, failure):
+    _, new, _ = stores
+    lockfile = "package-lock.json"
+
+    class LockfileFetcher(Fetcher):
+        async def file_content(self, owner, repo, path, branch, **kwargs):
+            if path == lockfile and failure == "error":
+                raise RuntimeError("synthetic fetch failure")
+            return (
+                None
+                if path == lockfile
+                else await super().file_content(owner, repo, path, branch, **kwargs)
+            )
+
+    with pytest.raises(IndexingRecoveryPending):
+        await _run(
+            index_diff,
+            new,
+            LockfileFetcher({lockfile: "{}"}),
+            Model("NEW", []),
+            changed_paths=[lockfile],
+        )
+    assert new.claim_index_run().needs_reconciliation
+
+
 def test_postgres_status_and_conventions_share_index_transaction(postgres_url):
     from mira.dashboard.db import AppDatabase
 

@@ -14,7 +14,7 @@ import os
 from collections import defaultdict
 from collections.abc import Iterable
 
-from mira.index.manifests import _is_lockfile_path
+from mira.index.manifests import _NPM_VERSION, _is_lockfile_path
 from mira.security.osv import (
     PackageQuery,
     osv_ecosystem,
@@ -34,11 +34,31 @@ def _prefer_resolved(rows: list[dict]) -> list[dict]:
     def identity(row: dict) -> tuple[str, str, str, str]:
         return row["owner"], row["repo"], row["kind"], row["name"].lower()
 
-    locked_npm = {
-        identity(r)
-        for r in rows
-        if r["kind"] == "npm" and _is_lockfile_path(r.get("file_path", ""))
-    }
+    def directory(row: dict) -> str:
+        return row.get("file_path", "").rpartition("/")[0]
+
+    # Directories whose lockfile locks each npm package. Scan-ineligible lock
+    # rows count too: they say the dependency resolved to a non-registry
+    # source, so the manifest beside them must not be scanned either.
+    locked_npm: dict[tuple[str, str, str, str], set[str]] = defaultdict(set)
+    for r in rows:
+        if r["kind"] == "npm" and _is_lockfile_path(r.get("file_path", "")):
+            locked_npm[identity(r)].add(directory(r))
+
+    def npm_manifest_superseded(row: dict) -> bool:
+        lock_dirs = locked_npm.get(identity(row))
+        if not lock_dirs:
+            return False
+        if not _NPM_VERSION.fullmatch(row.get("version", "")):
+            # A constraint like ``^1.0.0`` would match too broadly at OSV.
+            # Any lockfile that resolves the package says more about it.
+            return True
+        # An exact version is only superseded by a lockfile that covers this
+        # manifest: one in its own directory or an enclosing workspace root.
+        # A lockfile of an unrelated project in the same repo does not.
+        own = directory(row)
+        return any(not d or own == d or own.startswith(d + "/") for d in lock_dirs)
+
     by_key: dict[tuple[str, str, str, str], list[dict]] = {}
     for r in rows:
         # Case-insensitive on name — PyPI normalises `PyJWT`/`pyjwt`/`PyJwt`
@@ -47,14 +67,19 @@ def _prefer_resolved(rows: list[dict]) -> list[dict]:
         key = identity(r)
         if not r.get("scan_eligible", True):
             continue
-        if key in locked_npm and not _is_lockfile_path(r.get("file_path", "")):
+        lockfile_row = _is_lockfile_path(r.get("file_path", ""))
+        if r["kind"] == "npm" and not lockfile_row and npm_manifest_superseded(r):
             continue
         existing = by_key.get(key)
         if existing is None:
             by_key[key] = [r]
             continue
         if r["kind"] == "npm":
-            if key in locked_npm and all(prior["version"] != r["version"] for prior in existing):
+            # Keep every distinct exact version; OSV queries are deduplicated
+            # by (package, version) later, after this per-repo selection.
+            if (lockfile_row or key in locked_npm) and all(
+                prior["version"] != r["version"] for prior in existing
+            ):
                 existing.append(r)
             continue
         # Prefer the row coming from a lockfile path. If both or neither are
